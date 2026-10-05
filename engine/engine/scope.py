@@ -50,7 +50,8 @@ def _match(pattern, host):
 
 class Scope:
     def __init__(self, in_scope, out_of_scope=None, seeds=None, name="engagement",
-                 user_agent="", endpoints=None, roe_extra="", skip_param_mining=False):
+                 user_agent="", endpoints=None, roe_extra="", skip_param_mining=False,
+                 proxy="", impersonate=""):
         self.in_scope = [p for p in (in_scope or []) if p.strip()]
         self.out_of_scope = [p for p in (out_of_scope or []) if p.strip()]
         self.seeds = seeds or []
@@ -59,6 +60,8 @@ class Scope:
         self.endpoints = endpoints or []            # documented API routes for path-scoped programs
         self.roe_extra = roe_extra or ""            # extra rules-of-engagement text (program-specific)
         self.skip_param_mining = bool(skip_param_mining)  # True => no gau/katana crawl (scanner-forbidden)
+        self.proxy = proxy or ""                    # egress proxy for edge-gated hosts (IP/geo filtered)
+        self.impersonate = impersonate or ""        # curl_cffi TLS profile (e.g. safari_ios) via netget
 
     @classmethod
     def load(cls, path):
@@ -67,7 +70,8 @@ class Scope:
         return cls(d.get("in_scope", []), d.get("out_of_scope", []),
                    d.get("seeds", []), d.get("name", "engagement"),
                    user_agent=d.get("user_agent", ""), endpoints=d.get("endpoints", []),
-                   roe_extra=d.get("roe_extra", ""), skip_param_mining=d.get("skip_param_mining", False))
+                   roe_extra=d.get("roe_extra", ""), skip_param_mining=d.get("skip_param_mining", False),
+                   proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""))
 
     def in_scope_host(self, target):
         host = _host_of(target)

@@ -31,12 +31,25 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 def _ua():
     return os.environ.get("HUNT_USER_AGENT") or _UA
 
+
+def _impersonating():
+    # edge-gated target: route recon through netget (curl_cffi TLS fingerprint + egress proxy)
+    return bool(os.environ.get("HUNT_IMPERSONATE") or os.environ.get("HUNT_PROXY"))
+
+
+def _get_impersonate(url, timeout=20):
+    import netget
+    _code, text, hdrs = netget.get(url, timeout=timeout)
+    return text, url, {k: v for k, v in (hdrs or {}).items() if not k.startswith("_")}
+
 try:
     import requests
     _SESS = requests.Session()
     _SESS.headers["User-Agent"] = _UA
 
     def _get(url, timeout=20):
+        if _impersonating():
+            return _get_impersonate(url, timeout)
         try:
             r = _SESS.get(url, timeout=timeout, allow_redirects=True, headers={"User-Agent": _ua()})
             return r.text, r.url, {k.lower(): v for k, v in r.headers.items()}
@@ -47,6 +60,8 @@ except ImportError:                          # stdlib fallback
     import urllib.request
 
     def _get(url, timeout=20):
+        if _impersonating():
+            return _get_impersonate(url, timeout)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": _ua(), "Accept-Encoding": "gzip"})
             r = urllib.request.urlopen(req, timeout=timeout)

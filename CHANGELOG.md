@@ -12,6 +12,9 @@ All notable changes to the 0xRay Hunt Harness. Format based on
   - `endpoints` — documented API routes seeded directly into the hunt worklist (when recon can't crawl).
   - `roe_extra` — program-specific rules appended to the ROE.
   - `skip_param_mining` — disable gau/katana crawling for "no automated scanners" programs.
+  - `proxy` + `impersonate` — route recon AND the hunt agent through an egress proxy with a curl_cffi
+    TLS fingerprint (new `netget` helper) for targets whose edge resets by source-IP / TLS (e.g. a mobile
+    API that only accepts its app's origin). The agent is instructed to use `netget` instead of curl.
 
 ## [0.4.0] - 2026-10-05
 ### Added

@@ -69,6 +69,10 @@ class Engine:
         self.base = base
         if getattr(self.scope, "user_agent", "") and not os.environ.get("HUNT_USER_AGENT"):
             os.environ["HUNT_USER_AGENT"] = self.scope.user_agent   # per-target SOC tag for recon + agent
+        if getattr(self.scope, "proxy", "") and not os.environ.get("HUNT_PROXY"):
+            os.environ["HUNT_PROXY"] = self.scope.proxy             # per-target egress proxy (edge-gated hosts)
+        if getattr(self.scope, "impersonate", "") and not os.environ.get("HUNT_IMPERSONATE"):
+            os.environ["HUNT_IMPERSONATE"] = self.scope.impersonate  # curl_cffi TLS profile (e.g. safari_ios)
         self.model, self.max_hunts = model, max_hunts
         self.max_turns, self.timeout, self.mock = max_turns, timeout, mock
         self.allow_intrusive = allow_intrusive
@@ -90,6 +94,12 @@ class Engine:
             roe += (f"- MANDATORY USER-AGENT: EVERY HTTP request (curl and any tool) MUST send "
                     f"'User-Agent: {self.scope.user_agent}' (e.g. curl -A '<UA>'). It tags traffic for the "
                     "client SOC; an untagged request violates the program rules.\n")
+        if getattr(self.scope, "proxy", "") or getattr(self.scope, "impersonate", ""):
+            roe += (f"- EDGE-GATED TARGET: plain curl/wget is RESET by the edge (source-IP / TLS gating). For "
+                    f"EVERY request to this target use the harness fetch helper INSTEAD of curl:\n"
+                    f"    python3 {ENGINE_DIR}/netget.py GET \"<url>\"      (POST: netget.py POST \"<url>\" '<body>')\n"
+                    "  It carries the allowed egress proxy, the required TLS fingerprint, and the mandatory UA. "
+                    "Raw curl will only return connection resets here.\n")
         if getattr(self.scope, "roe_extra", ""):
             roe += self.scope.roe_extra.rstrip() + "\n"
         if not self.allow_intrusive:
