@@ -389,7 +389,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"added": added, "supplied": len(items)})
 
             if p.path == "/notify":
-                ok = NO.send_safe(b.get("subject", "(no subject)"), b.get("body", ""), to=b.get("to"))
+                ok = NO.send_safe(b.get("subject", "(no subject)"), b.get("body", ""),
+                                  to=b.get("to"), cc=b.get("cc"), html=b.get("html"))
                 return self._send(200, {"sent": ok, "configured": NO.configured()})
 
             if p.path == "/hunt":

@@ -13,6 +13,8 @@ Env:
   SMTP_PASS        login password / app-password / API key
   SMTP_FROM        From address (falls back to SMTP_USER)
   SMTP_TO          default recipient(s), comma-separated
+  SMTP_CC          default Cc recipient(s), comma-separated (optional)
+  SMTP_BCC         default Bcc recipient(s), comma-separated (optional)
   SMTP_TLS         starttls (default) | ssl | none
 
 CLI:
@@ -60,7 +62,8 @@ def cfg():
         "host": g("SMTP_HOST", ""), "port": int(g("SMTP_PORT", "587") or 587),
         "user": g("SMTP_USER", ""), "pass": g("SMTP_PASS", ""),
         "from": g("SMTP_FROM", "") or g("SMTP_USER", "") or "hunt-harness@localhost",
-        "to": g("SMTP_TO", ""), "tls": (g("SMTP_TLS", "starttls") or "starttls").lower(),
+        "to": g("SMTP_TO", ""), "cc": g("SMTP_CC", ""), "bcc": g("SMTP_BCC", ""),
+        "tls": (g("SMTP_TLS", "starttls") or "starttls").lower(),
     }
 
 
@@ -69,27 +72,36 @@ def configured(c=None):
     return bool(c["host"] and c["to"])
 
 
-def build(subject, body, to=None, c=None, html=None):
+def build(subject, body, to=None, c=None, html=None, cc=None, bcc=None):
     c = c or cfg()
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = c["from"]
     msg["To"] = to or c["to"]
+    cc = c.get("cc", "") if cc is None else cc
+    bcc = c.get("bcc", "") if bcc is None else bcc
+    if cc:
+        msg["Cc"] = cc
+    if bcc:
+        msg["Bcc"] = bcc                             # send_message delivers to Bcc, then strips the header
     msg.set_content(body or "")
     if html:
         msg.add_alternative(html, subtype="html")   # multipart/alternative: clients prefer the HTML
     return msg
 
 
-def send(subject, body, to=None, c=None, html=None):
-    """Send mail. Returns True on success, False if not configured (dry-run). Raises on real SMTP errors."""
+def send(subject, body, to=None, c=None, html=None, cc=None, bcc=None):
+    """Send mail. Returns True on success, False if not configured (dry-run). Raises on real SMTP errors.
+    Cc/Bcc default to SMTP_CC / SMTP_BCC from the env, so every send honors them from one place."""
     c = c or cfg()
     recipient = to or c["to"]
-    if not (c["host"] and recipient):
+    cc = c.get("cc", "") if cc is None else cc
+    bcc = c.get("bcc", "") if bcc is None else bcc
+    if not (c["host"] and (recipient or cc or bcc)):
         print(f"[notify] DRY-RUN (SMTP not configured) — would send: {subject!r} -> {recipient or '(no SMTP_TO)'}",
               file=sys.stderr)
         return False
-    msg = build(subject, body, to=recipient, c=c, html=html)
+    msg = build(subject, body, to=recipient, c=c, html=html, cc=cc, bcc=bcc)
     ctx = ssl.create_default_context()
     if c["tls"] == "ssl":
         srv = smtplib.SMTP_SSL(c["host"], c["port"], context=ctx, timeout=25)
@@ -109,10 +121,10 @@ def send(subject, body, to=None, c=None, html=None):
     return True
 
 
-def send_safe(subject, body, to=None, html=None):
+def send_safe(subject, body, to=None, html=None, cc=None, bcc=None):
     """Never raises — for use inside the hunt loop. Returns True/False."""
     try:
-        return send(subject, body, to=to, html=html)
+        return send(subject, body, to=to, html=html, cc=cc, bcc=bcc)
     except Exception as e:  # noqa: BLE001
         print(f"[notify] send failed (non-fatal): {type(e).__name__}: {e}", file=sys.stderr)
         return False
@@ -216,6 +228,11 @@ def _cmd_selftest(_a):
     # offline: message builds correctly, and dry-run returns False without raising
     m = build("S", "B", to="x@y.z", c={"from": "a@b.c", "to": "x@y.z"})
     assert m["Subject"] == "S" and m["To"] == "x@y.z" and "B" in m.get_content()
+    # Cc: an explicit arg sets the header, and a cfg default (SMTP_CC) applies when the caller passes none
+    assert build("S", "B", to="x@y.z", cc="cc@y.z",
+                 c={"from": "a@b.c", "to": "x@y.z"})["Cc"] == "cc@y.z", "explicit Cc must set header"
+    assert build("S", "B",
+                 c={"from": "a@b.c", "to": "x@y.z", "cc": "def@y.z"})["Cc"] == "def@y.z", "default SMTP_CC must apply"
     saved = {k: os.environ.pop(k, None) for k in ("SMTP_HOST", "SMTP_TO")}
     try:
         assert send("s", "b") is False                      # unconfigured => dry-run, no raise

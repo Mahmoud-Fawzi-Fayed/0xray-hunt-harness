@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# 0xRay pre-push gate — the same checks CI would run, but local and billing-free.
+# Install once with:  make hooks   (sets git config core.hooksPath .githooks)
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+echo "[pre-push] secret-scan…"
+make --no-print-directory secret-scan
+echo "[pre-push] skills-lint…"
+make --no-print-directory skills-lint >/dev/null && echo "skills-lint: ok"
+echo "[pre-push] OK"

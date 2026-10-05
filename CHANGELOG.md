@@ -3,6 +3,20 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.3.0] - 2026-10-05
+### Fixed
+- **Email CC now works.** `notify.py` never read `SMTP_CC`, so Cc recipients were silently dropped on
+  every email (findings, status, monitor alerts). `cfg`/`build`/`send`/`send_safe` now honor
+  `SMTP_CC` (and a new `SMTP_BCC`) from one place; the bridge `/notify` also accepts `cc`/`html`.
+- **n8n "Send Email credentials not set".** The novelty-monitor's `emailSend` node (which needed a
+  manually-created n8n SMTP credential) is replaced by an `httpRequest` to the bridge `/notify`. No
+  n8n credential is required; recipients come from `.env`, so an edit there reflects everywhere at once.
+
+### Changed
+- CI is now **manual** (`workflow_dispatch`) — GitHub Actions requires account billing; the same gates
+  run locally via `make secret-scan` / `make skills-lint`, or a `make hooks` pre-push hook.
+- `.env.example` documents `SMTP_CC` / `SMTP_BCC`; `import-workflow.sh` note updated (no creds needed).
+
 ## [0.2.0] - 2026-10-05
 ### Added
 - **Full engine vendored from the live working tree** — previously only the engine's committed

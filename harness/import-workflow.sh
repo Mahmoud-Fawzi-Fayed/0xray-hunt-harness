@@ -11,4 +11,4 @@ sed "s|__HUNT_BRIDGE_TOKEN__|${HUNT_BRIDGE_TOKEN}|g; s|__HUNT_BRIDGE_URL__|${HUN
 docker cp "$TMP/wf.json" hunt-n8n:/tmp/wf.json
 docker exec hunt-n8n n8n import:workflow --input=/tmp/wf.json
 rm -rf "$TMP"
-echo "imported $(basename "$SRC") -> hunt-n8n (inactive; add SMTP creds + activate in the UI to enable email)"
+echo "imported $(basename "$SRC") -> hunt-n8n (inactive). Email goes via the host bridge /notify using SMTP_* from .env — no n8n credential needed. Activate the workflow in the UI to enable the schedule."

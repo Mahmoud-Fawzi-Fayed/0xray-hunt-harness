@@ -4,7 +4,7 @@ HARNESS := harness
 ENGINE  := engine
 
 .DEFAULT_GOAL := help
-.PHONY: help setup n8n-up n8n-down import bridge selfcheck e2e skills-lint secret-scan
+.PHONY: help setup hooks n8n-up n8n-down import bridge selfcheck e2e skills-lint secret-scan
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -14,6 +14,11 @@ setup: ## Create harness/.env from the example (then edit it)
 	@if [ -f $(HARNESS)/.env ]; then echo "$(HARNESS)/.env already exists"; else \
 	  cp $(HARNESS)/.env.example $(HARNESS)/.env && chmod 600 $(HARNESS)/.env && \
 	  echo "created $(HARNESS)/.env — set HUNT_BRIDGE_TOKEN, SMTP_*, model pool"; fi
+
+hooks: ## Install the git pre-push hook (local CI: secret-scan + skills-lint, no Actions billing)
+	git config core.hooksPath .githooks
+	@chmod +x .githooks/* 2>/dev/null || true
+	@echo "git hooks installed (core.hooksPath=.githooks)"
 
 n8n-up: ## Start the hunting n8n container
 	cd $(HARNESS) && docker compose -f docker-compose.hunt-n8n.yml --env-file .env up -d

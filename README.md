@@ -100,7 +100,7 @@ Run `make` with no target for the full list.
 4. **Hunt** — Cursor agents test each `(endpoint, class)` with the matching skill, curl-first, and only claim a vuln with **demonstrated impact** (never reflection/error-only).
 5. **Validate** — an adversarial second pass; defaults to false-positive unless proven.
 6. **Dedup gate** — every confirmed finding is scored; `LIKELY_DUP` is held, `NOVEL`/`REVIEW` is drafted.
-7. **STOP** — drafts + an `approval.md` are written and the finding is **published + emailed**. Nothing is submitted.
+7. **STOP** — drafts + an `approval.md` are written and the finding is **published + emailed** (to `SMTP_TO`, Cc `SMTP_CC` from `.env` — set once, honored everywhere). Nothing is submitted.
 
 Hunting rotates **only** across the approved pool in `CURSOR_HUNT_MODELS`; an off-pool model can never
 be used (enforced in code).
@@ -199,8 +199,10 @@ make skills-lint   # frontmatter, naming, secret + client-identifier scan over a
 make secret-scan   # fail if obvious secrets are present in the tree
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs **secret-scan** and **skills-lint**
-on every push and pull request.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs **secret-scan** and **skills-lint**.
+GitHub Actions needs billing enabled on the account; while it's off the workflow is **manual**
+(`workflow_dispatch`) so pushes never show a failed run. Run the same gates locally with `make`,
+or install them as a pre-push hook once: `make hooks`.
 
 ## Project docs
 

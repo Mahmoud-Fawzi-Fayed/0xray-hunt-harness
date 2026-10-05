@@ -1,8 +1,18 @@
+# CI gates for the harness.
+#
+# NOTE: GitHub Actions must be enabled + funded on the account to run. If the account's
+# Actions billing/spend-limit is off, jobs will NOT start ("startup failure") — that is an
+# account setting, not a code failure. So this workflow is MANUAL (workflow_dispatch) and
+# never runs on push, which keeps the repo free of spurious red runs.
+#
+# Run the SAME gates locally (no Actions, no billing):
+#     make secret-scan && make skills-lint
+# or install them as a git pre-push hook once:
+#     make hooks
 name: ci
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   secret-scan:

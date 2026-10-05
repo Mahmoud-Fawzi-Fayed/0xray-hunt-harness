@@ -4,13 +4,23 @@
   "nodes": [
     {
       "parameters": {
-        "rule": { "interval": [ { "field": "hours", "hoursInterval": 6 } ] }
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
       },
       "id": "a1111111-1111-4111-8111-111111111111",
       "name": "Every 6h",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -20,7 +30,10 @@
       "name": "Targets",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [
+        460,
+        300
+      ]
     },
     {
       "parameters": {
@@ -28,29 +41,47 @@
         "url": "__HUNT_BRIDGE_URL__/novelty/watch",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [ { "name": "X-Hunt-Token", "value": "__HUNT_BRIDGE_TOKEN__" } ]
+          "parameters": [
+            {
+              "name": "X-Hunt-Token",
+              "value": "__HUNT_BRIDGE_TOKEN__"
+            }
+          ]
         },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ target: $json.target }) }}",
-        "options": { "timeout": 180000 }
+        "options": {
+          "timeout": 180000
+        }
       },
       "id": "a3333333-3333-4333-8333-333333333333",
       "name": "Bridge: novelty/watch",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [680, 300]
+      "position": [
+        680,
+        300
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c1",
               "leftValue": "={{ $json.has_changes }}",
               "rightValue": "",
-              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -61,31 +92,92 @@
       "name": "Changed?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [900, 300]
+      "position": [
+        900,
+        300
+      ]
     },
     {
       "parameters": {
-        "fromEmail": "hunt-monitor@localhost",
-        "toEmail": "CHANGE_ME@example.com",
-        "subject": "=[hunt] new surface on {{ $json.target }}",
-        "emailFormat": "text",
-        "text": "={{ ($json.summary || []).join('\\n') }}\n\nCounts: {{ JSON.stringify($json.counts) }}\nFull diff in the host alerts feed: ~/.bughunter-engagements/_alerts/feed.jsonl",
-        "options": {}
+        "method": "POST",
+        "url": "__HUNT_BRIDGE_URL__/notify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Hunt-Token",
+              "value": "__HUNT_BRIDGE_TOKEN__"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ subject: '[hunt] new surface on ' + $json.target, body: 'Changes: ' + ($json.summary || []).join('; ') + '  |  Counts: ' + JSON.stringify($json.counts) }) }}",
+        "options": {
+          "timeout": 30000
+        }
       },
       "id": "a5555555-5555-4555-8555-555555555555",
-      "name": "Email alert",
-      "type": "n8n-nodes-base.emailSend",
-      "typeVersion": 2.1,
-      "position": [1140, 220]
+      "name": "Email alert (via bridge)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        220
+      ],
+      "notes": "Sends via the host bridge /notify -> engine notify.py. Uses SMTP_TO/SMTP_CC from .env. No n8n credential needed."
     }
   ],
   "connections": {
-    "Every 6h": { "main": [ [ { "node": "Targets", "type": "main", "index": 0 } ] ] },
-    "Targets": { "main": [ [ { "node": "Bridge: novelty/watch", "type": "main", "index": 0 } ] ] },
-    "Bridge: novelty/watch": { "main": [ [ { "node": "Changed?", "type": "main", "index": 0 } ] ] },
-    "Changed?": { "main": [ [ { "node": "Email alert", "type": "main", "index": 0 } ], [] ] }
+    "Every 6h": {
+      "main": [
+        [
+          {
+            "node": "Targets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Targets": {
+      "main": [
+        [
+          {
+            "node": "Bridge: novelty/watch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bridge: novelty/watch": {
+      "main": [
+        [
+          {
+            "node": "Changed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Changed?": {
+      "main": [
+        [
+          {
+            "node": "Email alert (via bridge)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
+  "settings": {
+    "executionOrder": "v1"
+  },
   "pinData": {}
 }
