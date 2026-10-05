@@ -119,7 +119,9 @@ be used (enforced in code).
 
 `orchestrator` · `bridge` · `agent` · `recon` · `osint` · `scope` · `scopefetch` · `targets` ·
 `novelty` · `jsdiff` · `observe` · `yieldrank` · `skill_map` · `dedup` · `guardrails` · `identity` ·
-`sms` · `authsession` · `websearch` · `learn` · `notify` · `state` · `engine`
+`sms` · `authsession` · `websearch` · `learn` · `notify` · `state` · `engine` ·
+`netget` (impersonation/proxy fetch) · `authn` (sessions A/B) · `authz` (IDOR/BOLA diff) ·
+`browser` (headless XHR capture) · `coverage` (coverage+leads) · `apkmap` (APK→API surface)
 
 Helpers: [`engine/scripts/`](engine/scripts/) (`selfcheck`, `e2e`, `watchdog`, `lint_skills`) and
 the operator commands under [`engine/commands/`](engine/commands/). The engine is vendored from

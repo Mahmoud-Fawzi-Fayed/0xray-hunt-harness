@@ -33,13 +33,14 @@ def _ua():
 
 
 def _impersonating():
-    # edge-gated target: route recon through netget (curl_cffi TLS fingerprint + egress proxy)
-    return bool(os.environ.get("HUNT_IMPERSONATE") or os.environ.get("HUNT_PROXY"))
+    # route recon through netget when: edge-gated (TLS/proxy) OR an authenticated identity is set
+    return bool(os.environ.get("HUNT_IMPERSONATE") or os.environ.get("HUNT_PROXY")
+                or os.environ.get("HUNT_RECON_IDENT"))
 
 
 def _get_impersonate(url, timeout=20):
     import netget
-    _code, text, hdrs = netget.get(url, timeout=timeout)
+    _code, text, hdrs = netget.get(url, timeout=timeout, ident=os.environ.get("HUNT_RECON_IDENT") or None)
     return text, url, {k: v for k, v in (hdrs or {}).items() if not k.startswith("_")}
 
 try:

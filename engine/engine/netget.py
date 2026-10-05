@@ -27,12 +27,22 @@ def _cfg():
             os.environ.get("HUNT_PROXY") or "")
 
 
-def get(url, method="GET", data=None, headers=None, timeout=25):
-    """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error'])."""
+def get(url, method="GET", data=None, headers=None, timeout=25, ident=None, slug=None):
+    """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
+    ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
     ua, imp, proxy = _cfg()
     h = dict(headers or {})
     if ua:
         h.setdefault("User-Agent", ua)
+    if ident:
+        try:
+            import authn
+            af = os.environ.get("HUNT_AUTH_FILE")
+            sslug = slug or os.environ.get("HUNT_TARGET_SLUG")
+            for k, v in authn.headers_for(ident, slug_or_path=(af or sslug)).items():
+                h.setdefault(k, v)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         from curl_cffi import requests as cr
     except Exception as e:  # noqa: BLE001
@@ -48,13 +58,23 @@ def get(url, method="GET", data=None, headers=None, timeout=25):
 
 
 def _main(argv):
-    if not argv:
-        print("usage: netget.py <METHOD> <URL> [body]", file=sys.stderr)
+    ident = slug = None
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--as", "--ident") and i + 1 < len(argv):
+            ident = argv[i + 1]; i += 2; continue
+        if a == "--slug" and i + 1 < len(argv):
+            slug = argv[i + 1]; i += 2; continue
+        pos.append(a); i += 1
+    if not pos:
+        print("usage: netget.py <METHOD> <URL> [body] [--as A|B] [--slug <target>]", file=sys.stderr)
         return 2
-    if len(argv) == 1:
-        method, url, body = "GET", argv[0], None
+    if len(pos) == 1:
+        method, url, body = "GET", pos[0], None
     else:
-        method, url, body = argv[0], argv[1], (argv[2] if len(argv) > 2 else None)
+        method, url, body = pos[0], pos[1], (pos[2] if len(pos) > 2 else None)
     hdrs = {}
     if body:
         try:
@@ -62,7 +82,7 @@ def _main(argv):
             hdrs["Content-Type"] = "application/json"
         except ValueError:
             pass
-    code, text, h = get(url, method=method, data=body, headers=hdrs)
+    code, text, h = get(url, method=method, data=body, headers=hdrs, ident=ident, slug=slug)
     err = h.get("_error")
     print(f"HTTP {code}" + (f"  [transport error: {err}]" if err else ""))
     for k in ("server", "content-type", "content-length", "www-authenticate", "location", "set-cookie"):

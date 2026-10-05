@@ -73,6 +73,14 @@ class Engine:
             os.environ["HUNT_PROXY"] = self.scope.proxy             # per-target egress proxy (edge-gated hosts)
         if getattr(self.scope, "impersonate", "") and not os.environ.get("HUNT_IMPERSONATE"):
             os.environ["HUNT_IMPERSONATE"] = self.scope.impersonate  # curl_cffi TLS profile (e.g. safari_ios)
+        try:                                                        # authenticated recon when a session exists
+            import authn as _AN
+            if _AN.configured(self.scope.name, self.base):
+                os.environ.setdefault("HUNT_TARGET_SLUG", _AN._slug(self.scope.name))
+                os.environ.setdefault("HUNT_AUTH_FILE", _AN.path_for(self.scope.name, self.base))
+                os.environ.setdefault("HUNT_RECON_IDENT", "A")      # recon + agent reach behind-login surface
+        except Exception:  # noqa: BLE001
+            pass
         self.model, self.max_hunts = model, max_hunts
         self.max_turns, self.timeout, self.mock = max_turns, timeout, mock
         self.allow_intrusive = allow_intrusive
@@ -102,6 +110,19 @@ class Engine:
                     "Raw curl will only return connection resets here.\n")
         if getattr(self.scope, "roe_extra", ""):
             roe += self.scope.roe_extra.rstrip() + "\n"
+        try:
+            import authn as _AN
+            _ids = _AN.identities(self.scope.name, self.base)
+        except Exception:  # noqa: BLE001
+            _ids = []
+        if _ids:
+            roe += (f"- AUTHENTICATED SESSIONS available: {', '.join(_ids)}. Reach the behind-login surface with the "
+                    f"fetch helper: `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A`.\n")
+            if "B" in _ids:
+                roe += (f"  TWO accounts → hunt IDOR/BOLA (OWASP #1): get an object id as A, request it as B, diff. "
+                        f"Automate the sweep: `python3 {ENGINE_DIR}/authz.py diff --slug {_AN._slug(self.scope.name)} "
+                        f"--url \"<A-owned url>\"` — confirm any bola_suspect with a real two-account PoC before drafting.\n")
+            roe += "  Prefer authenticated testing — the paid bugs (IDOR/BOLA, business logic, GraphQL authz) are behind login.\n"
         if not self.allow_intrusive:
             roe += ("- READ-ONLY / NON-DESTRUCTIVE: do NOT perform any state-changing or intrusive action — no sending "
                     "emails, no writes/updates/deletes, no cache purge/revalidate, no account creation, no spam, no "
@@ -417,6 +438,15 @@ class Engine:
             f"  (phone-gated signups: SMS is {sms_state}.)\n"
             f"- Unknown stack/class with no skill? Teach the harness, then read what it drafted: "
             f"`python3 {e}/learn.py auto --kind tech --name \"<thing>\" --context \"<why>\"`.\n"
+            f"- Headless-browser capture (find the REAL API behind a SPA — biggest discovery win): "
+            f"`python3 {e}/browser.py capture --url <seed> --slug {p} [--as A] --scope <in-scope-host>` -> "
+            f"XHR/fetch/GraphQL endpoints, then test those.\n"
+            f"- Authenticated fetch (carries your session, bypasses edge TLS/IP gating): "
+            f"`python3 {e}/netget.py GET \"<url>\" --as A` (second account: `--as B`).\n"
+            f"- IDOR/BOLA sweep (OWASP #1, best-paying): `python3 {e}/authz.py diff --slug {p} --url \"<A-owned url>\"` "
+            f"-> bola_suspect leads; confirm each with a real two-account PoC.\n"
+            f"- App-backed program (esp. geo/IP-gated API)? Pull the API surface from the APK: "
+            f"`python3 {e}/apkmap.py extract --apk <file>` -> hosts + endpoints + secrets.\n"
             "- All account/login/SMS actions pass engine/guardrails.py (scope + per-program cap) and are audited.\n")
 
     def _hunt_agent(self, it):

@@ -3,6 +3,25 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.6.0] - 2026-10-05
+### Added — authenticated & advanced hunting (the "find more bugs" upgrade)
+- **Authenticated sessions** (`authn.py`): per-target operator-provided sessions (cookie/bearer/headers)
+  with two identities **A + B**, stored outside the repo (`<base>/_auth/<slug>.json`). Recon and the agent
+  reach the behind-login surface via `netget … --as A/B`.
+- **Cross-account IDOR/BOLA diff** (`authz.py`): replay a request as A vs B and flag where B reads
+  A-owned data — triage for OWASP #1 (Broken Access Control), the best-paying class. Read-only; two-account
+  PoC still required before drafting.
+- **Headless-browser capture** (`browser.py`, Playwright): render a SPA (optionally authenticated) and
+  capture the **real XHR/fetch/GraphQL API** that curl-based recon misses — the biggest discovery win.
+- **Coverage matrix + leads** (`coverage.py`): per-class tested/total + an interesting-leads queue, so
+  "0 findings" is backed by visible coverage instead of a black box.
+- **APK → API surface** (`apkmap.py`, jadx/apktool): pull hosts/endpoints/secrets from an app even when
+  the live API is geo/IP-gated (e.g. meleclerc).
+- Engine wiring: authenticated recon when a session exists; the agent ROE + capabilities now surface
+  `netget --as`, `browser.py`, `authz.py`, `apkmap.py`, and the two-account IDOR workflow. All additive +
+  guarded (other targets unchanged); everything stays per-target/dynamic (no hardcoding).
+- `selfcheck` extended to **66/66** (adds authn/authz/coverage/apkmap selftests).
+
 ## [0.5.0] - 2026-10-05
 ### Added
 - Engine support for **path-scoped API programs** (e.g. a mobile backend with documented routes on one

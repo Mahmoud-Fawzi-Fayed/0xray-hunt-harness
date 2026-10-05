@@ -272,7 +272,8 @@ def _run_selftest(mod, arg=True):
     r = subprocess.run(args, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, (r.stdout[-400:] + r.stderr[-400:])
 for _m in ("dedup", "novelty", "jsdiff", "yieldrank", "orchestrator", "notify", "scopefetch", "targets",
-           "guardrails", "websearch", "identity", "sms", "learn", "authsession"):
+           "guardrails", "websearch", "identity", "sms", "learn", "authsession",
+           "authn", "authz", "coverage", "apkmap"):
     case(f"selftest: {_m}", lambda m=_m: _run_selftest(m, True))
 for _m in ("agent", "state"):
     case(f"selftest: {_m}", lambda m=_m: _run_selftest(m, False))
