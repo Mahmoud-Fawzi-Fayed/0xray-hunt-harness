@@ -1,0 +1,52 @@
+---
+description: YesWeHack triager-grade report discipline — evidence-only claims, per-class PoC minimums, no inflated impact. Applies to all hunting and report writing in this workspace.
+alwaysApply: true
+---
+
+# Triager-Grade Hunting & Reporting (YesWeHack standard)
+
+Source: yeswehack.com/learn-bug-bounty/triager-grade-reports-claude-code
+
+## Core principle
+
+**Draft from verified facts, never over the gaps.** Every claim in a report must be backed by evidence already captured (URL, payload, response). If a fact is missing, ask for it or state what would prove it — never invent one. The hunter is the author; every sentence must survive a triager.
+
+## Forbidden behaviors (get reports rejected)
+
+- Inventing facts about a target (endpoints, versions, behavior not observed).
+- Theoretical impact ("attacker could...", "mass breach") not demonstrated in the PoC.
+- Inflated severity beyond what the proof supports.
+- Boilerplate padding — generic impact paragraphs, filler remediation text.
+- Validating a lead that isn't proven — suspicious behavior gets "not yet a bug, here's what would prove it", never a green light.
+- Destructive post-exploitation to "show reach" (DB dumps, DoS bursts, fork bombs). Prove the primitive and STOP — this breaks program rules and gets hunters penalized.
+
+## Workflow discipline
+
+1. **Investigate**: mark unproven leads as unproven. State the exact evidence that would confirm them.
+2. **Write**: structure from real notes only (endpoint, request, payload, response). Flag missing sections instead of filling gaps.
+3. **Triage before submit**: self-verdict — READY / NEEDS FIXES / DO NOT SUBMIT. Check every claim against the program scope. If a claim can't be defended, cut the line.
+
+## Per-class PoC minimums & auto-close traps
+
+| Class | Minimum PoC proof | Auto-close / overclaim trap |
+|---|---|---|
+| XSS | Executed in victim context (real payload + where it fires) | Claiming account takeover without session/cookie theft proof |
+| CORS | Reflected origin + `Access-Control-Allow-Credentials: true` + sensitive data + PoC page that reads a victim's response | `ACAO: *` without credentials flag = NOT a finding |
+| Race condition | Broken invariant **persisted in state** (e.g. discount survives to charged amount at checkout, not just in cart response) | Several fast 200s ≠ race. Never scale a burst into DoS to "prove" impact |
+| IDOR | Actual cross-account read/write shown | Non-guessable UUIDv4 = AC:H (not AC:L). Mass-exploitation claims need a demonstrated way to obtain other users' IDs |
+| SSRF | Response body proving the internal request (e.g. cloud metadata body) | DNS resolution only proves a lookup, not a request. "Metadata access" without the body = speculation |
+| Open redirect | Working redirect; chained impact (OAuth token theft) must be reproduced end-to-end | Chain you can't reproduce without a victim account = theoretical, non-reproducible — report only what you prove |
+| Info disclosure / leaked keys | Key is valid AND you show what it unlocks | Public publishable keys (Google Maps browser keys, Firebase config, Stripe `pk_`) are NOT findings |
+| SQLi | Extracted data or clear DBMS behavior difference | Error message alone ≠ injection confirmed |
+| SSTI vs CSTI | Server-side evaluation proven | `{{7*7}}` in Angular = client-side (XSS class), NOT server-side RCE |
+| Path traversal / LFI | Actual file contents returned | 200 on a traversal path without file content ≠ LFI |
+
+## Severity honesty
+
+Score what the evidence supports. Example from YWH: IDOR draft claiming "mass data breach, entire userbase" (CVSS 9.1) with proof of a single cross-account read via random UUIDv4 → defensible score is Medium. State exactly what proof would justify a higher score.
+
+## Report quality bar
+
+- Reproducible: triager can follow the steps and get the same result.
+- Complete persisted state: impact must survive to the real state change (charged amount, stored record, other victim's session) — not just an intermediate response.
+- Claim exactly what was landed: two parallel requests ≠ "unlimited discounts".

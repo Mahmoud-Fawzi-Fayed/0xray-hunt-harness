@@ -1,0 +1,63 @@
+---
+description: Standard operating procedure for bug hunting (0xRay harness). When the user says "hunt <target>" / "hunting on <target>" (any phrasing), follow THIS pipeline — do not hand-roll a different approach.
+alwaysApply: true
+---
+
+# Hunt SOP — always use the 0xRay harness
+
+Engine: `/root/Claude-BugHunter/engine`. Config/secrets: `/root/BugHunting_0xRay/harness/.env`.
+Findings publish to `https://finding.redtracefai.com` + email `x00xrayx00x@gmail.com`. STOP at draft.
+
+## Runtime — Cursor agents only (NOT claude)
+All LLM hunting runs on **Cursor agents** via `cursor-agent` (headless `-p ... --output-format json -f`),
+already logged in on this box. Engine dispatch is `engine/agent.py`; no claude, no API key needed.
+Hunts rotate ONLY across an approved model pool (`CURSOR_HUNT_MODELS` in `.env`): `kimi-k3-max`,
+`cursor-grok-4.6-high`, `grok-4.7-high`, `claude-fable-5-1-high`. One-off override: `CURSOR_HUNT_MODEL`.
+Do not introduce other models without the operator's OK.
+- **In Cursor chat:** YOU drive it + spawn the project subagents (`hunt-orchestrator`, `recon-novelty`,
+  `vuln-hunter`, `dedup-oracle`, `report-drafter`). curl-first, in-scope, read-only by default, no brute force.
+- **Headless 24/7:** `harness/hunt-run.sh` under pm2 → `orchestrator --persist` → `cursor-agent`. Works
+  unattended (cursor-agent is authed); crash-safe + resumes from state.
+- **n8n-triggered:** POST the bridge `/hunt {program}` to auto-run a Cursor hunt on new surface.
+
+## Pipeline (every target, in order)
+1. **Scope** — `python3 engine/targets.py show --program <p>`. If not registered: fetch via the
+   `bb-platforms` MCP (`get_scope` / `get_yeswehack_program`; for private use `login_yeswehack` TOTP,
+   an H1 API token, or the Bugcrowd session) → `scopefetch.py` → `targets.py add`. Hunt ONLY in-scope hosts.
+2. **Novelty first** — `novelty.py watch` (or the monitor): hunt new/changed surface first. On a
+   redeployed JS bundle, run `jsdiff.py` and attack the new endpoints/params/secrets.
+3. **Yield order** — `yieldrank.py rank --tech <stack>`: cover ALL classes, most-findable first.
+4. **Hunt** — walk the matching `hunt-*` skills; prove real impact (never reflection/error-only);
+   honor the discipline rules (unique markers, body-diff, n>=10 timing, OOB for blind). DO NOT STOP
+   early and never report "no vuln" without documented coverage (redteam-mindset).
+5. **Dedup gate** — `dedup.py check` before drafting ANY finding. `LIKELY_DUP` = stop unless you prove
+   a concrete differentiator. `NOVEL` → `/validate`.
+6. **Deliver** — publish the finding page to `finding.redtracefai.com` and email the hunter (via
+   `notify.py` / the bridge `/notify`). **STOP at draft — never submit without explicit approval.**
+
+## Autonomous capabilities (use when a finding needs them — all guardrail-gated)
+The agent may drive these engine tools mid-hunt; every account/login/SMS action passes
+`engine/guardrails.py` (in-scope only · per-program cap `HUNT_MAX_ACCOUNTS`, default 3 · no brute force)
+and is written to the audit trail (`/accounts` endpoint, Capabilities panel).
+- **Web search** — `python3 engine/websearch.py search "<q>"` / `fetch <url>`: confirm a CVE, a stack's
+  known bugs, or a disclosed report BEFORE claiming impact (and to dodge dups).
+- **Test identities (authenticated testing)** — `identity.py new --program <p>` mints a disposable,
+  capped, in-scope-only account with a live mail.tm inbox; `identity.py poll --program <p> --email <a>`
+  reads the verification link/code. Use for IDOR/auth that need users A and B.
+- **Phone / SMS OTP** — `sms.py`: DISABLED unless `SMS_PROVIDER` + `SMS_API_KEY` are set (5sim /
+  sms-activate). Skip phone-gated signups when disabled; never use it to defeat a victim's 2FA.
+- **Self-learning** — hit a stack/class with no skill? `learn.py auto --kind tech --name "<X>"
+  --context "<why>"` researches it and drafts `skills/learned/<x>/SKILL.md`, then READ that file.
+  Lessons + authored skills are logged to the learning journal (`/learn/journal`).
+
+## Testing the harness (run before trusting a change)
+- `python3 scripts/selfcheck.py` — crash/loop/hostile-input gauntlet across every module + live bridge.
+- `python3 scripts/e2e.py` — end-to-end trace of every stage (env→models→bridge→n8n→skills→pipeline→
+  dedup→notify→publish→capabilities→guardrails). `--ping` live-tests each model; `--email`/`--live` opt-in.
+  Mock pipeline uses `HUNT_MOCK_AGENT=1` (no tokens).
+
+## Hard rules
+- In-scope + read-only by default; no brute force (see `no-bruteforce-htb`). Account creation is the only
+  "write" and only on in-scope targets, capped + audited; turn it off per-program with `self_register_ok:false`.
+- Triager-grade only (see `ywh-triager-grade-reports`): claim exactly what was proven.
+- The dedup/novelty discipline (see `dedup-novelty`) is mandatory; duplicates are not submitted.

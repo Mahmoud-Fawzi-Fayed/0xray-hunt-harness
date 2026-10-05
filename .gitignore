@@ -1,0 +1,35 @@
+# Secrets — never commit
+.env
+*.env
+!*.env.example
+harness/.env
+
+# Logs / runtime
+*.log
+logs/
+pm2.log
+
+# Engagement / target working dirs (real-company recon, findings, evidence, PII)
+# These are operational output, NOT part of the harness — keep them out of git.
+engagements/
+findings/
+evidence/
+submissions/
+recon/
+work/
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node / n8n
+node_modules/
+.n8n/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/

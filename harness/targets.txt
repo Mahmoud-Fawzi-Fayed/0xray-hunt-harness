@@ -1,0 +1,3 @@
+# Targets the novelty monitor diffs each run — one apex per line. '#' lines ignored.
+# Keep this to IN-SCOPE programs only. Edit freely; the Targets node in n8n reads the same list.
+# example.com

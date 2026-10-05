@@ -1,0 +1,91 @@
+{
+  "id": "noveltymonitor01",
+  "name": "novelty-monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [ { "field": "hours", "hoursInterval": 6 } ] }
+      },
+      "id": "a1111111-1111-4111-8111-111111111111",
+      "name": "Every 6h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Targets to monitor — one object per apex. Keep IN-SCOPE programs only.\nconst targets = [\n  // 'example.com',\n];\nreturn targets.map(t => ({ json: { target: t } }));"
+      },
+      "id": "a2222222-2222-4222-8222-222222222222",
+      "name": "Targets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "__HUNT_BRIDGE_URL__/novelty/watch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [ { "name": "X-Hunt-Token", "value": "__HUNT_BRIDGE_TOKEN__" } ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ target: $json.target }) }}",
+        "options": { "timeout": 180000 }
+      },
+      "id": "a3333333-3333-4333-8333-333333333333",
+      "name": "Bridge: novelty/watch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.has_changes }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a4444444-4444-4444-8444-444444444444",
+      "name": "Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "hunt-monitor@localhost",
+        "toEmail": "CHANGE_ME@example.com",
+        "subject": "=[hunt] new surface on {{ $json.target }}",
+        "emailFormat": "text",
+        "text": "={{ ($json.summary || []).join('\\n') }}\n\nCounts: {{ JSON.stringify($json.counts) }}\nFull diff in the host alerts feed: ~/.bughunter-engagements/_alerts/feed.jsonl",
+        "options": {}
+      },
+      "id": "a5555555-5555-4555-8555-555555555555",
+      "name": "Email alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1140, 220]
+    }
+  ],
+  "connections": {
+    "Every 6h": { "main": [ [ { "node": "Targets", "type": "main", "index": 0 } ] ] },
+    "Targets": { "main": [ [ { "node": "Bridge: novelty/watch", "type": "main", "index": 0 } ] ] },
+    "Bridge: novelty/watch": { "main": [ [ { "node": "Changed?", "type": "main", "index": 0 } ] ] },
+    "Changed?": { "main": [ [ { "node": "Email alert", "type": "main", "index": 0 } ], [] ] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
