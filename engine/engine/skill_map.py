@@ -22,7 +22,7 @@ CLASS_SKILL = {
     "ssrf": ["hunt-ssrf", "hunt-webhook"], "idor": ["hunt-idor"], "open-redirect": ["hunt-open-redirect"],
     "lfi": ["hunt-lfi"], "ssti": ["hunt-ssti"], "rce": ["hunt-rce"], "xxe": ["hunt-xxe"],
     "auth-bypass": ["hunt-auth-bypass", "hunt-jwt", "hunt-session"], "jwt": ["hunt-jwt", "hunt-auth-bypass"],
-    "llm-ai": ["hunt-llm-ai"],
+    "llm-ai": ["hunt-llm-ai", "hunt-mcp"], "mcp": ["hunt-mcp", "hunt-llm-ai"],
     "saml": ["hunt-saml"], "oauth": ["hunt-oauth"], "mfa": ["hunt-mfa-bypass"],
     "graphql": ["hunt-graphql"], "csrf": ["hunt-csrf"], "cors": ["hunt-cors"],
     "info-leak": ["hunt-source-leak", "hunt-api-misconfig"], "secret": ["hunt-source-leak"],
@@ -30,6 +30,7 @@ CLASS_SKILL = {
     "host-header": ["hunt-host-header"], "http-smuggling": ["hunt-http-smuggling"],
     "race-condition": ["hunt-race-condition"], "business-logic": ["hunt-business-logic"],
     "webhook": ["hunt-webhook", "hunt-ssrf"], "api": ["hunt-api-owasp", "hunt-api-misconfig"],
+    "baas": ["hunt-baas", "hunt-cloud-misconfig"],
 }
 
 # detected tech -> tech-specific skill(s)
@@ -64,6 +65,8 @@ CLASS_PROBE = {
     "jwt": "curl -s \"{u}\" -H 'Authorization: Bearer <eyJ...>'   # decode header; test alg:none, RS256->HS256 key confusion, kid/jku injection",
     "webhook": "curl -s -X POST \"{u}\" -d '{\"url\":\"http://169.254.169.254/latest/meta-data/\"}'   # Burp Collaborator for blind OOB, then internal targets",
     "api": "curl -s \"{u}/openapi.json\" ; curl -s \"{u}/swagger.json\"   # inventory the spec first, then walk the API Top 10",
+    "mcp": "curl -s -X POST \"{u}\" -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'   # enumerate tools, then audit every description + FULL schema for poisoning",
+    "baas": "curl -s \"{u}/rest/v1/<table>?select=*\" -H 'apikey: <anon>'   # Supabase RLS; Firebase: <db>.firebaseio.com/<path>.json",
 }
 
 

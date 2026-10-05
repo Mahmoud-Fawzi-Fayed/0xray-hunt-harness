@@ -1,6 +1,6 @@
 # 0xRay Hunt Harness
 
-![skills](https://img.shields.io/badge/skills-78-blue)
+![skills](https://img.shields.io/badge/skills-80-blue)
 ![engine modules](https://img.shields.io/badge/engine%20modules-23-blue)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
@@ -11,7 +11,7 @@ Autonomous, **anti-duplicate** bug-hunting harness. It runs on **Cursor agents**
 The harness wires three things together:
 
 - an **engine** ([`engine/`](engine/)) — recon, yield-ranking, dedup/novelty oracles, the hunt
-  orchestrator, the host bridge, notify/publish, guardrails, self-learning, and **78 skills**;
+  orchestrator, the host bridge, notify/publish, guardrails, self-learning, and **80 skills**;
 - an **n8n** workflow (novelty monitor) that watches target surface and triggers hunts on change;
 - the **host bridge** + **Cursor agents/rules** that drive the LLM hunting loop.
 
@@ -40,7 +40,7 @@ The harness wires three things together:
             └───────────────┬────────────────────────────────────────┘
                             │
   n8n (novelty-monitor) ──► │ POST /hunt            ┌─────────────────┐
-  diffs target surface      ▼                        │  78 skills      │
+  diffs target surface      ▼                        │  80 skills      │
                     ┌───────────────┐   dispatches   │  engine/skills  │
                     │  host bridge  │───────────────►│  (hunt-* + …)   │
                     │  :8899 (token)│                 └─────────────────┘
@@ -60,7 +60,7 @@ The harness wires three things together:
 | [`harness/.env.example`](harness/.env.example) | every config key documented — copy to `.env` and fill in |
 | [`.cursor/agents/`](.cursor/agents/) | the 5 subagents: `hunt-orchestrator`, `recon-novelty`, `vuln-hunter`, `dedup-oracle`, `report-drafter` |
 | [`.cursor/rules/`](.cursor/rules/) | the always-on hunt rules: SOP, dedup/novelty discipline, triager-grade reporting |
-| [`engine/`](engine/) | the full engine (23 modules) + 78 skills — see [Engine](#engine) |
+| [`engine/`](engine/) | the full engine (23 modules) + 80 skills — see [Engine](#engine) |
 | [`MANUAL.md`](MANUAL.md) | the full operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
@@ -128,9 +128,9 @@ public portion: `git -C /path/to/Claude-BugHunter archive HEAD | tar -x -C engin
 
 ## Skills catalog
 
-78 skills live under [`engine/skills/`](engine/skills/) (plus auto-authored drafts in
-`engine/skills/learned/`). New in this release: ✨ `hunt-webhook`, `hunt-jwt`, `hunt-api-owasp`,
-`hunt-desktop-macos`, `hunt-desktop-windows`.
+80 skills live under [`engine/skills/`](engine/skills/) (plus auto-authored drafts in
+`engine/skills/learned/`). Newest: ✨ `hunt-mcp` (Model Context Protocol) · ✨ `hunt-baas` (Firebase/Supabase/BaaS). Also recent:
+`hunt-webhook`, `hunt-jwt`, `hunt-api-owasp`, `hunt-desktop-macos`, `hunt-desktop-windows`.
 
 **Recon & novelty** — `web2-recon` · `offensive-osint` · `osint-methodology` · `hunt-subdomain` ·
 `hunt-source-leak` · `changed-js-deepdive` · `hunt-ntlm-info` · `supply-chain-attack-recon`
@@ -153,13 +153,13 @@ public portion: `git -C /path/to/Claude-BugHunter archive HEAD | tar -x -C engin
 `hunt-aspnet` · `hunt-sharepoint`
 
 **Cloud · infra · appliances** — `hunt-cloud-misconfig` · `cloud-iam-deep` · `hunt-k8s` · `hunt-cicd` ·
-`hunt-tls-network` · `enterprise-vpn-attack` · `vmware-vcenter-attack`
+`hunt-tls-network` · `enterprise-vpn-attack` · `vmware-vcenter-attack` · ✨`hunt-baas` (Firebase/Supabase)
 
 **Identity providers (enterprise)** — `m365-entra-attack` · `okta-attack`
 
 **Desktop / mobile** — ✨`hunt-desktop-macos` · ✨`hunt-desktop-windows` · `apk-redteam-pipeline`
 
-**AI / LLM** — `hunt-llm-ai`
+**AI / LLM / agents** — `hunt-llm-ai` · ✨`hunt-mcp` (Model Context Protocol)
 
 **Web3 / crypto** — `web3-audit` · `meme-coin-audit`
 

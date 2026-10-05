@@ -3,6 +3,23 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.4.0] - 2026-10-05
+### Added
+- **`hunt-mcp`** — Model Context Protocol attacks (OWASP MCP Top 10 2025 / Agentic Apps 2026): tool
+  poisoning, full-schema poisoning, rug-pull / silent redefinition, tool-response injection, context
+  injection & over-sharing, and confused-deputy / token passthrough (e.g. a server reusing a DB
+  `service_role` to bypass RLS). Grounded in 2025-2026 in-the-wild incidents.
+- **`hunt-baas`** — Backend-as-a-Service misconfig (Firebase / Supabase / PocketBase / Appwrite /
+  Nhost): open Firestore/RTDB/Storage rules and Supabase RLS-off / `USING(true)` tables readable with
+  the public anon key (UpGuard: 16k+ exposed Supabase DBs; CVE-2025-48757).
+- Registered `mcp` / `baas` classes + starter probes in `skill_map.py`; linked `hunt-mcp` into `llm-ai`.
+
+### Changed
+- `hunt-llm-ai` refreshed for 2026: MCP cross-reference, RAG up/down exfiltration, and
+  context-privilege-escalation (M-CPE / X-CPE).
+- Skills count **78 -> 80**. The earlier-authored `hunt-webhook` / `hunt-jwt` / `hunt-api-owasp` plus
+  the two new skills are now installed into the live engine (`~/.claude/skills`) so running hunts use them.
+
 ## [0.3.0] - 2026-10-05
 ### Fixed
 - **Email CC now works.** `notify.py` never read `SMTP_CC`, so Cc recipients were silently dropped on
