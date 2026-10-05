@@ -17,12 +17,19 @@ heuristic (the agent is reserved for the HUNT phase, where judgment is needed).
 
 stdlib-only fallback; uses `requests` if available (gzip/redirects handled cleanly).
 """
+import os
 import re
 from shutil import which
 from urllib.parse import urljoin, urlparse
 
+# Default browser UA; a per-target override comes from HUNT_USER_AGENT (set by the engine from the
+# scope's user_agent), so recon traffic carries a program's required SOC tag.
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _ua():
+    return os.environ.get("HUNT_USER_AGENT") or _UA
 
 try:
     import requests
@@ -31,7 +38,7 @@ try:
 
     def _get(url, timeout=20):
         try:
-            r = _SESS.get(url, timeout=timeout, allow_redirects=True)
+            r = _SESS.get(url, timeout=timeout, allow_redirects=True, headers={"User-Agent": _ua()})
             return r.text, r.url, {k.lower(): v for k, v in r.headers.items()}
         except Exception:
             return "", url, {}
@@ -41,7 +48,7 @@ except ImportError:                          # stdlib fallback
 
     def _get(url, timeout=20):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept-Encoding": "gzip"})
+            req = urllib.request.Request(url, headers={"User-Agent": _ua(), "Accept-Encoding": "gzip"})
             r = urllib.request.urlopen(req, timeout=timeout)
             data = r.read()
             if r.headers.get("Content-Encoding") == "gzip":

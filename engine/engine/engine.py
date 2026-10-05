@@ -67,6 +67,8 @@ class Engine:
         self.scope = Scope.load(scope_path)
         self.eng = Engagement(base, self.scope.name)
         self.base = base
+        if getattr(self.scope, "user_agent", "") and not os.environ.get("HUNT_USER_AGENT"):
+            os.environ["HUNT_USER_AGENT"] = self.scope.user_agent   # per-target SOC tag for recon + agent
         self.model, self.max_hunts = model, max_hunts
         self.max_turns, self.timeout, self.mock = max_turns, timeout, mock
         self.allow_intrusive = allow_intrusive
@@ -84,6 +86,12 @@ class Engine:
                "(no third-party APIs / CDNs / SaaS such as emailjs, salesforce, google, etc.), even to 'prove' a "
                "finding. If proof would require touching an out-of-scope host/service, DO NOT do it — report the "
                "finding but set proof_note='would require out-of-scope action (NOT performed)'.\n")
+        if getattr(self.scope, "user_agent", ""):
+            roe += (f"- MANDATORY USER-AGENT: EVERY HTTP request (curl and any tool) MUST send "
+                    f"'User-Agent: {self.scope.user_agent}' (e.g. curl -A '<UA>'). It tags traffic for the "
+                    "client SOC; an untagged request violates the program rules.\n")
+        if getattr(self.scope, "roe_extra", ""):
+            roe += self.scope.roe_extra.rstrip() + "\n"
         if not self.allow_intrusive:
             roe += ("- READ-ONLY / NON-DESTRUCTIVE: do NOT perform any state-changing or intrusive action — no sending "
                     "emails, no writes/updates/deletes, no cache purge/revalidate, no account creation, no spam, no "
@@ -185,7 +193,8 @@ class Engine:
         plat = R.platform_recon(self.scope, log=self.eng.log)        # .well-known / Firebase / OAuth / robots
         api = R.openapi_recon(self.scope, log=self.eng.log)          # OpenAPI schema -> categorized + auth-sweep
         endpoints, oos = R.spa_recon(self.scope, log=self.eng.log)   # current API endpoints + JS secrets
-        params = self._gather_params_cached(R)                        # gau+katana, cached per engagement (TTL)
+        params = ([] if getattr(self.scope, "skip_param_mining", False)
+                  else self._gather_params_cached(R))                 # gau+katana, cached (skipped if scanner-forbidden)
         # categorize every (endpoint | param) into its applicable attack classes, expand to work units
         expanded = list(api) + list(plat)                            # api + platform items are already categorized
         for it in endpoints:
@@ -194,6 +203,11 @@ class Engine:
         for it in params:
             for cls in R.classes_for_param(it.get("param", ""), it.get("url", "")):
                 e = dict(it); e["vuln_class"] = cls; expanded.append(e)
+        # documented API routes from the scope (path-scoped programs where recon can't crawl the surface)
+        for u in (getattr(self.scope, "endpoints", None) or []):
+            if u and self.scope.in_scope_host(u):
+                for cls in R.classify_all({"url": u, "method": "GET", "source": "scope-endpoint"}):
+                    expanded.append({"url": u, "vuln_class": cls, "source": "scope-endpoint"})
         # Belt-and-suspenders: never let a non-curlable target (robots/scope glob with '*', or a
         # static asset) reach the worklist — those always waste a hunt step and yield 'nothing'.
         # A leaked-secret item keeps its own .js URL (the bundle IS the finding), so it's exempt.

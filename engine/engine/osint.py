@@ -11,6 +11,7 @@ The live in-scope targets feed per-target recon. No LLM in enumeration (it's mec
 PD httpx isn't reliably present (the `httpx` on PATH is often the Python lib), so the
 liveness/tech probe uses a robust curl-based fingerprint that always works.
 """
+import os
 import time
 import json
 import re
@@ -20,7 +21,7 @@ from urllib.parse import urlparse
 
 # Cloudflare/WAFs routinely 429/403 the default curl UA — present as a real browser so our fingerprint
 # probes aren't rate-limited out of existence (which silently cuts recon coverage).
-_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+_UA = os.environ.get("HUNT_USER_AGENT") or ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 

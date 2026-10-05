@@ -3,6 +3,16 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.5.0] - 2026-10-05
+### Added
+- Engine support for **path-scoped API programs** (e.g. a mobile backend with documented routes on one
+  host). New per-target scope fields, all additive + backward-compatible:
+  - `user_agent` — a required SOC-tag UA, applied to recon (`osint`/`recon` via `HUNT_USER_AGENT`) and
+    injected into the agent rules-of-engagement so every request carries it.
+  - `endpoints` — documented API routes seeded directly into the hunt worklist (when recon can't crawl).
+  - `roe_extra` — program-specific rules appended to the ROE.
+  - `skip_param_mining` — disable gau/katana crawling for "no automated scanners" programs.
+
 ## [0.4.0] - 2026-10-05
 ### Added
 - **`hunt-mcp`** — Model Context Protocol attacks (OWASP MCP Top 10 2025 / Agentic Apps 2026): tool
