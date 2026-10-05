@@ -471,3 +471,15 @@ Cross-references:
 - **`hunt-aspnet`** — ASP.NET ViewState deserialization is a giant RCE class behind a known `__VIEWSTATE` parameter. Chain primitive: machineKey recovery (or leaked `<machineKey>` from `web.config` disclosure) → `ysoserial.net -p ViewState -g TypeConfuseDelegate` → RCE as `IIS APPPOOL\<name>`.
 - **`security-arsenal`** — Reach for the deserialization payload tree (ysoserial Java gadget chains, ysoserial.net for .NET ViewState/BinaryFormatter, Python pickle `__reduce__`, Ruby Marshal, PHP `phar://` metadata, Node `node-serialize` IIFE) the moment you have a sink that accepts serialized bytes.
 - **`triage-validation`** — Apply the Pre-Severity Gate before claiming Critical. A "blind RCE" that turns out to be file-write-only with no execution path is not RCE; a sandboxed eval that can't reach `os` is at best Medium SSTI. Prove `whoami`/OOB DNS callback with a unique marker before writing the report.
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

@@ -345,3 +345,15 @@ The following real, verified bug-bounty / coordinated-disclosure cases extend th
 - **`hunt-race-condition`** — GraphQL batching collapses N mutations into one HTTP packet — perfect single-packet race vehicle. Chain primitive: GraphQL batch + race → atomic-update missing → double-spend balance.
 - **`security-arsenal`** — Load the GraphQL Payload Pack: introspection query, schema-suggestion error probe, alias amplification template, depth-bomb DoS payload, batch-attack template.
 - **`triage-validation`** — Apply the Body-Diff Rule: introspection alone is informational; require a concrete cross-tenant read or mutation-with-impact PoC before submitting.
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

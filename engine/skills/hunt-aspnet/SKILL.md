@@ -275,3 +275,15 @@ Before writing the report, confirm:
 - **`hunt-ntlm-info`** — IIS sites that advertise NTLM/Negotiate anonymously leak AD topology. Chain primitive: ASP.NET app behind IIS with `WWW-Authenticate: NTLM` → `hunt-ntlm-info` Type-2 challenge capture → internal forest name → cross-reference Entra tenant via `m365-entra-attack` discovery.
 - **`hunt-file-upload`** — Telerik RadAsyncUpload, Kentico, Umbraco, and DotNetNuke all have historical upload-handler RCE. Chain primitive: ASP.NET CMS fingerprinted → `hunt-file-upload` bypass matrix against the CMS upload handler → `.aspx` written into web-accessible path → request → RCE under app-pool identity.
 - **`triage-validation`** — `trace.axd`/`elmah.axd` disclosure is only Critical when it actually leaks live credentials/tokens; pure stack traces are usually Low. Chain primitive: pull every reported finding through `triage-validation` 7-Question Gate before submission — distinguish "verbose error" (informational) from "live bearer token in error log" (Critical) before writing the report (`redteam-report-template`).
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

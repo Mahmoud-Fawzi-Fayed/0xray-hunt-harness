@@ -268,3 +268,15 @@ Target: `https://intranet.corp.example` (clearly internal, behind VPN). Type-1 r
 - **`hunt-aspnet`** — IIS sites running ASP.NET frequently expose NTLM on management paths. Chain primitive: NTLM Type-2 on `/owa/`, `/ecp/`, `/rpc/`, `/aspnet_client/` → confirm IIS + ASP.NET version → `hunt-aspnet` ViewState / `.axd` enumeration on same host.
 - **`offensive-osint`** — The hostname pattern `WIN-XXXXXXXXXXX` signals lazy provisioning and predicts other weak hygiene. Chain primitive: NTLM Type-2 returns default-installer hostname → flag as low-maturity environment → `offensive-osint` deep recon (cert transparency, GitHub leakage, breach corpus correlation) is high-yield on this org.
 - **`triage-validation`** — Most NTLM info-disclosure findings die at the 7-Question Gate on "is this exploitable" — pure topology disclosure is Low/Informational. Chain primitive: pull every NTLM-info finding through `triage-validation` BEFORE writing it up; only report if (a) leaks UPN format that accelerates spray, or (b) leaks production hostname mapping (`redteam-report-template` for the chain-narrative).
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

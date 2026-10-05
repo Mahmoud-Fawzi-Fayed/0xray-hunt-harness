@@ -321,3 +321,15 @@ No Duende.BFF-direct CVE exists as of 2026-05. The three classes above are **des
 - **`hunt-oauth`** — OAuth/SAML `state`/`RelayState` is structurally a CSRF token; missing validation here is account-linking CSRF. Chain primitive: attacker initiates OAuth on their account, sends victim the `/callback?code=X&state=` URL → victim's logged-in browser completes the link → attacker's social identity now controls victim's account.
 - **`security-arsenal`** — Reach for the CSRF PoC templates (form POST, `enctype=text/plain` JSON, sandboxed-iframe null-origin, base64 multipart bypass) before writing one from scratch; also the WAF-bypass header variants for Origin/Referer checks.
 - **`triage-validation`** — Run the Pre-Severity Gate before submitting CSRF on a logout endpoint or any action without state-change consequence — those are the canonical N/A traps. Confirm victim LOSES something concrete (account access, money, data), not just "a request executed."
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

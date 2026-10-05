@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deterministic secret scan
+        run: make secret-scan
+
+  skills-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Lint skills
+        run: make skills-lint
+      - name: skill_map sanity
+        run: |
+          cd engine/engine
+          python3 -c "import skill_map as m; print('class mappings:', len(m.CLASS_SKILL)); assert {'jwt','webhook','api'} <= set(m.CLASS_SKILL), 'new classes missing'"

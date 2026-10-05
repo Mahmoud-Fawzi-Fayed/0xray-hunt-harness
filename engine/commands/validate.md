@@ -58,7 +58,9 @@ Exact domain in scope? Not staging/dev? Not a third-party service?
 
 ### Q5: Is this known or documented behavior?
 
-Search disclosed reports + changelog + API docs.
+Search disclosed reports + changelog + API docs. Run `/dedup check` (class + endpoint + title) —
+a `LIKELY_DUP` verdict answers this YES: kill it unless you can prove a differentiator (different
+endpoint/param/impact, or a bypass of the deployed fix → report as a regression). See `dedup-novelty`.
 
 ### Q6: Can you prove impact beyond "technically possible"?
 
@@ -108,13 +110,15 @@ If no chain → KILL IT. If chain confirmed → report both together.
 [ ] No unlikely preconditions
 ```
 
-**Gate 2 — Dedup (5 min):**
+**Gate 2 — Dedup (5 min) — run the oracle, then eyeball:**
 ```
-[ ] Searched HackerOne Hacktivity for endpoint + bug class
-[ ] Searched GitHub issues
-[ ] Read 5 most recent disclosed reports
-[ ] Not in changelog as known issue
+[ ] /dedup sync <program>   (refresh corpus: your YWH reports + public H1/Bugcrowd disclosures)
+[ ] /dedup check            (class + endpoint + title -> NOVEL | REVIEW | LIKELY_DUP)
+[ ] Verdict is NOVEL — or REVIEW/LIKELY_DUP WITH a written differentiator (diff endpoint/param/impact or fix-bypass)
+[ ] Eyeball: 5 most recent disclosed reports + changelog for anything the oracle's corpus missed
 ```
+A `LIKELY_DUP` with no differentiator = KILL (Q5 fails). The oracle rates dup-risk only — a NOVEL
+finding still must clear every other gate. Full method: `dedup-novelty` skill.
 
 **Gate 3 — Report quality (10 min):**
 ```

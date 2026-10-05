@@ -1,19 +1,35 @@
 # 0xRay Hunt Harness
 
+![skills](https://img.shields.io/badge/skills-78-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-23-blue)
+![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
+![license](https://img.shields.io/badge/license-Proprietary-red)
+
 Autonomous, **anti-duplicate** bug-hunting harness. It runs on **Cursor agents**, hunts
 **read-only by default**, and **stops at draft — it never submits without a human**.
 
 The harness wires three things together:
 
-- an **engine** (vendored in [`engine/`](engine/)) — recon, yield-ranking, dedup/novelty oracles,
-  the hunt orchestrator, notify/publish, guardrails, and **71 hunt skills**;
+- an **engine** ([`engine/`](engine/)) — recon, yield-ranking, dedup/novelty oracles, the hunt
+  orchestrator, the host bridge, notify/publish, guardrails, self-learning, and **78 skills**;
 - an **n8n** workflow (novelty monitor) that watches target surface and triggers hunts on change;
-- a **host bridge** + **Cursor agents/rules** that drive the LLM hunting loop.
+- the **host bridge** + **Cursor agents/rules** that drive the LLM hunting loop.
 
 > **Scope note:** this repo is the reusable *framework* only. Per-target recon, findings, evidence,
 > and anything touching real programs are deliberately **excluded** (see [`.gitignore`](.gitignore)).
 
----
+## Contents
+- [Architecture](#architecture)
+- [Repository layout](#repository-layout)
+- [Quick start](#quick-start)
+- [The pipeline](#the-pipeline)
+- [Cursor agents & rules](#cursor-agents--rules)
+- [Engine](#engine)
+- [Skills catalog](#skills-catalog)
+- [Autonomous capabilities](#autonomous-capabilities)
+- [Safety contract](#safety-contract)
+- [Testing & CI](#testing--ci)
+- [Project docs](#project-docs)
 
 ## Architecture
 
@@ -24,9 +40,9 @@ The harness wires three things together:
             └───────────────┬────────────────────────────────────────┘
                             │
   n8n (novelty-monitor) ──► │ POST /hunt            ┌─────────────────┐
-  diffs target surface      ▼                        │  hunt skills    │
+  diffs target surface      ▼                        │  78 skills      │
                     ┌───────────────┐   dispatches   │  engine/skills  │
-                    │  host bridge  │───────────────►│  (71 hunt-*)    │
+                    │  host bridge  │───────────────►│  (hunt-* + …)   │
                     │  :8899 (token)│                 └─────────────────┘
                     └───────┬───────┘
                             │ orchestrator --persist (pm2, crash-safe)
@@ -44,46 +60,35 @@ The harness wires three things together:
 | [`harness/.env.example`](harness/.env.example) | every config key documented — copy to `.env` and fill in |
 | [`.cursor/agents/`](.cursor/agents/) | the 5 subagents: `hunt-orchestrator`, `recon-novelty`, `vuln-hunter`, `dedup-oracle`, `report-drafter` |
 | [`.cursor/rules/`](.cursor/rules/) | the always-on hunt rules: SOP, dedup/novelty discipline, triager-grade reporting |
-| [`engine/`](engine/) | **vendored** engine + 71 hunt skills (see *Engine* below) |
+| [`engine/`](engine/) | the full engine (23 modules) + 78 skills — see [Engine](#engine) |
 | [`MANUAL.md`](MANUAL.md) | the full operator manual (dashboard, sessions, ops, troubleshooting) |
-
----
-
-## Prerequisites
-
-- Linux host with Docker + `docker compose`
-- Python 3.10+
-- `pm2` (`npm i -g pm2`) to keep the bridge + hunts alive
-- `cursor-agent` installed and logged in (the harness dispatches LLM work through it)
+| [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
 ## Quick start
 
+Prerequisites: Linux + Docker (`docker compose`), Python 3.10+, `pm2` (`npm i -g pm2`), and
+`cursor-agent` installed and logged in.
+
 ```bash
-# 1) configure
-cp harness/.env.example harness/.env && chmod 600 harness/.env
-#    edit harness/.env — set HUNT_BRIDGE_TOKEN (openssl rand -hex 32), SMTP_*, model pool…
+make setup        # cp harness/.env.example -> harness/.env  (then edit it)
+#   set HUNT_BRIDGE_TOKEN (openssl rand -hex 32), SMTP_*, CURSOR_HUNT_MODELS …
 
-# 2) start the hunting n8n (isolated container/network/volume)
-cd harness
-docker compose -f docker-compose.hunt-n8n.yml --env-file .env up -d
+make n8n-up       # start the isolated hunting n8n container
+make import       # import the novelty-monitor workflow (injects the bridge token/url)
+make bridge       # start the token-gated host bridge on :8899 under pm2
 
-# 3) import the novelty-monitor workflow (injects the bridge token/url)
-./import-workflow.sh workflows/novelty-monitor.json
-
-# 4) start the host bridge (token-gated control plane on :8899), kept alive by pm2
-pm2 start ./hunt-bridge-start.sh --name hunt-bridge
-
-# 5) start a hunt on a target (scope JSON from the engine), 3h loop, crash-safe
-pm2 start ./hunt-run.sh --name hunt-acme -- /path/to/acme.scope.json 10800
+# start a hunt on a target (scope JSON from the engine), 3h loop, crash-safe
+cd harness && pm2 start ./hunt-run.sh --name hunt-acme -- /path/to/acme.scope.json 10800
 pm2 logs hunt-acme
 ```
 
-> **Paths:** the launcher scripts reference the original deployment layout
-> (`/root/Claude-BugHunter` for the engine, `/root/BugHunting_0xRay/harness` for config).
-> The vendored [`engine/`](engine/) mirrors that engine — point the scripts at wherever you
-> place it, or keep the same paths.
+Run `make` with no target for the full list.
 
----
+> **Paths:** the launcher scripts reference the original deployment layout
+> (`/root/Claude-BugHunter` for the engine, `/root/BugHunting_0xRay/harness` for config). The
+> vendored [`engine/`](engine/) mirrors that engine — point the scripts at wherever you place it,
+> or keep the same paths. Skills are read at runtime from `~/.claude/skills`; install the engine's
+> `skills/` there (or symlink it).
 
 ## The pipeline
 
@@ -92,18 +97,15 @@ pm2 logs hunt-acme
 1. **Novelty first** — diff the target's surface vs the last snapshot; new/changed surface is hunted first.
 2. **Recon** — service/tech fingerprint, platform discovery, JS endpoint+secret mining, param mining (cached per target so it doesn't re-hammer the target).
 3. **Rank** — cover all vuln classes, most-findable first; known-issue surface is down-ranked (dedup-aware).
-4. **Hunt** — Cursor agents test each `(endpoint, class)` with the matching `hunt-*` skill, curl-first, and only claim a vuln with **demonstrated impact** (never reflection/error-only).
+4. **Hunt** — Cursor agents test each `(endpoint, class)` with the matching skill, curl-first, and only claim a vuln with **demonstrated impact** (never reflection/error-only).
 5. **Validate** — an adversarial second pass; defaults to false-positive unless proven.
 6. **Dedup gate** — every confirmed finding is scored; `LIKELY_DUP` is held, `NOVEL`/`REVIEW` is drafted.
 7. **STOP** — drafts + an `approval.md` are written and the finding is **published + emailed**. Nothing is submitted.
 
-## Models
+Hunting rotates **only** across the approved pool in `CURSOR_HUNT_MODELS`; an off-pool model can never
+be used (enforced in code).
 
-Hunting rotates **only** across the approved pool in `CURSOR_HUNT_MODELS`. An off-pool model can never be
-used (enforced in code). Default pool: `kimi-k3-max`, `cursor-grok-4.6-high`, `grok-4.7-high`,
-`claude-fable-5-1-high`.
-
-## Cursor agents & rules ("skills")
+## Cursor agents & rules
 
 - **Agents** ([`.cursor/agents/`](.cursor/agents/)) — spawnable subagents for each stage of the hunt.
 - **Rules** ([`.cursor/rules/`](.cursor/rules/)) — always-applied discipline:
@@ -113,40 +115,97 @@ used (enforced in code). Default pool: `kimi-k3-max`, `cursor-grok-4.6-high`, `g
 
 ## Engine
 
-[`engine/`](engine/) is **vendored** from [elementalsouls/Claude-BugHunter](https://github.com/elementalsouls/Claude-BugHunter)
-(committed content only — no scratch files or secrets). It provides the orchestrator, recon,
-`yieldrank`, `dedup`/`novelty`, `notify`/publish, `guardrails`, identity/SMS/self-learning, the
-bridge, and the **71 hunt skills** under [`engine/skills/`](engine/skills/). To refresh it:
+[`engine/`](engine/) is the full engine. The runtime modules under [`engine/engine/`](engine/engine/):
 
-```bash
-git -C /path/to/Claude-BugHunter archive HEAD | tar -x -C engine
-```
+`orchestrator` · `bridge` · `agent` · `recon` · `osint` · `scope` · `scopefetch` · `targets` ·
+`novelty` · `jsdiff` · `observe` · `yieldrank` · `skill_map` · `dedup` · `guardrails` · `identity` ·
+`sms` · `authsession` · `websearch` · `learn` · `notify` · `state` · `engine`
+
+Helpers: [`engine/scripts/`](engine/scripts/) (`selfcheck`, `e2e`, `watchdog`, `lint_skills`) and
+the operator commands under [`engine/commands/`](engine/commands/). The engine is vendored from
+[elementalsouls/Claude-BugHunter](https://github.com/elementalsouls/Claude-BugHunter); to refresh the
+public portion: `git -C /path/to/Claude-BugHunter archive HEAD | tar -x -C engine`.
+
+## Skills catalog
+
+78 skills live under [`engine/skills/`](engine/skills/) (plus auto-authored drafts in
+`engine/skills/learned/`). New in this release: ✨ `hunt-webhook`, `hunt-jwt`, `hunt-api-owasp`,
+`hunt-desktop-macos`, `hunt-desktop-windows`.
+
+**Recon & novelty** — `web2-recon` · `offensive-osint` · `osint-methodology` · `hunt-subdomain` ·
+`hunt-source-leak` · `changed-js-deepdive` · `hunt-ntlm-info` · `supply-chain-attack-recon`
+
+**Injection & server-side** — `hunt-sqli` · `hunt-nosqli` · `hunt-ssrf` · `hunt-rce` · `hunt-lfi` ·
+`hunt-ssti` · `hunt-xxe` · `hunt-deserialization` · `hunt-ldap` · ✨`hunt-webhook`
+
+**Client-side** — `hunt-xss` · `hunt-dom` · `hunt-cors` · `hunt-csrf` · `hunt-open-redirect` ·
+`hunt-cache-poison`
+
+**Access control & logic** — `hunt-idor` · `hunt-business-logic` · `hunt-race-condition` ·
+`hunt-file-upload` · `hunt-host-header` · `hunt-http-smuggling`
+
+**Auth · identity · session** — `hunt-auth-bypass` · `hunt-oauth` · `hunt-saml` · `hunt-mfa-bypass` ·
+`hunt-ato` · `hunt-session` · ✨`hunt-jwt` · `hunt-brute-force`
+
+**API** — ✨`hunt-api-owasp` · `hunt-api-misconfig` · `hunt-graphql` · `hunt-grpc` · `hunt-websocket`
+
+**Framework / stack-specific** — `hunt-nextjs` · `hunt-nodejs` · `hunt-laravel` · `hunt-springboot` ·
+`hunt-aspnet` · `hunt-sharepoint`
+
+**Cloud · infra · appliances** — `hunt-cloud-misconfig` · `cloud-iam-deep` · `hunt-k8s` · `hunt-cicd` ·
+`hunt-tls-network` · `enterprise-vpn-attack` · `vmware-vcenter-attack`
+
+**Identity providers (enterprise)** — `m365-entra-attack` · `okta-attack`
+
+**Desktop / mobile** — ✨`hunt-desktop-macos` · ✨`hunt-desktop-windows` · `apk-redteam-pipeline`
+
+**AI / LLM** — `hunt-llm-ai`
+
+**Web3 / crypto** — `web3-audit` · `meme-coin-audit`
+
+**Methodology · dedup · triage · reporting** — `bb-methodology` · `bug-bounty` · `bb-local-toolkit` ·
+`dedup-novelty` · `triage-validation` · `redteam-mindset` · `mid-engagement-ir-detection` ·
+`evidence-hygiene` · `report-writing` · `bugcrowd-reporting` · `redteam-report-template` ·
+`security-arsenal` · `hunt-dispatch` · `hunt-misc`
+
+Each `hunt-*` skill follows the same house structure: *what actually pays (and what doesn't)*,
+detection, **PoC minimums**, a **dedup-gate** footer, and cross-references. See
+[CONTRIBUTING.md](CONTRIBUTING.md) to add one.
 
 ## Autonomous capabilities (all guardrail-gated)
 
 Driven mid-hunt when a finding needs them: **web search** (confirm a CVE before claiming impact),
-**test identities** (disposable mail.tm accounts for IDOR/auth), **phone/SMS OTP** (optional, off unless
-configured), and **self-learning** (research an unknown stack and draft a new skill). Every
-account/login/SMS action passes `engine/guardrails.py`.
+**test identities** (disposable mail.tm accounts for IDOR/auth), **phone/SMS OTP** (optional, off
+unless configured), and **self-learning** (research an unknown stack and draft a new skill into
+`engine/skills/learned/`). Every account/login/SMS action passes `engine/engine/guardrails.py`.
 
 ## Safety contract
 
 - **Read-only by default** — the only "write" is guardrail-gated test-account creation on in-scope
-  targets (capped + audited).
+  targets (capped by `HUNT_MAX_ACCOUNTS`, audited).
 - **No brute force / password cracking** — refused by policy.
 - **In-scope only** — recon + hunt are filtered to scope at every boundary.
 - **Stop at draft** — nothing is ever submitted without explicit, per-report human approval.
 - **Evidence-only** — findings claim exactly what was proven; no "could potentially".
 
-## Testing
+See [SECURITY.md](SECURITY.md) for the full responsible-use policy.
+
+## Testing & CI
 
 ```bash
-python3 engine/scripts/selfcheck.py   # crash/loop/hostile-input gauntlet + live bridge
-python3 engine/scripts/e2e.py         # end-to-end: env→models→bridge→n8n→skills→pipeline→dedup→notify→publish
-python3 engine/scripts/e2e.py --ping  # also live-ping each model
+make selfcheck     # engine crash/loop/hostile-input gauntlet + live bridge
+make e2e           # end-to-end: env→models→bridge→n8n→skills→pipeline→dedup→notify→publish
+make skills-lint   # frontmatter, naming, secret + client-identifier scan over all skills
+make secret-scan   # fail if obvious secrets are present in the tree
 ```
 
-See [`MANUAL.md`](MANUAL.md) for the dashboard, session management, operations, and troubleshooting.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs **secret-scan** and **skills-lint**
+on every push and pull request.
+
+## Project docs
+
+[`MANUAL.md`](MANUAL.md) · [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) ·
+[`CHANGELOG.md`](CHANGELOG.md) · [`LICENSE`](LICENSE)
 
 ---
 

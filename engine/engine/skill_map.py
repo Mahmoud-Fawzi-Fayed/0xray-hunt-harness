@@ -19,15 +19,17 @@ SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 # attack class -> hunt skill(s) in the bundle
 CLASS_SKILL = {
     "sqli": ["hunt-sqli"], "nosqli": ["hunt-nosqli"], "xss": ["hunt-xss", "hunt-dom"],
-    "ssrf": ["hunt-ssrf"], "idor": ["hunt-idor"], "open-redirect": ["hunt-open-redirect"],
+    "ssrf": ["hunt-ssrf", "hunt-webhook"], "idor": ["hunt-idor"], "open-redirect": ["hunt-open-redirect"],
     "lfi": ["hunt-lfi"], "ssti": ["hunt-ssti"], "rce": ["hunt-rce"], "xxe": ["hunt-xxe"],
-    "auth-bypass": ["hunt-auth-bypass", "hunt-session"], "llm-ai": ["hunt-llm-ai"],
+    "auth-bypass": ["hunt-auth-bypass", "hunt-jwt", "hunt-session"], "jwt": ["hunt-jwt", "hunt-auth-bypass"],
+    "llm-ai": ["hunt-llm-ai"],
     "saml": ["hunt-saml"], "oauth": ["hunt-oauth"], "mfa": ["hunt-mfa-bypass"],
     "graphql": ["hunt-graphql"], "csrf": ["hunt-csrf"], "cors": ["hunt-cors"],
     "info-leak": ["hunt-source-leak", "hunt-api-misconfig"], "secret": ["hunt-source-leak"],
     "deserialization": ["hunt-deserialization"], "file-upload": ["hunt-file-upload"],
     "host-header": ["hunt-host-header"], "http-smuggling": ["hunt-http-smuggling"],
     "race-condition": ["hunt-race-condition"], "business-logic": ["hunt-business-logic"],
+    "webhook": ["hunt-webhook", "hunt-ssrf"], "api": ["hunt-api-owasp", "hunt-api-misconfig"],
 }
 
 # detected tech -> tech-specific skill(s)
@@ -59,6 +61,9 @@ CLASS_PROBE = {
     "host-header": "curl -s \"{u}\" -H 'Host: evil.example'   # check for reflection / cache / pw-reset poisoning",
     "saml": "curl -s \"{u}\"   # inspect SAML/SSO config endpoints; test XSW / signature-stripping / IdP confusion (needs auth)",
     "oauth": "curl -s \"{u}\"   # check redirect_uri validation, state, PKCE, token leakage",
+    "jwt": "curl -s \"{u}\" -H 'Authorization: Bearer <eyJ...>'   # decode header; test alg:none, RS256->HS256 key confusion, kid/jku injection",
+    "webhook": "curl -s -X POST \"{u}\" -d '{\"url\":\"http://169.254.169.254/latest/meta-data/\"}'   # Burp Collaborator for blind OOB, then internal targets",
+    "api": "curl -s \"{u}/openapi.json\" ; curl -s \"{u}/swagger.json\"   # inventory the spec first, then walk the API Top 10",
 }
 
 
@@ -87,6 +92,21 @@ def tech_skills(tech):
         for s in _filter(TECH_SKILL.get((t or "").lower(), [])):
             if s not in out:
                 out.append(s)
+    return out
+
+
+def skill_paths(vuln_class, tech=None, extra=("security-arsenal",)):
+    """Absolute SKILL.md paths for the class (+ tech) skills that actually exist on disk, so a
+    cursor-agent can READ and follow the real methodology/payloads — not merely see a skill name."""
+    names = skills_for(vuln_class) + (tech_skills(tech) if tech else []) + list(extra)
+    seen, out = set(), []
+    for n in names:
+        if n in seen:
+            continue
+        seen.add(n)
+        p = os.path.join(SKILLS_DIR, n, "SKILL.md")
+        if os.path.isfile(p):
+            out.append(p)
     return out
 
 

@@ -281,3 +281,15 @@ Every automated hit is a lead, not a finding. Reproduce 5a/5b in a browser.
 - Subdomain-takeover/XSS-assisted credentialed read: High/Critical
 - Reflects origin, no credentials / non-sensitive: Low–Informational
 - `ACAO: *` only (no creds possible): Informational unless data is secret
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

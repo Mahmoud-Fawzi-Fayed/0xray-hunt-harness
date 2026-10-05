@@ -1,0 +1,50 @@
+[
+  {
+    "slug": "bigip",
+    "name": "BigIP",
+    "kind": "tech",
+    "path": "/root/Claude-BugHunter/skills/learned/bigip/SKILL.md",
+    "created": "2026-10-04T12:21:22.101813+00:00",
+    "refs": 5
+  },
+  {
+    "slug": "istio-envoy",
+    "name": "istio-envoy",
+    "kind": "tech",
+    "path": "/root/Claude-BugHunter/skills/learned/istio-envoy/SKILL.md",
+    "created": "2026-10-05T01:07:13.280101+00:00",
+    "refs": 5
+  },
+  {
+    "slug": "typo3-cms",
+    "name": "TYPO3 CMS",
+    "kind": "tech",
+    "path": "/root/Claude-BugHunter/skills/learned/typo3-cms/SKILL.md",
+    "created": "2026-10-05T06:00:15.891662+00:00",
+    "refs": 0
+  },
+  {
+    "slug": "express",
+    "name": "Express",
+    "kind": "tech",
+    "path": "/root/Claude-BugHunter/skills/learned/express/SKILL.md",
+    "created": "2026-10-05T13:47:17.107731+00:00",
+    "refs": 5
+  },
+  {
+    "slug": "daiquiri-5",
+    "name": "daiquiri/5",
+    "kind": "tech",
+    "path": "/root/Claude-BugHunter/skills/learned/daiquiri-5/SKILL.md",
+    "created": "2026-10-05T13:47:17.839414+00:00",
+    "refs": 5
+  },
+  {
+    "slug": "snow-adc",
+    "name": "snow_adc",
+    "kind": "tech",
+    "path": "/root/Claude-BugHunter/skills/learned/snow-adc/SKILL.md",
+    "created": "2026-10-05T14:08:13.530342+00:00",
+    "refs": 5
+  }
+]

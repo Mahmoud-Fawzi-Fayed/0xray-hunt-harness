@@ -70,10 +70,12 @@ invoke `hunt-dispatch` skill with `mode=wapt box=blackbox|greybox`.
 
 ```
 before any HTTP touch    →  /scope     (mandatory pre-flight)
+session start on target  →  /dedup sync <program>  (build own + public known-issue corpus)
 recon empty | wildcard   →  /recon <target>
+after recon / re-recon   →  /dedup watch <target>  (hunt the fresh, low-dup surface FIRST)
 5+ live hosts surfaced   →  /surface   (P1/P2/Kill list)
 confirmed finding        →  /chain     (A→B table lives here, NOT in /hunt)
-before any report        →  /validate  (7-Question Gate)
+before any report        →  /validate  (7-Question Gate, incl. /dedup check)
 findings ready           →  /report    (suggest, never auto)
 session end              →  /remember  (silent)
 ```

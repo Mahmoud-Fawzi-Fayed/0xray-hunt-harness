@@ -43,7 +43,7 @@ token; nginx injects it. The panel polls every 8s and is served `no-store` (no s
 ## 3. Managing targets
 
 Three ways: the **Targets tab**, the **bridge API**, or the **CLI**. All resolve a target to a
-canonical slug (lowercase; `DrAnsay` → `dransay`) used for its dir, logs, sessions, and pm2 name.
+canonical slug (lowercase; `AcmeCorp` → `acmecorp`) used for its dir, logs, sessions, and pm2 name.
 
 ### Add a target
 - **Panel:** Targets → "Add / update target" → program name + in-scope hosts (one per line, wildcards ok).

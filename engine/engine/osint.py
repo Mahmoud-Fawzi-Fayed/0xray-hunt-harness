@@ -11,11 +11,17 @@ The live in-scope targets feed per-target recon. No LLM in enumeration (it's mec
 PD httpx isn't reliably present (the `httpx` on PATH is often the Python lib), so the
 liveness/tech probe uses a robust curl-based fingerprint that always works.
 """
+import time
 import json
 import re
 import subprocess
 from shutil import which
 from urllib.parse import urlparse
+
+# Cloudflare/WAFs routinely 429/403 the default curl UA — present as a real browser so our fingerprint
+# probes aren't rate-limited out of existence (which silently cuts recon coverage).
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
 def _run(cmd, timeout=120):
@@ -37,7 +43,7 @@ def enumerate_subdomains(apex, log=print):
         names = [x.strip().lower() for x in out.splitlines() if x.strip()]
         subs.update(names)
         log(f"osint: assetfinder -> +{len(names)} name(s)")
-    crt = _run(["curl", "-s", "-m", "25", f"https://crt.sh/?q=%25.{apex}&output=json"], 30)
+    crt = _run(["curl", "-s", "-A", _UA, "-m", "25", f"https://crt.sh/?q=%25.{apex}&output=json"], 30)
     try:
         c = 0
         for x in json.loads(crt):
@@ -67,11 +73,18 @@ def _fingerprint(headers, body):
 
 
 def probe(host, timeout=12):
-    """Probe https then http; return target dict or None if dead."""
+    """Probe https then http; return target dict or None if dead. Backs off once on 429/503 so a
+    target's rate-limiter (Cloudflare 429) doesn't cost us the fingerprint + downstream recon coverage."""
     for scheme in ("https", "http"):
         url = f"{scheme}://{host}/"
-        out = _run(["curl", "-s", "-m", str(timeout), "-L", "-D", "-", "-o", "/tmp/_osint_body", url], timeout + 6)
-        codes = re.findall(r'^HTTP/\S+\s+(\d{3})', out, re.M)
+        out, codes = "", []
+        for attempt in range(2):
+            out = _run(["curl", "-s", "-A", _UA, "-m", str(timeout), "-L", "-D", "-", "-o", "/tmp/_osint_body", url], timeout + 6)
+            codes = re.findall(r'^HTTP/\S+\s+(\d{3})', out, re.M)
+            if codes and int(codes[-1]) in (429, 503) and attempt == 0:
+                time.sleep(6)                              # polite backoff, then one retry
+                continue
+            break
         if not codes:
             continue
         headers = {}

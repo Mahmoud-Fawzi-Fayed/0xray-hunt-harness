@@ -21,7 +21,8 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_DIR)
 from scope import Scope            # noqa: E402
 from state import Engagement       # noqa: E402
 import agent as A                  # noqa: E402
@@ -37,12 +38,35 @@ CLASS_WEIGHT = {"rce": 100, "sqli": 90, "ssrf": 85, "auth-bypass": 85, "idor": 8
 ALL_PHASES = ["recon", "rank", "map", "hunt", "validate", "report"]
 DEFAULT_PHASES = ["recon", "rank", "map"]
 
+# generic infra/hosting/CDN fingerprints that are NOT worth auto-drafting a skill for (too generic)
+INFRA_TECH = {"nginx", "apache", "cloudflare", "akamai", "fastly", "varnish", "iis", "openresty",
+              "envoy", "haproxy", "ubuntu", "debian", "aws", "gcp", "azure", "cloudfront", "tomcat",
+              "netlify", "vercel", "heroku", "github-pages", "gitbook", "readme", "squarespace", "wix"}
+
+
+def _lrn(fn, *a, **k):
+    """Call engine/learn.py best-effort — the learning loop must NEVER crash or slow a hunt into failure."""
+    try:
+        import learn as _L
+        return getattr(_L, fn)(*a, **k)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _authmod():
+    try:
+        import authsession as _AS
+        return _AS
+    except Exception:  # noqa: BLE001
+        return None
+
 
 class Engine:
     def __init__(self, scope_path, base, model, max_hunts, max_turns, timeout, mock=False,
                  allow_intrusive=False, parallel=3, expand=False):
         self.scope = Scope.load(scope_path)
         self.eng = Engagement(base, self.scope.name)
+        self.base = base
         self.model, self.max_hunts = model, max_hunts
         self.max_turns, self.timeout, self.mock = max_turns, timeout, mock
         self.allow_intrusive = allow_intrusive
@@ -113,6 +137,31 @@ class Engine:
                          + ", ".join(urlparse(u).hostname for u in new_seeds[:10]))
 
     # ---------------- recon (deterministic, SPA-aware, per target) ----------------
+    def _gather_params_cached(self, R):
+        """gau historical + katana live-crawl is slow (~15 min) AND hits the target (katana crawls it,
+        which is what earns a 429). Cache the mined params per engagement so persist rounds reuse them
+        instead of re-hammering the target every 30 min. Refresh after HUNT_PARAMS_TTL (default 6h)."""
+        import time as _t
+        import json as _j
+        ttl = int(os.environ.get("HUNT_PARAMS_TTL", "21600"))
+        cache = os.path.join(self.eng.dir, "params_cache.json")
+        try:
+            if os.path.isfile(cache):
+                c = _j.load(open(cache))
+                age = _t.time() - c.get("ts", 0)
+                if age < ttl and isinstance(c.get("params"), list):
+                    self.eng.log(f"recon: params from cache ({len(c['params'])} pair(s), {int(age)}s old) "
+                                 f"— skipped gau+katana to avoid re-hammering the target (TTL {ttl}s)")
+                    return c["params"]
+        except Exception:  # noqa: BLE001
+            pass
+        params = R.gather_params(self.scope, log=self.eng.log)
+        try:
+            _j.dump({"ts": _t.time(), "params": params}, open(cache, "w"))
+        except Exception:  # noqa: BLE001
+            pass
+        return params
+
     def recon(self):
         self.eng.set_phase("recon")
         if self.mock:
@@ -136,7 +185,7 @@ class Engine:
         plat = R.platform_recon(self.scope, log=self.eng.log)        # .well-known / Firebase / OAuth / robots
         api = R.openapi_recon(self.scope, log=self.eng.log)          # OpenAPI schema -> categorized + auth-sweep
         endpoints, oos = R.spa_recon(self.scope, log=self.eng.log)   # current API endpoints + JS secrets
-        params = R.gather_params(self.scope, log=self.eng.log)       # all input parameters (gau historical)
+        params = self._gather_params_cached(R)                        # gau+katana, cached per engagement (TTL)
         # categorize every (endpoint | param) into its applicable attack classes, expand to work units
         expanded = list(api) + list(plat)                            # api + platform items are already categorized
         for it in endpoints:
@@ -145,7 +194,16 @@ class Engine:
         for it in params:
             for cls in R.classes_for_param(it.get("param", ""), it.get("url", "")):
                 e = dict(it); e["vuln_class"] = cls; expanded.append(e)
+        # Belt-and-suspenders: never let a non-curlable target (robots/scope glob with '*', or a
+        # static asset) reach the worklist — those always waste a hunt step and yield 'nothing'.
+        # A leaked-secret item keeps its own .js URL (the bundle IS the finding), so it's exempt.
+        before = len(expanded)
+        expanded = [e for e in expanded
+                    if e.get("source") == "secret" or R.is_concrete_target(e.get("url", ""))]
+        dropped = before - len(expanded)
         added = self.eng.add_surface(expanded)
+        if dropped:
+            self.eng.log(f"recon: dropped {dropped} non-curlable target(s) (glob/static) before worklist")
         if oos:
             self.eng.log(f"recon: {len(oos)} out-of-scope host(s) seen, NOT tested: {', '.join(oos[:8])}")
         self.eng.log(f"recon: {len(api)} api + {len(plat)} platform + {len(endpoints)} endpoint + "
@@ -154,13 +212,47 @@ class Engine:
     # ---------------- rank ----------------
     def rank(self):
         self.eng.set_phase("rank")
+        ym = None
+        try:
+            import yieldrank as Y
+            ym = Y.Model.load(self.base)     # yield priors + learned (your confirms up, your dups down)
+        except Exception:
+            ym = None
         for s in self.eng.state["surface"]:
             base = CLASS_WEIGHT.get(s.get("vuln_class", ""), 20)
             s["priority"] = base + (5 if s.get("param") else 0) + (55 if s.get("source") == "secret" else 0)
+            if ym:
+                s["priority"] += ym.bonus(s.get("vuln_class", ""))   # cover all classes, surface most-findable first
+        self._dedup_downrank()   # known-issue surface sinks below novel surface (no-op w/o corpus)
         self.eng.save()
         wl = self.eng.worklist()
         self.eng.log(f"rank: {len(wl)} item(s) prioritized; top: "
                      + ", ".join(f"{s['vuln_class']}@{s['url']}" for s in wl[:3]))
+
+    def _dedup_downrank(self):
+        """Sink surface that maps onto a KNOWN issue (public disclosure or own past report) below
+        novel surface, so hunt budget goes where dups are least likely. No-op without a corpus."""
+        try:
+            import dedup as D
+        except Exception:
+            return
+        cp = D.Corpus(self.scope.name, base=self.base)
+        if not cp.records:
+            return
+        dup = review = 0
+        for s in self.eng.state["surface"]:
+            v = cp.check({"vuln_class": s.get("vuln_class", ""), "url": s.get("url", ""),
+                          "title": s.get("note", "")})
+            s["dedup_verdict"] = v["verdict"]
+            if v["verdict"] == "LIKELY_DUP":
+                s["priority"] = s.get("priority", 20) - 80
+                dup += 1
+            elif v["verdict"] == "REVIEW":
+                s["priority"] = s.get("priority", 20) - 25
+                review += 1
+        if dup or review:
+            self.eng.log(f"rank: dedup down-ranked {dup} likely-dup + {review} review item(s) "
+                         f"(corpus={len(cp.records)}) — novel surface floats to top")
 
     # ---------------- map (arsenal categorization — the default deliverable) ----------------
     def map(self):
@@ -178,6 +270,22 @@ class Engine:
             if s["vuln_class"] not in g["classes"]:
                 g["classes"].append(s["vuln_class"])
         tech_sk = SM.tech_skills(tech)
+        # self-learning: a detected app/framework with NO playbook is a capability gap -> research +
+        # auto-draft a skill so the NEXT hunt already knows it. Infra fingerprints are skipped (too generic).
+        learned_now = 0
+        for t in ([] if self.mock else tech):        # skip network research during mock/self-test runs
+            tl = (t or "").lower()
+            if not tl or tl in INFRA_TECH or SM.tech_skills([tl]):
+                continue
+            if learned_now >= 3:                     # bound per-run latency
+                _lrn("record_gap", "tech", tl, f"{self.scope.name}: detected {tl}, no skill (deferred)", self.base)
+                continue
+            r = _lrn("autolearn", "tech", t, context=f"{self.scope.name}: detected {t}, no existing skill",
+                     base=self.base)
+            if isinstance(r, dict) and r.get("registered"):
+                learned_now += 1
+                self.eng.log(f"learn: no skill for '{t}' -> drafted {os.path.basename(os.path.dirname(r['path']))} "
+                             f"(self-authored, review before relying on it)")
         lines = [f"# Arsenal map — {self.scope.name}", "",
                  f"**Service / tech:** {', '.join(tech) or '?'}  ",
                  f"**Tech-wide skills:** {', '.join('`'+s+'`' for s in tech_sk) or 'none'}  ",
@@ -222,6 +330,17 @@ class Engine:
     # ---------------- hunt ----------------
     def hunt(self):
         self.eng.set_phase("hunt")
+        # load an authenticated session (if HUNT_AUTH=1 + one was provisioned) to reach behind-login surface
+        self._auth_session = None
+        if os.environ.get("HUNT_AUTH") == "1":
+            _AS = _authmod()
+            if _AS:
+                self._auth_session = _AS.load(self.scope.name, self.base)
+                if _AS.valid(self._auth_session):
+                    self.eng.log(f"hunt: AUTHENTICATED — using test session on {self._auth_session.get('host')} "
+                                 f"(user {self._auth_session.get('user')})")
+                else:
+                    self.eng.log("hunt: HUNT_AUTH=1 but no valid session yet — hunting unauthenticated this round")
         wl = self.eng.worklist()[: self.max_hunts]
         todo = []
         for it in wl:
@@ -232,9 +351,15 @@ class Engine:
                 todo.append(it)
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
         for it, f in self._run_parallel(self._hunt_agent, todo):
+            if f and f.get("error"):
+                # a transient agent error (parse/rate-limit/timeout) must NOT permanently mark the
+                # endpoint tested — leave it so the next round retries it (with a fresh pool model).
+                self.eng.log(f"hunt: error on {it.get('vuln_class')}@{it['url']} ({f['error']}) "
+                             f"— not marking tested, will retry next round")
+                continue
             self.eng.mark_tested(it)
             if f and f.get("rate_limited"):
-                self.eng.log("hunt: ⚠ claude usage limit hit — remaining results may be partial")
+                self.eng.log("hunt: ⚠ model usage limit hit — remaining results may be partial")
             if f and f.get("vulnerable"):
                 oos = self._scope_audit(f)
                 cand = {"url": it["url"], "param": it.get("param", ""), "vuln_class": it.get("vuln_class"),
@@ -248,29 +373,66 @@ class Engine:
             else:
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}")
 
+    def _capabilities_note(self):
+        """Tell the agent about the harness tools it may drive mid-hunt (all guardrail-gated)."""
+        try:
+            import sms as _SMS
+            sms_state = "ENABLED" if _SMS.enabled() else "DISABLED (skip phone-gated signups)"
+        except Exception:  # noqa: BLE001
+            sms_state = "DISABLED"
+        p, e = self.scope.name, ENGINE_DIR
+        return (
+            "\nHARNESS CAPABILITIES — use these when the finding needs them. Stay IN-SCOPE and read-only, "
+            "except account creation which is guardrail-gated. NO bruteforce/cracking (refused by policy).\n"
+            f"- Research: `python3 {e}/websearch.py search \"<query>\"`  (read a page: `... fetch <url>`). "
+            "Use it to confirm a CVE, a framework's known bugs, or a disclosed report before claiming impact.\n"
+            f"- Authenticated testing (IDOR/auth need real accounts): mint a disposable, capped, in-scope-only "
+            f"test identity with a live inbox:\n"
+            f"    `python3 {e}/identity.py new  --program {p}`   then read the verify mail: "
+            f"`python3 {e}/identity.py poll --program {p} --email <addr>`\n"
+            f"  (phone-gated signups: SMS is {sms_state}.)\n"
+            f"- Unknown stack/class with no skill? Teach the harness, then read what it drafted: "
+            f"`python3 {e}/learn.py auto --kind tech --name \"<thing>\" --context \"<why>\"`.\n"
+            "- All account/login/SMS actions pass engine/guardrails.py (scope + per-program cap) and are audited.\n")
+
     def _hunt_agent(self, it):
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
         import skill_map as SM
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
-        skills = SM.skills_for(it.get("vuln_class", "")) + SM.tech_skills(tech)
+        paths = SM.skill_paths(it.get("vuln_class", ""), tech)
+        names = [os.path.basename(os.path.dirname(p)) for p in paths]
         probe = SM.probe_for(it.get("vuln_class", ""), it["url"], it.get("param"))
         task = (self._roe() + "\n"
                 f"TASK: Test {it['url']} (parameter `{it.get('param','')}`) for {it.get('vuln_class')}, strictly "
-                f"within the rules of engagement above. Apply the methodology of: {', '.join(skills)}. "
-                f"curl-FIRST: use curl for your requests; use the Burp MCP tools ONLY if you genuinely need "
-                f"OOB/blind/fuzzing (e.g. Collaborator for blind SSRF/XXE). Starter probe: {probe} . "
+                f"within the rules of engagement above.\n"
+                f"FIRST, read and FOLLOW these skill files — they hold the exact methodology, payloads, and "
+                f"discipline/validation gates for this class. `cat` each one before you test:\n  "
+                + "\n  ".join(paths) + "\n"
+                f"curl-FIRST: use curl for your requests. Starter probe: {probe} . "
                 f"Only claim a vulnerability if you can DEMONSTRATE real, exploitable impact (not mere reflection, "
                 f"an error, or a permissive header) using ONLY in-scope, read-only actions. "
                 f"End with a fenced ```json``` object: "
                 f'{{"vulnerable":true|false,"severity":"low|medium|high|critical","evidence":"<what proves it>",'
                 f'"request":"<the winning request>","hosts_contacted":["every host you sent a request to"],'
-                f'"proof_note":"<empty, or why proof was limited by scope/read-only>"}}.')
-        r = A.run_agent(task, model=self.model, max_turns=self.max_turns, timeout=self.timeout)
+                f'"proof_note":"<empty, or why proof was limited by scope/read-only>"}}.'
+                + self._capabilities_note())
+        sess = getattr(self, "_auth_session", None)             # inject the logged-in session if it fits this host
+        if sess:
+            _AS = _authmod()
+            if _AS:
+                task += _AS.auth_block(sess, it["url"])
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # pooled sessions per target
+        self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} model={r.get('model', '?')} "
+                     f"skills=[{','.join(names)}]" + (f" ERR={r['error']}" if r.get("error") else ""))
         if r.get("error"):
-            self.eng.log(f"hunt agent error ({it['url']}): {r['error']}")
-            return {"vulnerable": False, "rate_limited": r["error"] == "rate-limited"}
-        return A.extract_json(r["result"]) or {"vulnerable": False}
+            # learn from the failure: a model/class that keeps erroring is visible in the journal + panel
+            _lrn("record_outcome", self.scope.name, it.get("vuln_class"), "error", r["error"], base=self.base)
+            return {"vulnerable": False, "error": r["error"], "rate_limited": r["error"] == "rate-limited"}
+        f = A.extract_json(r["result"]) or {"vulnerable": False}
+        if isinstance(f, dict):
+            f["_model"], f["_skills"] = r.get("model"), names
+        return f
 
     # ---------------- validate ----------------
     def validate(self):
@@ -284,27 +446,38 @@ class Engine:
                 if v.get("severity"):
                     c["severity"] = v["severity"]  # use the validator's CALIBRATED severity, not the hunt's
                 self.eng.confirm(c, v)
+                _lrn("record_outcome", self.scope.name, c["vuln_class"], "confirmed",
+                     v.get("reason", ""), base=self.base)
                 self.eng.log(f"validate: CONFIRMED {c['vuln_class']} @ {c['url']} ({v.get('severity','')})"
                              + (f" ⚠ scope-flagged: {', '.join(c['scope_warning'])}" if c.get('scope_warning') else ''))
             else:
+                _lrn("record_outcome", self.scope.name, c["vuln_class"], "false-positive",
+                     (v or {}).get("reason", ""), base=self.base)
                 self.eng.log(f"validate: rejected (false positive) {c['vuln_class']} @ {c['url']} — "
                              f"{(v or {}).get('reason', 'no verdict')}")
 
     def _validate_agent(self, c):
         if self.mock:
             return MOCK_VALIDATE.get((c["url"], c["vuln_class"]), {"real": False, "reason": "mock-default"})
+        import skill_map as SM
+        paths = SM.skill_paths(c.get("vuln_class", ""))
+        tv = os.path.join(SM.SKILLS_DIR, "triage-validation", "SKILL.md")
+        if os.path.isfile(tv):
+            paths = [tv] + [p for p in paths if p != tv]
         task = (self._roe() + "\n"
                 f"Adversarially verify a claimed finding (be skeptical — default to false positive if unproven). "
                 f"Claim: {c['vuln_class']} at {c['url']} (param `{c.get('param','')}`). "
-                f"Reported evidence: {c.get('evidence','')[:400]}. "
+                f"Reported evidence: {c.get('evidence','')[:400]}.\n"
+                f"FIRST read and FOLLOW these gates/methodology (`cat` each):\n  " + "\n  ".join(paths) + "\n"
                 f"Independently re-test it WITHIN the rules of engagement above (in-scope + read-only only). If the only "
                 f"proof would require an out-of-scope host or an intrusive action, treat the impact as UNPROVEN and lower "
                 f"the severity. Is it a REAL, exploitable vulnerability or a false positive? "
                 f"End with a fenced ```json``` object: "
                 f'{{"real":true|false,"severity":"low|medium|high|critical","reason":"<why, incl. any scope/intrusive caveat>"}}.')
-        r = A.run_agent(task, model=self.model, max_turns=self.max_turns, timeout=self.timeout)
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # same pool as hunt
+        self.eng.log(f"validate: {c['vuln_class']}@{c['url']} model={r.get('model', '?')}"
+                     + (f" ERR={r['error']}" if r.get("error") else ""))
         if r.get("error"):
-            self.eng.log(f"validate agent error: {r['error']}")
             return {"real": False, "reason": f"verify error: {r['error']}"}
         return A.extract_json(r["result"]) or {"real": False, "reason": "no verdict"}
 
@@ -312,6 +485,11 @@ class Engine:
     def report(self):
         self.eng.set_phase("report")
         c = self.eng.state["confirmed"]
+        try:
+            import dedup as D
+            D.annotate(self.scope.name, c, base=self.base)   # tag each finding with dup-risk + nearest match
+        except Exception as e:
+            self.eng.log(f"report: dedup annotate skipped ({e})")
         s = self.eng.summary()
         lines = [f"# Engagement report — {self.scope.name}", "",
                  f"In scope: `{'`, `'.join(self.scope.in_scope)}`  ",
@@ -326,6 +504,13 @@ class Engine:
         for i, f in enumerate(c, 1):
             block = [f"## {i}. {f.get('vuln_class','?').upper()} — {f.get('severity','?')}",
                      f"- **URL:** `{f['url']}`" + (f" (param `{f['param']}`)" if f.get("param") else "")]
+            dd = f.get("dedup")
+            if dd and dd.get("corpus_size"):
+                line = f"- **Dedup:** {dd['verdict']} (score {dd['score']}, corpus {dd['corpus_size']})"
+                near = dd["matches"][0] if dd.get("matches") else None
+                if near:
+                    line += f" — nearest: {near.get('title', '')[:60]} {near.get('link', '')}".rstrip()
+                block.append(line)
             if f.get("scope_warning"):
                 block.append(f"- ⚠️ **SCOPE WARNING:** PoC referenced out-of-scope host(s): "
                              f"`{'`, `'.join(f['scope_warning'])}` — verify the in-scope finding holds without them.")
@@ -343,7 +528,10 @@ class Engine:
     def run(self, phases):
         for ph in ALL_PHASES:
             if ph in phases:
-                getattr(self, ph)()
+                try:
+                    getattr(self, ph)()
+                except Exception as e:                    # one phase failing must not abort the rest
+                    self.eng.log(f"phase {ph} error (continuing with partial state): {type(e).__name__}: {e}")
         self.eng.set_phase("done")
         self.eng.log(f"engine done | {self.eng.summary()}")
 

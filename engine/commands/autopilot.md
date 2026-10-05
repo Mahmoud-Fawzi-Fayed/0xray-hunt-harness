@@ -48,23 +48,36 @@ without losing findings.
 
 ## What This Does
 
-Runs the full hunt cycle without stopping for approval at each step:
+Runs the full anti-duplicate hunt cycle without stopping for approval at each step — until draft:
 
 ```
-1. SCOPE     Load and confirm program scope
-2. RECON     Run recon (or use cached if < 7 days old)
-3. RANK      Prioritize attack surface (recon-ranker agent)
-4. HUNT      Test P1 endpoints systematically
-5. VALIDATE  7-Question Gate on findings
-6. REPORT    Draft reports for validated findings
-7. CHECKPOINT  Present to human for review
+1.  SCOPE       Load and confirm program scope
+2.  SYNC        /dedup sync — build the known-issue corpus (your reports + public H1/Bugcrowd disclosures)
+3.  RECON       Run recon (or use cached if < 7 days old)
+4.  NOVELTY     /dedup watch — diff the surface; hunt the fresh/changed surface (lowest dup-risk) FIRST
+5.  RANK        /yield — cover ALL classes, ordered by find-likelihood + your learned dup rate
+6.  HUNT        Test prioritized surface systematically (novelty delta first)
+7.  VALIDATE    7-Question Gate on findings
+8.  DEDUP GATE  /dedup check — NOVEL -> draft; LIKELY_DUP -> HELD (not drafted) unless a differentiator
+9.  DRAFT       Draft reports for novel validated findings
+10. CHECKPOINT  Present to human; STOP before any submit
 ```
+
+One-shot engine version (same stop-at-draft contract, deterministic control flow):
+
+```
+python3 engine/orchestrator.py --scope <scope.json> --hunt
+```
+
+Or delegate to the Cursor subagent `hunt-orchestrator`, which sequences `recon-novelty` ->
+`vuln-hunter` -> `dedup-oracle` -> `report-drafter` and stops at draft.
 
 ## Safety Guarantees
 
 - **Every URL** is checked against the scope allowlist before any request
 - **Every request** is logged to `hunt-memory/audit.jsonl`
 - **Reports are NEVER auto-submitted** — always requires explicit approval
+- **Duplicates are HELD, not drafted** — the dedup gate scores every finding before drafting; a LIKELY_DUP is held with its matching disclosure link until you prove a differentiator
 - **PUT/DELETE/PATCH** require human approval in --yolo mode (safe methods only)
 - **Circuit breaker** stops hammering if 5 consecutive 403/429/timeout on same host
 - **Rate limited** at 1 req/sec (testing) and 10 req/sec (recon)

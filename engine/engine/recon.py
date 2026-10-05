@@ -81,6 +81,34 @@ def _testable(item):
         item.get("source") == "form" or bool(item.get("param"))
 
 
+# static assets / downloadable files — never an injection/IDOR target on their own. (A secret leaked
+# INSIDE a .js bundle is still kept: that item carries source="secret", handled by the caller.)
+STATIC_EXT = re.compile(
+    r'\.(?:png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|heic|'
+    r'css|js|mjs|cjs|map|woff2?|ttf|otf|eot|'
+    r'mp4|webm|ogv|ogg|mp3|wav|flac|m4a|avi|mov|wmv|mkv|'
+    r'pdf|zip|gz|tgz|bz2|tar|rar|7z|dmg|pkg|exe|msi|apk|'
+    r'doc|docx|xls|xlsx|ppt|pptx|csv)(?:$|[?#])', re.I)
+
+
+def is_static_asset(url):
+    return bool(STATIC_EXT.search(urlparse(str(url or "")).path))
+
+
+def is_concrete_target(url):
+    """True iff `url` is something we can actually hit with curl as a single concrete target.
+    Robots/scope GLOB patterns (/api/*, /*?*builder.preview*, */search?*) and static assets are
+    NOT concrete targets — testing them wastes a hunt step and always yields 'nothing'."""
+    u = str(url or "")
+    if not u or "://" not in u:
+        return False
+    if "*" in u:                 # literal glob from a robots.txt Disallow or a scope pattern
+        return False
+    if is_static_asset(u):
+        return False
+    return True
+
+
 def _mine(text, found_rel, found_abs):
     for m in REL_API.findall(text):
         found_rel.add(m)
@@ -355,7 +383,7 @@ def _probe(url, timeout=12):
     """GET url, return (status_code, body). Status-aware (unlike _get)."""
     import subprocess
     try:
-        out = subprocess.run(["curl", "-s", "-m", str(timeout), "-L", "-w", "\\n__ST__%{http_code}", url],
+        out = subprocess.run(["curl", "-s", "-A", _UA, "-m", str(timeout), "-L", "-w", "\\n__ST__%{http_code}", url],
                              capture_output=True, text=True, timeout=timeout + 5).stdout
         if "__ST__" in out:
             body, st = out.rsplit("__ST__", 1)
@@ -514,13 +542,42 @@ def platform_recon(scope, log=print):
                 except Exception:
                     pass
             elif "robots" in wk:
-                dis = [ln.split(":", 1)[1].strip() for ln in body.splitlines()
-                       if ln.lower().startswith("disallow:") and ln.split(":", 1)[1].strip() not in ("", "/")]
-                if dis:
-                    log(f"platform: {base}/robots.txt disallows {len(dis)} path(s): {', '.join(sorted(set(dis))[:6])}")
-                    for d in sorted(set(dis))[:10]:
-                        items.append({"url": base + d, "param": "", "vuln_class": "info-leak",
-                                      "source": "robots-disallow", "note": "robots-disallowed path"})
+                raw = [ln.split(":", 1)[1].strip() for ln in body.splitlines()
+                       if ln.lower().startswith("disallow:")]
+                # keep only CONCRETE paths: no glob/query patterns (/*manifest, /*?*builder.preview*,
+                # */search?*), no static assets. A robots glob is a pattern, not a curl-able URL.
+                cand = []
+                for d in raw:
+                    if not d or not d.startswith("/") or d == "/":
+                        continue
+                    if any(c in d for c in "*$?") or is_static_asset(d):
+                        continue
+                    if d not in cand:
+                        cand.append(d)
+                # Soft-404 baseline: SPA / CDN catch-all sites return 200 + the app-shell HTML for EVERY
+                # path (with path-dependent length, so size alone is useless), so "exists" can't mean "not
+                # 404". Probe a random non-existent path to learn the catch-all; then DROP any disallow that
+                # returns the same status AND is itself HTML shell. A genuine leak (/.env, /.git/config, a
+                # JSON API) is NOT HTML, so it survives; a real gated path (different status) also survives.
+                import random as _rnd
+                import string as _str
+                _is_html = lambda b: bool(re.search(r'<!doctype html|<html[\s>]', (b or "")[:400], re.I))
+                bcode, bbody = _probe(base + "/zz-" + "".join(_rnd.choices(_str.ascii_lowercase + _str.digits, k=14)))
+                base_shell = _is_html(bbody)
+                live = []
+                for d in cand[:12]:
+                    code, cbody = _probe(base + d)
+                    if not code or code in (404, 410):
+                        continue
+                    if code == bcode and base_shell and _is_html(cbody):
+                        continue                         # just the catch-all app shell — not a real resource
+                    live.append((d, code))
+                if raw:
+                    log(f"platform: {base}/robots.txt -> {len(raw)} disallow(s), {len(cand)} concrete, "
+                        f"{len(live)} live: {', '.join(d for d, _ in live[:6]) or '(none)'}")
+                for d, code in live:
+                    items.append({"url": base + d, "param": "", "vuln_class": "info-leak",
+                                  "source": "robots-disallow", "note": f"robots-disallowed path (live, {code})"})
             elif "security.txt" in wk:
                 log(f"platform: {base}{wk} -> security.txt present")
     return items
@@ -583,6 +640,8 @@ def gather_params(scope, log=print, max_items=80):
         base = u.split("?", 1)[0]
         if base.count("://") != 1 or re.search(r'https?:/', urlparse(u).path or ""):
             continue  # skip malformed entries (double-scheme, etc.)
+        if is_static_asset(base) or "*" in u:
+            continue  # a static file (img/css/js/font) has no injectable param; a glob isn't a URL
         for p in parse_qs(urlparse(u).query):
             pl = p.lower()
             if pl in PARAM_NOISE or pl.startswith("utm_"):
@@ -620,4 +679,12 @@ if __name__ == "__main__":
         assert classify({"url": "/api/account", "param": "id"}) == "idor"
         assert classify({"url": "/go", "param": "url"}) == "open-redirect"
         assert classify({"url": "/x", "param": "file"}) == "lfi"
+        # junk-target filter: globs + static assets are not concrete targets
+        assert is_concrete_target("https://api.x.com/account")
+        assert is_concrete_target("https://api.x.com/users?id=FUZZ")      # FUZZ marker is fine
+        assert not is_concrete_target("https://api.x.com/api/*")          # robots/scope glob
+        assert not is_concrete_target("https://x.com/*?*builder.preview*")
+        assert not is_concrete_target("https://x.com/a/b/6697_h.gif?cc=FUZZ")  # static asset
+        assert not is_concrete_target("https://x.com/app.js")
+        assert is_static_asset("https://x.com/main.css") and not is_static_asset("https://x.com/api/css-theme")
         print("recon.py self-test: PASS")

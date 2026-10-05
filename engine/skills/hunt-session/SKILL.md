@@ -268,3 +268,15 @@ Before claiming ANY session finding:
 - Predictable/duplicate session ID: **High**
 - No invalidation on logout: **Medium → High** (depends on theft vector)
 - Missing `HttpOnly`/`SameSite` standalone: **Low/Informational** until chained
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

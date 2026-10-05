@@ -13,6 +13,7 @@ killed/resumed without losing progress. Layout:
 """
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 
@@ -20,10 +21,16 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _slug(s):
+    """Canonical on-disk name — matches targets._slug / agent._slug / the bridge so logs, activity,
+    sessions and engagement state all resolve to the SAME directory for any target name."""
+    return re.sub(r"[^a-z0-9._-]+", "-", str(s or "").strip().lower()).strip("-") or "unknown"
+
+
 class Engagement:
     def __init__(self, base, name):
-        self.dir = os.path.join(os.path.expanduser(base), name)
         self.name = name
+        self.dir = os.path.join(os.path.expanduser(base), _slug(name))   # slug => consistent everywhere
         os.makedirs(os.path.join(self.dir, "evidence"), exist_ok=True)
         self.state_path = os.path.join(self.dir, "state.json")
         self.log_path = os.path.join(self.dir, "engine.log")

@@ -189,3 +189,15 @@ exfil / RCE / ATO for a payable finding.
 - **`hunt-rce`** — Code-interpreter / shell tools are RCE-by-design when escape is possible. Chain: injection + code tool → `os.system('id')` → worker RCE.
 - **`security-arsenal`** — LLM Payload Pack: ASCII-smuggling encoder/decoder (Tags block), system-prompt-extract phrases, markdown/tool exfil templates, indirect-injection PDF/HTML carriers.
 - **`triage-validation`** — Enforce the False-Positive Gate: run-twice reproducibility, anchored leak, verifiable cross-tenant artifact, OOB-confirmed exfil. Confabulation and refusal-text are not findings.
+
+## Before you report — dedup gate
+
+Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
+order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+
+```bash
+python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+```
+
+`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
+(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).

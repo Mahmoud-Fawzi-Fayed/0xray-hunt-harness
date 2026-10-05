@@ -132,6 +132,7 @@ always-on (load first):
 ```
 redteam-mindset
 mid-engagement-ir-detection
+dedup-novelty
 ```
 
 platform (load second, conditional on fingerprint matches from step 1):
@@ -174,6 +175,7 @@ always-on:
 bb-methodology
 security-arsenal
 triage-validation
+dedup-novelty
 ```
 
 full hunt-* set (all OWASP-relevant):
@@ -192,7 +194,7 @@ hunt-brute-force     hunt-session         hunt-ldap
 hunt-nextjs          hunt-nodejs          hunt-dom
 hunt-websocket       hunt-grpc            hunt-laravel
 hunt-springboot      hunt-k8s             hunt-cicd
-hunt-source-leak     hunt-tls-network
+hunt-source-leak     hunt-tls-network     changed-js-deepdive
 ```
 
 report format: `report-writing` (`bugcrowd-reporting` if the target is on bugcrowd).
