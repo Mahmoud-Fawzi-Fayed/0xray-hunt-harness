@@ -407,14 +407,20 @@ class Handler(BaseHTTPRequestHandler):
 
             if p.path == "/verify":
                 import verify as V
-                f = dict(b.get("finding") or b)
-                prog = b.get("program") or f.get("program")
+                form = dict(b.get("finding") or b)
+                prog = b.get("program") or form.get("program")
                 files = b.get("files") or []
                 intake = V.ingest_files(files, program=prog, base=self.base) if files else None
+                parsed = V.extract_finding(intake["text"]) if (intake and intake.get("text")) else {}
+                f = dict(parsed)
+                for k in ("vuln_class", "severity", "url", "title", "steps", "poc", "impact", "evidence"):
+                    if form.get(k):
+                        f[k] = form[k]                 # an explicit form value overrides what we parsed from files
                 if intake:
                     f["evidence"] = ((f.get("evidence", "") or "") + "\n" + intake["text"]).strip()
                     f["_images"] = intake["images"]
                 res = V.verify_finding(f, program=prog, base=self.base)
+                res["extracted"] = {k: parsed[k] for k in ("vuln_class", "severity", "url", "title") if parsed.get(k)}
                 if intake:
                     res["uploads"] = {"saved": [s["name"] for s in intake["saved"]],
                                       "rejected": intake["rejected"], "images": intake["images"]}

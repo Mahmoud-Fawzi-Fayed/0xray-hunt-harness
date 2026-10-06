@@ -283,6 +283,74 @@ def combine_verdict(det, opinion):
     return v
 
 
+# ------- extract a finding straight from an uploaded report (md / txt / json) -------
+CLASS_HINTS = [
+    (r"\bsql ?injection|\bsqli\b", "sqli"), (r"\bnosql", "nosqli"),
+    (r"cross.?site script|\bxss\b", "xss"), (r"remote code|\brce\b", "rce"),
+    (r"\bidor\b|insecure direct object|broken object level|\bbola\b|broken access", "idor"),
+    (r"privilege escalation", "idor"), (r"authentication bypass|auth bypass|broken auth", "auth-bypass"),
+    (r"business logic", "business-logic"), (r"\bssrf\b|server.?side request|xspa", "ssrf"),
+    (r"\blfi\b|local file|path traversal", "lfi"), (r"\bxxe\b", "xxe"), (r"\bcors\b", "cors"),
+    (r"\bcsrf\b|cross.?site request", "csrf"), (r"open redirect", "open-redirect"),
+    (r"exposed secret|leaked (key|credential|token)|hardcoded secret", "secret"),
+    (r"\bssti\b|template injection", "ssti"), (r"\bjwt\b", "auth-bypass"),
+    (r"graphql", "graphql"), (r"webhook", "webhook"), (r"\bmcp\b", "mcp"),
+]
+
+
+def _first(text, pats, group=1):
+    for p in pats:
+        m = re.search(p, text, re.I | re.M)
+        if m:
+            return (m.group(group) or "").strip()
+    return ""
+
+
+def _section_md(text, keys):
+    """Grab the body under a heading like 'Steps to reproduce' until the next heading."""
+    kset = [k.lower() for k in keys]
+    out, cap = [], False
+    for ln in (text or "").splitlines():
+        head = bool(re.match(r"^\s*#{1,6}\s", ln)) or (0 < len(ln.strip()) < 42 and ln.strip().endswith(":"))
+        label = ln.strip().lstrip("#").strip().rstrip(":").strip().lower()
+        if cap and head and label not in kset:
+            break
+        if not cap and head and any(label == k or label.startswith(k) for k in kset):
+            cap = True
+            continue
+        if cap:
+            out.append(ln)
+    return "\n".join(out).strip()[:4000]
+
+
+def extract_finding(text):
+    """Best-effort parse of a report into {vuln_class,severity,url,title,steps,poc,impact}. Only non-empty."""
+    t = text or ""
+    low = t.lower()
+    f = {}
+    f["title"] = _first(t, [r"^\s*#\s*(.+)$", r"^\s*title\s*[:\-]\s*(.+)$", r'"title"\s*:\s*"([^"]+)"'])[:160]
+    f["url"] = _first(t, [r"^\s*(?:url|affected|endpoint|target)\s*[:\-]\s*(\S+)",
+                          r'"url"\s*:\s*"([^"]+)"', r"(https?://[^\s\"')<>]+)"])
+    sev = _first(t, [r"^\s*severity\s*[:\-]\s*(critical|high|medium|low)",
+                     r'"severity"\s*:\s*"(critical|high|medium|low)', r"\b(critical|high|medium|low)\b"])
+    if sev:
+        f["severity"] = sev.lower()
+    cls = _first(t, [r"^\s*(?:class|vuln(?:erability)? ?type|type)\s*[:\-]\s*([A-Za-z\- ]{2,30})",
+                     r'"vuln_class"\s*:\s*"([^"]+)"'])
+    if cls:
+        f["vuln_class"] = cls.strip().lower().replace(" ", "-")
+    else:
+        for p, c in CLASS_HINTS:
+            if re.search(p, low):
+                f["vuln_class"] = c
+                break
+    f["steps"] = _section_md(t, ["steps to reproduce", "reproduction", "steps", "repro"])
+    f["poc"] = _section_md(t, ["proof of concept", "poc", "exploit", "payload"]) \
+        or "\n".join(re.findall(r"```.*?```", t, re.S))[:2000]
+    f["impact"] = _section_md(t, ["security impact", "impact"])
+    return {k: v for k, v in f.items() if v}
+
+
 def _main(argv=None):
     ap = argparse.ArgumentParser(description="finding verification / triage gate")
     ap.add_argument("--base", default=DEFAULT_BASE)
@@ -354,6 +422,16 @@ def _selftest():
     # 5) combined verdict = stricter of gate + expert opinion
     assert combine_verdict({"verdict": "READY"}, {"verdict": "DO_NOT_SUBMIT"}) == "DO_NOT_SUBMIT"
     assert combine_verdict({"verdict": "NEEDS_FIXES"}, {"verdict": "READY"}) == "NEEDS_FIXES"
+    # 6) extract a finding straight from an uploaded report
+    report = ("# IDOR on /api/orders exposes other users' orders\n"
+              "Severity: High\nURL: https://app.example.com/api/orders/1032\n\n"
+              "## Steps to reproduce\n1) login as A\n2) as account B, GET /api/orders/1032\n\n"
+              "## Proof of concept\n```\ncurl -H 'cookie: B' .../orders/1032  -> account A's order\n```\n\n"
+              "## Impact\nany user reads any other user's orders (cross-account PII)")
+    ex = extract_finding(report)
+    assert ex.get("vuln_class") == "idor", ex
+    assert ex.get("severity") == "high" and "orders/1032" in ex.get("url", ""), ex
+    assert "login as A" in ex.get("steps", "") and "curl" in ex.get("poc", "") and "cross-account" in ex.get("impact", ""), ex
     print("verify.py self-test: PASS")
     return 0
 

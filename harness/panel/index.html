@@ -76,6 +76,10 @@
   .row2{display:flex;gap:10px}.row2>div{flex:1}
   .empty{color:var(--dim);font-size:12px;padding:14px 4px}
   .tag{font-family:var(--mono);font-size:11px;color:var(--mut)}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:.15s;background:var(--panel2)}
+  .drop:hover,.drop.over{border-color:var(--acc);background:#10131c}
+  .fchip{display:inline-flex;align-items:center;gap:7px;background:#141a25;border:1px solid var(--line);border-radius:14px;padding:3px 10px;margin:3px 3px 0 0;font-size:12px}
+  .fchip .x{cursor:pointer;color:var(--mut);font-weight:700}.fchip .x:hover{color:var(--red)}
 </style>
 </head>
 <body>
@@ -175,16 +179,26 @@
 
     <!-- VERIFY FINDING -->
     <section class="page" id="p-verify">
-      <div class="box"><div class="h"><span class="t">Verify a finding before you report it</span><span class="dim" style="font-size:11px">real PoC + steps + impact → READY / NEEDS-FIXES / DO-NOT-SUBMIT</span></div><div class="b">
-        <div class="row2"><div class="fld"><label>Program</label><input id="vf-prog" placeholder="paddle"></div><div class="fld"><label>Vuln class</label><input id="vf-class" placeholder="idor / xss / ssrf / rce …"></div></div>
-        <div class="row2"><div class="fld"><label>Severity</label><input id="vf-sev" placeholder="low / medium / high / critical"></div><div class="fld"><label>Affected URL (must be in-scope)</label><input id="vf-url" placeholder="https://host/path"></div></div>
-        <div class="fld"><label>Title</label><input id="vf-title" placeholder="short, specific"></div>
-        <div class="fld"><label>Reproduction steps</label><textarea id="vf-steps" placeholder="1) … 2) … 3) …"></textarea></div>
-        <div class="fld"><label>PoC (payload / request)</label><textarea id="vf-poc"></textarea></div>
-        <div class="fld"><label>Evidence (response / output that proves the impact)</label><textarea id="vf-ev"></textarea></div>
-        <div class="fld"><label>Security impact</label><textarea id="vf-impact" style="min-height:52px"></textarea></div>
-        <div class="fld"><label>Attach files — report + evidence (screenshots, HAR, request/response, .md/.json/.txt)</label><input type="file" id="vf-files" multiple style="padding:6px"></div>
-        <label style="display:inline-flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;color:var(--ink)"><input type="checkbox" id="vf-deep" style="width:auto"> deep LLM triager (slower, stricter)</label>
+      <div class="box"><div class="h"><span class="t">Verify a finding before you report it</span><span class="dim" style="font-size:11px">upload your report + evidence → READY / NEEDS-FIXES / DO-NOT-SUBMIT</span></div><div class="b">
+        <div id="vf-drop" class="drop" onclick="document.getElementById('vf-files').click()">
+          <div style="font-size:26px;line-height:1">⬆</div>
+          <div style="margin-top:6px"><b>Drop your report + evidence here</b>, or <span style="color:var(--acc)">click to choose</span></div>
+          <div class="dim" style="font-size:11px;margin-top:4px">multiple files OK — report (.md/.txt/.json) + screenshots / HAR / request-response. Class, severity, URL, steps, PoC &amp; impact are auto-extracted from the files.</div>
+          <input type="file" id="vf-files" multiple style="display:none" onchange="vfAddFiles(this.files);this.value='';">
+        </div>
+        <div id="vf-filelist" style="margin:8px 0 2px"></div>
+        <div class="row2"><div class="fld"><label>Program (for scope + rules)</label><input id="vf-prog" placeholder="paddle"></div>
+          <div class="fld" style="display:flex;align-items:flex-end"><label style="display:inline-flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;color:var(--ink);margin:0 0 9px"><input type="checkbox" id="vf-deep" style="width:auto"> deep expert triage (slower, stricter)</label></div></div>
+        <details style="margin:4px 0 2px"><summary class="dim" style="cursor:pointer;font-size:12px;user-select:none">Optional — type or override fields (auto-detected from files if left blank)</summary>
+          <div style="margin-top:10px">
+            <div class="row2"><div class="fld"><label>Vuln class</label><input id="vf-class" placeholder="idor / xss / ssrf …"></div><div class="fld"><label>Severity</label><input id="vf-sev" placeholder="low / medium / high / critical"></div></div>
+            <div class="fld"><label>Affected URL</label><input id="vf-url" placeholder="https://host/path"></div>
+            <div class="fld"><label>Title</label><input id="vf-title"></div>
+            <div class="fld"><label>Reproduction steps</label><textarea id="vf-steps"></textarea></div>
+            <div class="fld"><label>PoC (payload / request)</label><textarea id="vf-poc"></textarea></div>
+            <div class="fld"><label>Evidence (response / output)</label><textarea id="vf-ev"></textarea></div>
+            <div class="fld"><label>Security impact</label><textarea id="vf-impact" style="min-height:52px"></textarea></div>
+          </div></details>
         <div style="margin-top:12px"><button class="pri" onclick="verifyFinding()">Verify</button><span class="dim" style="margin-left:10px;font-size:11px">Checks per-class PoC minimum, always-rejected list, scope, the program's qualifying list, severity honesty + dedup.</span></div>
         <div id="vf-msg" class="msg"></div></div></div>
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
@@ -317,12 +331,18 @@ async function ingestTarget(){const text=document.getElementById("pgtext").value
     msg("ingMsg",`Added ${j.added} (${j.public?'public':'private'}): ${j.in_scope} in-scope, ${j.out_of_scope} out-of-scope, classes [${(j.classes||[]).join(", ")}], UA set.`,true);
     document.getElementById("pgtext").value="";document.getElementById("pgname").value="";refresh();go("targets");}catch(e){msg("ingMsg",e.message,false);}}
 function vval(id){return (document.getElementById(id).value||"").trim();}
-async function readFilesB64(input){const out=[];for(const file of (input.files||[])){try{const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onerror=rej;r.onload=()=>res(String(r.result).split(",")[1]||"");r.readAsDataURL(file);});out.push({name:file.name,type:file.type,b64});}catch(e){}}return out;}
+let VF_FILES=[];
+function vfBytes(n){return n>1048576?(n/1048576).toFixed(1)+"MB":Math.max(1,Math.round(n/1024))+"KB";}
+function vfRenderFiles(){document.getElementById("vf-filelist").innerHTML=VF_FILES.map((f,i)=>`<span class="fchip"><b>${esc(f.name)}</b> <span class="dim">${vfBytes(f.size)}</span> <span class="x" onclick="vfDelFile(${i})">✕</span></span>`).join("");}
+function vfAddFiles(list){for(const f of list){if(!VF_FILES.some(x=>x.name===f.name&&x.size===f.size))VF_FILES.push(f);}vfRenderFiles();}
+function vfDelFile(i){VF_FILES.splice(i,1);vfRenderFiles();}
+function readB64(file){return new Promise((res,rej)=>{const r=new FileReader();r.onerror=rej;r.onload=()=>res(String(r.result).split(",")[1]||"");r.readAsDataURL(file);});}
 async function verifyFinding(){
   const f={program:vval("vf-prog"),vuln_class:vval("vf-class"),severity:vval("vf-sev"),url:vval("vf-url"),title:vval("vf-title"),steps:vval("vf-steps"),poc:vval("vf-poc"),evidence:vval("vf-ev"),impact:vval("vf-impact"),deep:document.getElementById("vf-deep").checked};
-  if(!f.vuln_class||!f.url){msg("vf-msg","Enter at least a vuln class and the affected URL.",false);return;}
-  msg("vf-msg","Reading files…",true);f.files=await readFilesB64(document.getElementById("vf-files"));
-  msg("vf-msg",f.deep?"Verifying (deep triage can take ~1 min)…":"Verifying…",true);
+  if(!VF_FILES.length && !(f.vuln_class&&f.url)){msg("vf-msg","Upload your report/evidence files (or open Optional and fill the fields).",false);return;}
+  msg("vf-msg","Reading files…",true);
+  try{f.files=[];for(const file of VF_FILES)f.files.push({name:file.name,type:file.type,b64:await readB64(file)});}catch(e){msg("vf-msg","Could not read a file: "+e,false);return;}
+  msg("vf-msg",f.deep?"Verifying (deep expert triage can take ~1 min)…":"Verifying…",true);
   try{const d=await api("/verify","POST",f);renderVerdict(d);msg("vf-msg","",true);}catch(e){msg("vf-msg",e.message,false);}}
 function renderVerdict(d){
   const box=document.getElementById("vf-resultbox");box.style.display="block";
@@ -330,10 +350,11 @@ function renderVerdict(d){
   const checks=(d.checks||[]).map(c=>`<div style="padding:5px 0;border-bottom:1px solid #141a25">${c.pass?'<span style="color:var(--grn)">✓</span>':'<span style="color:var(--red)">✗</span>'} ${esc(c.check)}${c.note?` <span class="dim">— ${esc(c.note)}</span>`:""}</div>`).join("");
   const t=d.triager_opinion;const op=(t&&t.verdict)?`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><b>Expert triager:</b> <span style="color:${({READY:'var(--grn)',NEEDS_FIXES:'var(--amb)',DO_NOT_SUBMIT:'var(--red)'}[t.verdict]||'var(--mut)')}">${esc(t.verdict)}</span> <span class="dim">${esc((t.reasons||[]).join("; ").slice(0,260))}</span></div>`:(t&&t.error?`<div class="dim" style="margin-top:8px">Expert triager unavailable: ${esc(t.error)}</div>`:"");
   const u=d.uploads;const up=u?`<div class="dim" style="margin:4px 0 8px">uploaded: ${(u.saved||[]).map(esc).join(", ")||"none"}${(u.rejected&&u.rejected.length)?` · <span style="color:var(--amb)">rejected: ${u.rejected.map(r=>esc(r.name)+" ("+esc(r.reason)+")").join(", ")}</span>`:""}${u.images?` · ${u.images} image(s)`:""}</div>`:"";
+  const ex=d.extracted;const exd=(ex&&Object.keys(ex).length)?`<div class="dim" style="margin:2px 0 8px">auto-detected from files → ${Object.entries(ex).map(([k,v])=>esc(k)+": "+esc(v)).join(" · ")}</div>`:"";
   document.getElementById("vf-result").innerHTML=
     `<div style="font-size:23px;font-weight:700;color:${col}">${esc(d.verdict)} <span class="dim" style="font-size:13px;font-weight:500">· score ${d.score}/100 · ${d.accept?"ready to report":"do not submit yet"}</span></div>`+
     `<div style="margin:9px 0 12px" class="dim">dedup: ${esc((d.dedup||{}).verdict||"—")}${(d.missing&&d.missing.length)?` · missing: ${esc(d.missing.join(", "))}`:""}</div>`+
-    up+checks+op;}
+    exd+up+checks+op;}
 async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
 async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});setTimeout(refresh,1000);}catch(e){alert(e.message);}}
@@ -341,6 +362,10 @@ function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURL
 function tick(){loadCore();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
+(function(){const dz=document.getElementById("vf-drop");if(!dz)return;
+  ["dragenter","dragover"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.add("over");}));
+  ["dragleave","dragend"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.remove("over");}));
+  dz.addEventListener("drop",ev=>{ev.preventDefault();dz.classList.remove("over");if(ev.dataTransfer&&ev.dataTransfer.files)vfAddFiles(ev.dataTransfer.files);});})();
 </script>
 </body>
 </html>
