@@ -273,23 +273,30 @@ def _pool_models():
     return [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
 
 
-def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=180, max_models=4):
-    """Run the strict triager across EACH pool model and combine — the STRICTEST verdict wins, so a
-    single lenient model can't green-light an RTFS/NA/Info report. Returns {verdict, models:[...]}."""
+def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_models=4):
+    """Run the strict triager across EACH pool model IN PARALLEL and combine — the STRICTEST verdict
+    wins, so a single lenient model can't green-light an RTFS/NA/Info report. Takes its time: each model
+    gets a generous timeout and is never cut off early. Returns {verdict, opinions, models_run, agreement}."""
     import agent as A
+    from concurrent.futures import ThreadPoolExecutor
     scope = _load_scope(program or f.get("program"), base) or {}
     task = _triager_task(f, det, scope)
     models = _pool_models()[:max_models] or [None]
-    opinions = []
-    for m in models:
+    per_model_timeout = timeout or int(os.environ.get("HUNT_VERIFY_MODEL_TIMEOUT", "300"))
+
+    def _one(m):
         try:
-            r = A.run_agent(task, context=None, model=m, timeout=timeout, attempts=1)
+            r = A.run_agent(task, context=None, model=m, timeout=per_model_timeout, attempts=1)
             js = A.extract_json(r.get("result", "")) if hasattr(A, "extract_json") else None
             if isinstance(js, dict) and js.get("verdict"):
                 js["model"] = r.get("model") or m
-                opinions.append(js)
+                return js
+            return {"model": m, "error": "no verdict"}
         except Exception as e:  # noqa: BLE001
-            opinions.append({"model": m, "error": str(e)[:100]})
+            return {"model": m, "error": str(e)[:100]}
+
+    with ThreadPoolExecutor(max_workers=len(models)) as ex:
+        opinions = list(ex.map(_one, models))
     verdicts = [o["verdict"] for o in opinions if o.get("verdict") in _VERDICT_ORDER]
     final = max(verdicts, key=lambda v: _VERDICT_ORDER[v]) if verdicts else None
     return {"verdict": final, "opinions": opinions,
