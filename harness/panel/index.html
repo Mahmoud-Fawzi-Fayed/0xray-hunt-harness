@@ -205,7 +205,7 @@
       <div class="box" id="fc-box" style="display:none"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">closing removes the session + files</span></div><div class="b">
         <div id="fc-files" style="margin-bottom:10px"></div>
         <div id="fc-log" style="max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:10px;background:#0b0f1a;margin-bottom:8px"></div>
-        <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" disabled onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" disabled onclick="fcSend()">Send</button></div>
+        <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" disabled onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" disabled onclick="fcSend()">Send</button><button class="ghost" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button></div>
         <div style="margin-top:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg" style="margin-left:8px"></span></div>
       </div></div>
     </section>
@@ -389,23 +389,40 @@ function renderVerdict(d){
     exd+up+checks+op+
     `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><button class="pri" onclick="fcOpen()">Open fix chat — let the agent edit your files to fix this</button> <span class="dim" style="font-size:11px">it rewrites the report in place (adds steps/PoC sections, fixes severity, redacts PII) · you download the fixed files · closing removes the session + files</span></div>`;}
 async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
-let VF_LAST=null,FC_ID=null,FC_MTIMES={},FC_OPENING=false,FC_BUSY=false;
+let VF_LAST=null,FC_ID=null,FC_MTIMES={},FC_OPENING=false,FC_BUSY=false,FC_ABORT=null,FC_TICK=null;
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
   document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
 function fcLog(role,text,cls){const l=document.getElementById("fc-log");l.insertAdjacentHTML("beforeend",`<div style="margin:0 0 10px"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
-function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input");if(b)b.disabled=!ready;if(i)i.disabled=!ready;}
+function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=!ready;if(i)i.disabled=!ready;if(c)c.style.display=ready?"none":(FC_OPENING?"inline-block":"none");}
+function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
 async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);return;}
   if(FC_OPENING||FC_ID)return;                       // already opening/open — don't double-open
   FC_OPENING=true;fcSetReady(false);
   const box=document.getElementById("fc-box");box.style.display="block";document.getElementById("fc-log").innerHTML="";
-  fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (first reply can take a minute; Send unlocks when it's ready)","color:var(--mut)");
+  const t0=Date.now();
+  fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (0s — Send unlocks when it's ready)","color:var(--mut)");
+  FC_TICK=setInterval(()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("Opening fix chat"))l.children[1].textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s — Send unlocks when it's ready)`;},1000);
   box.scrollIntoView({behavior:"smooth"});
-  try{const req=VF_LAST.req;const d=await api("/verify/fixchat/start","POST",{program:req.program,finding:{vuln_class:req.vuln_class,severity:req.severity,url:req.url,title:req.title,steps:req.steps,poc:req.poc,evidence:req.evidence,impact:req.impact},files:req.files||[],verify:VF_LAST.res});
+  FC_ABORT=new AbortController();
+  try{const req=VF_LAST.req;
+    const r=await fetch(API+"/verify/fixchat/start",{method:"POST",headers:{"Content-Type":"application/json"},signal:FC_ABORT.signal,body:JSON.stringify({program:req.program,finding:{vuln_class:req.vuln_class,severity:req.severity,url:req.url,title:req.title,steps:req.steps,poc:req.poc,evidence:req.evidence,impact:req.impact},files:req.files||[],verify:VF_LAST.res})});
+    const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));
+    clearInterval(FC_TICK);
     if(d.error&&!d.chat_id){fcLog("system","could not open the chat: "+d.error+" — click “Open fix chat” again to retry.","color:var(--red)");return;}
-    FC_ID=d.chat_id;fcRenderFiles(d.files);fcLog("agent",d.reply);fcSetReady(true);
+    FC_ID=d.chat_id;fcHash(FC_ID);fcRenderFiles(d.files);fcLog("agent",d.reply);fcSetReady(true);
     document.getElementById("fc-input").focus();
-  }catch(e){fcLog("system","could not open the chat: "+e.message+" — click “Open fix chat” again to retry.","color:var(--red)");}
-  finally{FC_OPENING=false;}}
+  }catch(e){clearInterval(FC_TICK);
+    fcLog("system",(e.name==="AbortError"?"opening cancelled.":"could not open the chat: "+e.message)+" — click “Open fix chat” under the verdict to retry.","color:var(--red)");}
+  finally{FC_OPENING=false;FC_ABORT=null;}}
+function fcCancelOpen(){if(FC_ABORT)FC_ABORT.abort();}
+async function fcResume(cid){                       // restore a chat after a page refresh
+  try{const d=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
+    FC_ID=cid;const box=document.getElementById("fc-box");box.style.display="block";
+    document.getElementById("fc-log").innerHTML="";
+    (d.log||[]).forEach(m=>fcLog(m.role==="you"?"you":m.role==="agent"?"agent":"system",m.text,m.role==="agent"?"":"color:var(--mut)"));
+    if(!(d.log||[]).length)fcLog("system","chat restored — files below; continue the conversation.","color:var(--mut)");
+    fcRenderFiles(d.files);fcSetReady(true);
+  }catch(e){fcHash(null);}}
 async function fcSend(){const inp=document.getElementById("fc-input");const t=inp.value.trim();
   if(!t)return;
   if(FC_OPENING){fcLog("system","still opening — wait for the agent's first reply, then send.","color:var(--amb)");return;}
@@ -424,7 +441,7 @@ async function fcSend(){const inp=document.getElementById("fc-input");const t=in
   finally{FC_BUSY=false;if(FC_ID)fcSetReady(true);inp.focus();}}
 async function fcClose(){if(!FC_ID)return;if(!confirm("Close the chat? The agent session AND the uploaded/edited files are removed (download anything you need first)."))return;
   try{const d=await api("/verify/fixchat/close","POST",{chat_id:FC_ID});
-    document.getElementById("fc-box").style.display="none";FC_ID=null;FC_MTIMES={};
+    document.getElementById("fc-box").style.display="none";FC_ID=null;FC_MTIMES={};fcHash(null);
     msg("vf-msg",d.closed?"Chat closed — session + files removed.":"Close failed: "+(d.error||"?"),!!d.closed);
   }catch(e){msg("vf-msg",e.message,false);}}
 async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
@@ -433,6 +450,7 @@ function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURL
 function tick(){loadCore();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
+if(location.hash.startsWith("#fc=")){go("verify");fcResume(location.hash.slice(4));}
 (function(){const dz=document.getElementById("vf-drop");if(!dz)return;
   ["dragenter","dragover"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.add("over");}));
   ["dragleave","dragend"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.remove("over");}));

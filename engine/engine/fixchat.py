@@ -50,6 +50,20 @@ def _meta_path(root):
     return os.path.join(root, ".fixchat.json")
 
 
+def _log_path(root):
+    return os.path.join(root, ".fixchat-log.json")
+
+
+def _append_log(root, role, text):
+    try:
+        log = json.load(open(_log_path(root)))
+    except Exception:  # noqa: BLE001
+        log = []
+    log.append({"role": role, "text": str(text or "")[:12000], "ts": time.time()})
+    json.dump(log[-200:], open(_log_path(root), "w"))
+    os.chmod(_log_path(root), 0o600)
+
+
 def _load_meta(root):
     try:
         return json.load(open(_meta_path(root)))
@@ -121,6 +135,30 @@ def _task_start(root, finding, verify_res):
         "you changed and what the operator still needs to capture.")
 
 
+def _find_root(cid, base=DEFAULT_BASE):
+    """Locate a chat's work dir by id (uuid4, path-safe). None if closed/expired/invalid."""
+    import glob
+    if not _chat_id_ok(cid):
+        return None
+    hits = glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", cid))
+    root = os.path.realpath(hits[0]) if hits else None
+    return root if root and os.path.isdir(root) else None
+
+
+def status(cid, base=DEFAULT_BASE):
+    """Chat state for a panel refresh: meta + file listing + the conversation log."""
+    root = _find_root(cid, base)
+    if not root:
+        return {"error": "chat not found (closed or expired)"}
+    meta = _load_meta(root) or {}
+    try:
+        log = json.load(open(_log_path(root)))
+    except Exception:  # noqa: BLE001
+        log = []
+    return {"chat_id": cid, "program": meta.get("program"), "created": meta.get("created"),
+            "verdict": meta.get("verdict"), "files": _listing(root), "log": log, "open": True}
+
+
 def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None):
     """Open a fix chat: save the uploads, start a fresh agent session, return {chat_id, reply, files}."""
     import agent as A
@@ -136,6 +174,7 @@ def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None):
             "verdict": (verify_res or {}).get("verdict")}
     json.dump(meta, open(_meta_path(root), "w"))
     os.chmod(_meta_path(root), 0o600)
+    _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
     return {"chat_id": cid, "reply": r.get("result") or r.get("error") or "(no reply)",
             "error": r.get("error"), "files": _listing(root),
             "saved": saved, "rejected": rejected}
@@ -144,13 +183,8 @@ def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None):
 def message(cid, text, base=DEFAULT_BASE, program=None):
     """Send a follow-up: resumes the SAME agent session so it remembers the report + prior edits."""
     import agent as A
-    if not _chat_id_ok(cid):
-        return {"error": "bad chat id"}
-    # find the dir across programs (chat_id is unique; locate via glob)
-    import glob
-    hits = glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", cid))
-    root = os.path.realpath(hits[0]) if hits else None
-    if not root or not os.path.isdir(root):
+    root = _find_root(cid, base)
+    if not root:
         return {"error": "chat not found (closed or expired)"}
     meta = _load_meta(root) or {}
     task = (str(text or "")[:8000] +
@@ -161,20 +195,18 @@ def message(cid, text, base=DEFAULT_BASE, program=None):
     if r.get("session_id"):
         meta["session_id"] = r["session_id"]
         json.dump(meta, open(_meta_path(root), "w"))
+    _append_log(root, "you", text)
+    _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
     return {"reply": r.get("result") or r.get("error") or "(no reply)", "error": r.get("error"),
             "files": _listing(root)}
 
 
 def read_file(cid, name, base=DEFAULT_BASE):
     """Bytes of one file in the chat dir (download). Basename-only, must resolve inside the dir."""
-    import glob
     import verify as V
-    if not _chat_id_ok(cid):
+    root = _find_root(cid, base)
+    if not root:
         return None, None
-    hits = glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", cid))
-    if not hits:
-        return None, None
-    root = os.path.realpath(hits[0])
     safe = V._safe_name(name)
     if safe.startswith("."):
         return None, None
@@ -187,13 +219,9 @@ def read_file(cid, name, base=DEFAULT_BASE):
 
 def close(cid, base=DEFAULT_BASE):
     """Close the chat: remove the work dir AND the agent session (verify-only hygiene)."""
-    import glob
     import shutil
-    if not _chat_id_ok(cid):
-        return {"error": "bad chat id"}
-    hits = glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", cid))
-    root = os.path.realpath(hits[0]) if hits else None
-    if not root or not os.path.isdir(root):
+    root = _find_root(cid, base)
+    if not root:
         return {"closed": False, "error": "chat not found"}
     meta = _load_meta(root) or {}
     try:

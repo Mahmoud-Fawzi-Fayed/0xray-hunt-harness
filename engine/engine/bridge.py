@@ -215,6 +215,11 @@ class Handler(BaseHTTPRequestHandler):
                 if data is None:
                     return self._send(404, {"error": "file not found"})
                 return self._send_raw(200, data, filename=name)
+            if p.path == "/verify/fixchat/status":
+                import fixchat as FC
+                q = parse_qs(p.query)
+                r = FC.status(q.get("chat_id", [""])[0], base=self.base)
+                return self._send(200 if not r.get("error") else 404, r)
             if p.path == "/novelty/feed":
                 try:
                     n = max(1, min(1000, int((parse_qs(p.query).get("n", ["20"])[0]) or 20)))

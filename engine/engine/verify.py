@@ -585,7 +585,7 @@ def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_
 ALLOWED_TEXT = {".md", ".txt", ".json", ".log", ".har", ".csv", ".xml", ".yaml", ".yml", ".http", ".nb",
                 ".py", ".sh", ".bash", ".js", ".ts", ".php", ".rb", ".pl", ".ps1", ".java", ".go",
                 ".html", ".htm", ".css", ".sql", ".ini", ".conf", ".cfg", ".env", ".burp", ".sm"}
-ALLOWED_BIN = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"}
+ALLOWED_BIN = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".apk", ".ipa"}
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
 MAX_TEXT_PER_FILE = 60000          # chars of each text/script file forwarded to the triager
