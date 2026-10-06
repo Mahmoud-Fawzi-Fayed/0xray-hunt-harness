@@ -441,10 +441,11 @@ class Handler(BaseHTTPRequestHandler):
                     res["uploads"] = {"saved": [s["name"] for s in intake["saved"]],
                                       "rejected": intake["rejected"], "images": intake["images"]}
                 if b.get("deep"):
-                    op = V.deep_opinion(f, res, program=prog, base=self.base)
+                    op = V.deep_opinion_all(f, res, program=prog, base=self.base)   # one triager per pool model
                     res["triager_opinion"] = op
-                    res["verdict"] = V.combine_verdict(res, op)      # trigger = stricter of gate + expert
-                    res["accept"] = res["verdict"] == "READY"
+                    if op.get("verdict"):
+                        res["verdict"] = V.combine_verdict(res, op)  # strictest across ALL models + the gate
+                        res["accept"] = res["verdict"] == "READY"
                 return self._send(200, res)
 
             if p.path == "/sessions/clear":

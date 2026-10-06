@@ -240,13 +240,7 @@ def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
     try:
         import agent as A
         scope = _load_scope(program or f.get("program"), base) or {}
-        task = ("You are a STRICT bug-bounty triager. Decide if this draft finding is submittable. "
-                "Be harsh: reflection-only, error-only, no-impact, theoretical, or non-qualifying = REJECT.\n\n"
-                f"FINDING:\n{json.dumps(f, indent=2)[:3500]}\n\n"
-                f"PROGRAM non-qualifying: {scope.get('non_qualifying', [])[:20]}\n"
-                f"Deterministic pre-check: verdict={det['verdict']}, failed={det['failed']}\n\n"
-                "Reply ONLY JSON: {\"verdict\":\"READY|NEEDS_FIXES|DO_NOT_SUBMIT\",\"reasons\":[...],"
-                "\"missing\":[...],\"severity_opinion\":\"...\"}")
+        task = _triager_task(f, det, scope)
         r = A.run_agent(task, context=None, timeout=timeout, attempts=1)
         js = A.extract_json(r.get("result", "")) if hasattr(A, "extract_json") else None
         if isinstance(js, dict) and js.get("verdict"):
@@ -255,6 +249,52 @@ def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
     except Exception as e:  # noqa: BLE001
         return {"error": str(e)[:120]}
     return None
+
+
+def _triager_task(f, det, scope):
+    return (
+        "You are a STRICT bug-bounty triager. Decide if this draft finding is submittable. "
+        "Be harsh: reflection-only, error-only, no-impact, theoretical, out-of-scope, non-qualifying, "
+        "or an impact that depends on a victim secret the PoC never obtains (a session/id/token) = REJECT.\n\n"
+        f"FINDING:\n{json.dumps(f, indent=2)[:3500]}\n\n"
+        f"PROGRAM non-qualifying: {scope.get('non_qualifying', [])[:20]}\n"
+        f"PROGRAM qualifying classes: {scope.get('qualifying_classes', [])}\n"
+        f"Deterministic pre-check: verdict={det['verdict']}, failed={det['failed']}\n\n"
+        "Reply ONLY JSON: {\"verdict\":\"READY|NEEDS_FIXES|DO_NOT_SUBMIT\",\"reasons\":[...],"
+        "\"missing\":[...],\"severity_opinion\":\"...\"}")
+
+
+def _pool_models():
+    try:
+        import notify
+        notify._load_env_file()
+    except Exception:  # noqa: BLE001
+        pass
+    return [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+
+
+def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=180, max_models=4):
+    """Run the strict triager across EACH pool model and combine — the STRICTEST verdict wins, so a
+    single lenient model can't green-light an RTFS/NA/Info report. Returns {verdict, models:[...]}."""
+    import agent as A
+    scope = _load_scope(program or f.get("program"), base) or {}
+    task = _triager_task(f, det, scope)
+    models = _pool_models()[:max_models] or [None]
+    opinions = []
+    for m in models:
+        try:
+            r = A.run_agent(task, context=None, model=m, timeout=timeout, attempts=1)
+            js = A.extract_json(r.get("result", "")) if hasattr(A, "extract_json") else None
+            if isinstance(js, dict) and js.get("verdict"):
+                js["model"] = r.get("model") or m
+                opinions.append(js)
+        except Exception as e:  # noqa: BLE001
+            opinions.append({"model": m, "error": str(e)[:100]})
+    verdicts = [o["verdict"] for o in opinions if o.get("verdict") in _VERDICT_ORDER]
+    final = max(verdicts, key=lambda v: _VERDICT_ORDER[v]) if verdicts else None
+    return {"verdict": final, "opinions": opinions,
+            "models_run": [o.get("model") for o in opinions],
+            "agreement": (len(set(verdicts)) == 1) if verdicts else None}
 
 
 # ------- secure file intake (uploaded report + evidence) -------
