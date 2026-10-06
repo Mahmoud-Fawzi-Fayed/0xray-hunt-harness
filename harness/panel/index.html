@@ -183,6 +183,7 @@
         <div class="fld"><label>PoC (payload / request)</label><textarea id="vf-poc"></textarea></div>
         <div class="fld"><label>Evidence (response / output that proves the impact)</label><textarea id="vf-ev"></textarea></div>
         <div class="fld"><label>Security impact</label><textarea id="vf-impact" style="min-height:52px"></textarea></div>
+        <div class="fld"><label>Attach files — report + evidence (screenshots, HAR, request/response, .md/.json/.txt)</label><input type="file" id="vf-files" multiple style="padding:6px"></div>
         <label style="display:inline-flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;color:var(--ink)"><input type="checkbox" id="vf-deep" style="width:auto"> deep LLM triager (slower, stricter)</label>
         <div style="margin-top:12px"><button class="pri" onclick="verifyFinding()">Verify</button><span class="dim" style="margin-left:10px;font-size:11px">Checks per-class PoC minimum, always-rejected list, scope, the program's qualifying list, severity honesty + dedup.</span></div>
         <div id="vf-msg" class="msg"></div></div></div>
@@ -316,20 +317,23 @@ async function ingestTarget(){const text=document.getElementById("pgtext").value
     msg("ingMsg",`Added ${j.added} (${j.public?'public':'private'}): ${j.in_scope} in-scope, ${j.out_of_scope} out-of-scope, classes [${(j.classes||[]).join(", ")}], UA set.`,true);
     document.getElementById("pgtext").value="";document.getElementById("pgname").value="";refresh();go("targets");}catch(e){msg("ingMsg",e.message,false);}}
 function vval(id){return (document.getElementById(id).value||"").trim();}
+async function readFilesB64(input){const out=[];for(const file of (input.files||[])){try{const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onerror=rej;r.onload=()=>res(String(r.result).split(",")[1]||"");r.readAsDataURL(file);});out.push({name:file.name,type:file.type,b64});}catch(e){}}return out;}
 async function verifyFinding(){
   const f={program:vval("vf-prog"),vuln_class:vval("vf-class"),severity:vval("vf-sev"),url:vval("vf-url"),title:vval("vf-title"),steps:vval("vf-steps"),poc:vval("vf-poc"),evidence:vval("vf-ev"),impact:vval("vf-impact"),deep:document.getElementById("vf-deep").checked};
   if(!f.vuln_class||!f.url){msg("vf-msg","Enter at least a vuln class and the affected URL.",false);return;}
+  msg("vf-msg","Reading files…",true);f.files=await readFilesB64(document.getElementById("vf-files"));
   msg("vf-msg",f.deep?"Verifying (deep triage can take ~1 min)…":"Verifying…",true);
   try{const d=await api("/verify","POST",f);renderVerdict(d);msg("vf-msg","",true);}catch(e){msg("vf-msg",e.message,false);}}
 function renderVerdict(d){
   const box=document.getElementById("vf-resultbox");box.style.display="block";
   const col={READY:"var(--grn)",NEEDS_FIXES:"var(--amb)",DO_NOT_SUBMIT:"var(--red)"}[d.verdict]||"var(--mut)";
   const checks=(d.checks||[]).map(c=>`<div style="padding:5px 0;border-bottom:1px solid #141a25">${c.pass?'<span style="color:var(--grn)">✓</span>':'<span style="color:var(--red)">✗</span>'} ${esc(c.check)}${c.note?` <span class="dim">— ${esc(c.note)}</span>`:""}</div>`).join("");
-  const t=d.triager_opinion;const op=(t&&t.verdict)?`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><b>LLM triager:</b> <span style="color:${({READY:'var(--grn)',NEEDS_FIXES:'var(--amb)',DO_NOT_SUBMIT:'var(--red)'}[t.verdict]||'var(--mut)')}">${esc(t.verdict)}</span> <span class="dim">${esc((t.reasons||[]).join("; ").slice(0,260))}</span></div>`:(t&&t.error?`<div class="dim" style="margin-top:8px">LLM triager unavailable: ${esc(t.error)}</div>`:"");
+  const t=d.triager_opinion;const op=(t&&t.verdict)?`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><b>Expert triager:</b> <span style="color:${({READY:'var(--grn)',NEEDS_FIXES:'var(--amb)',DO_NOT_SUBMIT:'var(--red)'}[t.verdict]||'var(--mut)')}">${esc(t.verdict)}</span> <span class="dim">${esc((t.reasons||[]).join("; ").slice(0,260))}</span></div>`:(t&&t.error?`<div class="dim" style="margin-top:8px">Expert triager unavailable: ${esc(t.error)}</div>`:"");
+  const u=d.uploads;const up=u?`<div class="dim" style="margin:4px 0 8px">uploaded: ${(u.saved||[]).map(esc).join(", ")||"none"}${(u.rejected&&u.rejected.length)?` · <span style="color:var(--amb)">rejected: ${u.rejected.map(r=>esc(r.name)+" ("+esc(r.reason)+")").join(", ")}</span>`:""}${u.images?` · ${u.images} image(s)`:""}</div>`:"";
   document.getElementById("vf-result").innerHTML=
     `<div style="font-size:23px;font-weight:700;color:${col}">${esc(d.verdict)} <span class="dim" style="font-size:13px;font-weight:500">· score ${d.score}/100 · ${d.accept?"ready to report":"do not submit yet"}</span></div>`+
     `<div style="margin:9px 0 12px" class="dim">dedup: ${esc((d.dedup||{}).verdict||"—")}${(d.missing&&d.missing.length)?` · missing: ${esc(d.missing.join(", "))}`:""}</div>`+
-    checks+op;}
+    up+checks+op;}
 async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
 async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});setTimeout(refresh,1000);}catch(e){alert(e.message);}}

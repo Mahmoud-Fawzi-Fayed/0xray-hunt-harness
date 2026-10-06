@@ -38,7 +38,8 @@ ENGINE = os.path.dirname(os.path.abspath(__file__))
 VERSION = "1.3"
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 TOKEN = os.environ.get("HUNT_BRIDGE_TOKEN", "")
-MAX_BODY = int(os.environ.get("HUNT_BRIDGE_MAX_BODY", str(2 * 1024 * 1024)))   # 2 MB request cap
+MAX_BODY = int(os.environ.get("HUNT_BRIDGE_MAX_BODY", str(2 * 1024 * 1024)))   # 2 MB general request cap
+VERIFY_MAX_BODY = int(os.environ.get("HUNT_VERIFY_MAX_BODY", str(32 * 1024 * 1024)))  # /verify accepts file uploads
 _ACT_CACHE = {}   # /activity is polled ~every 8s and is CPU-heavy on big logs -> short-TTL cache
 
 
@@ -171,12 +172,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _body(self):
+    def _body(self, cap=None):
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
             return {}
         try:
-            return json.loads(self.rfile.read(min(n, MAX_BODY)) or b"{}")
+            return json.loads(self.rfile.read(min(n, cap or MAX_BODY)) or b"{}")
         except json.JSONDecodeError:
             return {}
 
@@ -365,11 +366,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authed():
             return
-        clen = int(self.headers.get("Content-Length") or 0)
-        if clen > MAX_BODY:
-            return self._send(413, {"error": f"body too large (> {MAX_BODY} bytes)"})
         p = urlparse(self.path)
-        b = self._body()
+        cap = VERIFY_MAX_BODY if p.path == "/verify" else MAX_BODY
+        clen = int(self.headers.get("Content-Length") or 0)
+        if clen > cap:
+            return self._send(413, {"error": f"body too large (> {cap} bytes)"})
+        b = self._body(cap)
         try:
             if p.path in ("/novelty/watch", "/novelty/diff"):
                 target = b.get("target")
@@ -405,10 +407,22 @@ class Handler(BaseHTTPRequestHandler):
 
             if p.path == "/verify":
                 import verify as V
-                f = b.get("finding") or b
-                res = V.verify_finding(f, program=(b.get("program") or f.get("program")), base=self.base)
+                f = dict(b.get("finding") or b)
+                prog = b.get("program") or f.get("program")
+                files = b.get("files") or []
+                intake = V.ingest_files(files, program=prog, base=self.base) if files else None
+                if intake:
+                    f["evidence"] = ((f.get("evidence", "") or "") + "\n" + intake["text"]).strip()
+                    f["_images"] = intake["images"]
+                res = V.verify_finding(f, program=prog, base=self.base)
+                if intake:
+                    res["uploads"] = {"saved": [s["name"] for s in intake["saved"]],
+                                      "rejected": intake["rejected"], "images": intake["images"]}
                 if b.get("deep"):
-                    res["triager_opinion"] = V.deep_opinion(f, res, program=(b.get("program") or f.get("program")), base=self.base)
+                    op = V.deep_opinion(f, res, program=prog, base=self.base)
+                    res["triager_opinion"] = op
+                    res["verdict"] = V.combine_verdict(res, op)      # trigger = stricter of gate + expert
+                    res["accept"] = res["verdict"] == "READY"
                 return self._send(200, res)
 
             if p.path == "/notify":

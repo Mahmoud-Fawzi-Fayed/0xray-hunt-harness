@@ -114,7 +114,7 @@ def verify_finding(f, program=None, base=DEFAULT_BASE):
         if not f.get(r):
             missing.append(r)
     has_steps = bool(f.get("steps"))
-    has_proof = any(f.get(k) for k in PROOF_FIELDS if k != "steps")
+    has_proof = any(f.get(k) for k in PROOF_FIELDS if k != "steps") or bool(f.get("_images"))
     add("has repro steps", has_steps, "" if has_steps else "add numbered reproduction steps")
     add("has PoC / evidence", has_proof, "" if has_proof else "attach the request/response/PoC that proves it")
     add("has impact stated", bool(f.get("impact")), "" if f.get("impact") else "state the concrete security impact")
@@ -219,6 +219,70 @@ def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
     return None
 
 
+# ------- secure file intake (uploaded report + evidence) -------
+ALLOWED_TEXT = {".md", ".txt", ".json", ".log", ".har", ".csv", ".xml", ".yaml", ".yml", ".http", ".nb"}
+ALLOWED_BIN = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"}
+MAX_FILE = 8 * 1024 * 1024
+MAX_TOTAL = 24 * 1024 * 1024
+_VERDICT_ORDER = {"READY": 0, "NEEDS_FIXES": 1, "DO_NOT_SUBMIT": 2}
+
+
+def _safe_name(name):
+    """basename only + whitelist chars — defeats path traversal (../), null bytes, odd names."""
+    b = os.path.basename(str(name or "").replace("\x00", "")).strip()
+    b = re.sub(r"[^A-Za-z0-9._-]", "_", b)[:120].lstrip(".") or "file"
+    return b
+
+
+def ingest_files(files, program=None, base=DEFAULT_BASE):
+    """Save uploaded files [{name,b64,type?}] SECURELY under the engagement dir; return merged text of
+    text files + counts. Hardened: basename-only names, allow-list extensions, per-file + total size
+    caps, path-escape guard, chmod 600, never executed/served. Returns {saved,rejected,text,images,dir}."""
+    import base64
+    import time as _t
+    slug = re.sub(r"[^a-z0-9._-]+", "-", (program or "adhoc").lower()).strip("-") or "adhoc"
+    root = os.path.realpath(os.path.join(os.path.expanduser(base), slug, "verify-uploads",
+                                         _t.strftime("%Y%m%d-%H%M%S")))
+    saved, rejected, texts, images, total = [], [], [], 0, 0
+    for f in (files or [])[:40]:
+        name = _safe_name(f.get("name"))
+        ext = os.path.splitext(name)[1].lower()
+        try:
+            raw = base64.b64decode((f.get("b64") or "").encode(), validate=False)
+        except Exception:  # noqa: BLE001
+            rejected.append({"name": name, "reason": "invalid base64"}); continue
+        if len(raw) > MAX_FILE:
+            rejected.append({"name": name, "reason": f"too large ({len(raw)//1024}KB > {MAX_FILE//1048576}MB)"}); continue
+        if total + len(raw) > MAX_TOTAL:
+            rejected.append({"name": name, "reason": "total upload cap exceeded"}); break
+        if ext not in ALLOWED_TEXT and ext not in ALLOWED_BIN:
+            rejected.append({"name": name, "reason": f"type '{ext or '?'}' not allowed"}); continue
+        path = os.path.realpath(os.path.join(root, name))
+        if not path.startswith(root + os.sep):          # defense-in-depth: never write outside the dir
+            rejected.append({"name": name, "reason": "path escape blocked"}); continue
+        os.makedirs(root, exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(raw)
+        os.chmod(path, 0o600)
+        total += len(raw)
+        saved.append({"name": name, "bytes": len(raw)})
+        if ext in ALLOWED_TEXT:
+            texts.append(f"--- {name} ---\n" + raw.decode("utf-8", "ignore")[:20000])
+        else:
+            images += 1
+    return {"saved": saved, "rejected": rejected, "text": "\n".join(texts),
+            "images": images, "dir": root if saved else None}
+
+
+def combine_verdict(det, opinion):
+    """Final trigger = the STRICTER of the deterministic gate and the expert (LLM) review."""
+    v = det.get("verdict", "NEEDS_FIXES")
+    ov = (opinion or {}).get("verdict")
+    if ov in _VERDICT_ORDER and _VERDICT_ORDER[ov] > _VERDICT_ORDER.get(v, 1):
+        v = ov
+    return v
+
+
 def _main(argv=None):
     ap = argparse.ArgumentParser(description="finding verification / triage gate")
     ap.add_argument("--base", default=DEFAULT_BASE)
@@ -263,6 +327,33 @@ def _selftest():
             "url": "https://app.example.com/fetch", "impact": "could be bad"}
     rw = verify_finding(weak)
     assert rw["verdict"] in ("NEEDS_FIXES", "DO_NOT_SUBMIT") and not rw["accept"], rw
+
+    # 4) SECURE FILE INTAKE — path traversal, bad type, oversized, text extraction, image count
+    import base64 as _b64
+    import tempfile as _tf
+    bse = _tf.mkdtemp()
+    files = [
+        {"name": "report.md", "b64": _b64.b64encode(b"# IDOR\naccount B reads account A order (cross-account)").decode()},
+        {"name": "../../../tmp/evil.md", "b64": _b64.b64encode(b"path traversal attempt").decode()},  # traversal + allowed ext
+        {"name": "shell.php", "b64": _b64.b64encode(b"<?php system($_GET[c]);?>").decode()},  # bad type -> reject
+        {"name": "x.exe", "b64": _b64.b64encode(b"MZ").decode()},                             # bad type -> reject
+        {"name": "big.txt", "b64": _b64.b64encode(b"A" * (MAX_FILE + 1)).decode()},           # oversized -> reject
+        {"name": "shot.png", "b64": _b64.b64encode(b"\x89PNG\r\n\x1a\n").decode()},           # image
+    ]
+    ing = ingest_files(files, program="acme-up", base=bse)
+    saved = [s["name"] for s in ing["saved"]]
+    rej = " ".join(r["name"] + ":" + r["reason"] for r in ing["rejected"])
+    assert "report.md" in saved and "shot.png" in saved, saved
+    assert "evil.md" in saved, saved                    # traversal collapsed to basename, stored IN the dir
+    assert "shell.php" in rej and "x.exe" in rej and "big.txt" in rej, rej
+    assert "cross-account" in ing["text"] and ing["images"] == 1, ing
+    # traversal defeated: nothing written outside the upload dir
+    import glob as _g
+    for p in _g.glob(bse + "/**", recursive=True):
+        assert os.path.isdir(p) or "verify-uploads" in p, p
+    # 5) combined verdict = stricter of gate + expert opinion
+    assert combine_verdict({"verdict": "READY"}, {"verdict": "DO_NOT_SUBMIT"}) == "DO_NOT_SUBMIT"
+    assert combine_verdict({"verdict": "NEEDS_FIXES"}, {"verdict": "READY"}) == "NEEDS_FIXES"
     print("verify.py self-test: PASS")
     return 0
 

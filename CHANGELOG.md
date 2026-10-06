@@ -3,6 +3,19 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.8.1] - 2026-10-06
+### Added
+- **File upload** on the Verify-finding tab — attach the report + evidence (screenshots, HAR,
+  request/response, .md/.json/.txt). Text files are merged into the checks; images count as evidence.
+- **Combined expert verdict** — with deep triage on, the final trigger is the STRICTER of the
+  deterministic gate and the LLM expert security review.
+### Security (upload intake hardening — it's an upload on our own site)
+- basename-only filenames (path-traversal safe: `../../evil.md` → `evil.md`, kept inside the dir),
+  extension allow-list (text + images + pdf; scripts/executables like `.php`/`.sh`/`.exe` rejected),
+  per-file (8 MB) + total (24 MB) caps, path-escape guard, `chmod 600`, stored in the engagement dir
+  (never web-served or executed). Per-path body cap preserves the general 2 MB DoS limit; only `/verify`
+  accepts large (32 MB) uploads. Covered by `verify.py` selftest (traversal / bad-type / oversized) + selfcheck 68/68.
+
 ## [0.8.0] - 2026-10-06
 ### Added — "Verify finding" gate on the dashboard
 - **`verify.py`** — submit a draft finding (class, severity, URL, steps, PoC, evidence, impact) and get a

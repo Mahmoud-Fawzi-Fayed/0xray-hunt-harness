@@ -146,7 +146,8 @@ The harness can now reach the surface where the paid bugs actually live:
 - **Add a target by pasting its program page** (`scopeparse.py` + panel) — auto-extracts scope,
   out-of-scope, qualifying/non-qualifying classes, reward grid, and the mandatory User-Agent.
 - **Verify a finding before reporting** (`verify.py` + the panel's **Verify finding** tab) — paste a
-  draft and get READY / NEEDS-FIXES / DO-NOT-SUBMIT with a PoC/impact/scope/dedup checklist.
+  draft *or upload the report + evidence files*, and get READY / NEEDS-FIXES / DO-NOT-SUBMIT with a
+  PoC/impact/scope/dedup checklist (optional deep LLM expert review; uploads are security-hardened).
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
