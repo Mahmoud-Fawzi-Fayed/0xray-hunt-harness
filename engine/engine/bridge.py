@@ -14,6 +14,7 @@ Endpoints (all POST take JSON; all except /health require header `X-Hunt-Token: 
   POST /novelty/diff   {target, obs?}   -> diff only (no baseline advance, no feed write).
   POST /dedup/check    {program, class, url, title}  -> {verdict, score, matches}
   POST /dedup/ingest   {program, source, items|reports}  -> {added}
+  POST /disposition/check {finding|text, program?}  -> {verdict: PASS|HOLD_RTFS|HOLD_INFORMATIVE, draft, rules, reason}
   GET  /novelty/feed?n=20            -> last n alert feed entries
 
 Run (kept alive by pm2 in the harness):
@@ -313,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
                 import sms as _SMS
                 import learn as _L
                 import guardrails as _G
+                import sessions as _SESS
+                _sinv = _SESS.inventory(self.base)
                 # count chat sessions on disk (proves the pool keeps them low, not ballooning)
                 chats = 0
                 cbase = os.path.expanduser("~/.cursor/chats")
@@ -325,6 +328,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._send(200, {
                     "sessions": {"chats_on_disk": chats,
+                                 "orphaned_chats": len(_sinv["orphans"]),
                                  "pool_per_target": int(os.environ.get("HUNT_SESSION_POOL", "3")),
                                  "max_uses": int(os.environ.get("HUNT_SESSION_MAX_USES", "25"))},
                     "websearch": {"ready": True, "provider": "duckduckgo-html"},
@@ -405,6 +409,18 @@ class Handler(BaseHTTPRequestHandler):
                 added = D.Corpus(b.get("program", ""), base=self.base).ingest(items, source=b.get("source"))
                 return self._send(200, {"added": added, "supplied": len(items)})
 
+            if p.path == "/disposition/check":
+                import disposition as DP
+                form = b.get("finding") if isinstance(b.get("finding"), dict) else None
+                if form is None and b.get("text"):
+                    form = DP.from_text(b.get("text") or "")
+                if form is None:
+                    form = {k: v for k, v in b.items() if k != "program"}
+                if b.get("program"):
+                    form["program"] = b.get("program")
+                return self._send(200, DP.check(form, program=b.get("program") or form.get("program"),
+                                                base=self.base))
+
             if p.path == "/verify":
                 import verify as V
                 form = dict(b.get("finding") or b)
@@ -430,6 +446,17 @@ class Handler(BaseHTTPRequestHandler):
                     res["verdict"] = V.combine_verdict(res, op)      # trigger = stricter of gate + expert
                     res["accept"] = res["verdict"] == "READY"
                 return self._send(200, res)
+
+            if p.path == "/sessions/clear":
+                import sessions as _SESS
+                r = _SESS.clear_orphans(self.base, confirm=bool(b.get("confirm")))
+                return self._send(200, r)
+
+            if p.path == "/sessions/reset":
+                import sessions as _SESS
+                r = _SESS.reset_target(b.get("program", ""), self.base, confirm=bool(b.get("confirm")))
+                code = 200 if not r.get("error") else 400
+                return self._send(code, r)
 
             if p.path == "/notify":
                 ok = NO.send_safe(b.get("subject", "(no subject)"), b.get("body", ""),

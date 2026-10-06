@@ -216,6 +216,13 @@
         <div>
           <div class="box"><div class="h"><span class="t">Autonomous capabilities</span><span class="dim" style="font-size:11px">all guardrail-gated</span></div><div class="b" id="cap-list"><div class="empty">—</div></div></div>
           <div class="box"><div class="h"><span class="t">Accounts &amp; write-action audit</span><span class="dim" style="font-size:11px">in-scope only · capped · no bruteforce</span></div><div class="b" id="cap-audit" style="padding:0"><div class="empty" style="padding:14px">—</div></div></div>
+          <div class="box"><div class="h"><span class="t">Cursor sessions</span><span class="dim" style="font-size:11px">guarded — never auto-deleted</span></div><div class="b">
+            <div id="cap-sess" class="dim" style="font-size:12px;margin-bottom:8px">—</div>
+            <button class="ghost" onclick="sessClear(false)">Preview clear</button>
+            <button class="danger" onclick="sessClear(true)">Clear orphaned chats</button>
+            <div id="sessMsg" class="msg"></div>
+            <div class="dim" style="font-size:11px;margin-top:6px">Clears only orphaned chat dirs (not referenced by any hunt pool). Sessions of running hunts are always protected. Removal needs an explicit confirm — nothing is deleted automatically.</div>
+          </div></div>
         </div>
         <div class="box"><div class="h"><span class="t">Self-learning journal</span><button class="ghost" onclick="loadCaps()">Refresh</button></div><div class="b" id="cap-learn"><div class="empty">—</div></div></div>
       </div>
@@ -302,6 +309,7 @@ async function loadCaps(){try{
   document.getElementById("c-id").innerHTML=dot(c.identity&&c.identity.ready)+"mail.tm";
   document.getElementById("c-sms").innerHTML=dot(c.sms&&c.sms.enabled)+(c.sms&&c.sms.enabled?esc(c.sms.provider||"on"):"off");
   document.getElementById("c-learn").textContent=(c.learn&&c.learn.learned_skills)||0;
+  const se=document.getElementById("cap-sess");if(se&&c.sessions)se.innerHTML=`chats on disk: <b>${c.sessions.chats_on_disk}</b> · orphaned (safe to clear): <b>${c.sessions.orphaned_chats||0}</b> · pooled/target: ${c.sessions.pool_per_target}`;
   document.getElementById("cap-list").innerHTML=[
     ["Web search",c.websearch.ready,"DuckDuckGo HTML — look up CVEs, docs, disclosed reports mid-hunt"],
     ["Temp-mail identity",c.identity.ready,`mail.tm disposable inbox · cap ${c.identity.max_accounts}/program for A/B auth testing`],
@@ -319,6 +327,12 @@ async function loadCaps(){try{
   document.getElementById("cap-audit").innerHTML=`<div class="dim" style="padding:8px 14px;font-size:11px">accounts used — ${per||'none'}</div><table><thead><tr><th>Time</th><th>Program</th><th>Action</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty" style="padding:12px">No write-actions yet.</td></tr>'}</tbody></table>`;
 }catch(e){}}
 async function loadFindings(){try{const j=await api("/findings");document.getElementById("find").innerHTML=(j.findings||[]).map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><a href="${esc(x.url)}" target="_blank">${esc(x.file)}</a><div class="tag">${new Date(x.mtime*1000).toLocaleString()}</div></div>`).join("")||`<div class="empty">No findings yet.</div>`;}catch(e){}}
+async function sessClear(confirm){try{
+  if(confirm && !window.confirm("Permanently clear the ORPHANED Cursor chat sessions? Running hunts' sessions are protected and kept.")){return;}
+  const j=await api("/sessions/clear","POST",{confirm});
+  msg("sessMsg",confirm?`Cleared ${j.removed} orphaned chat(s) (skipped ${j.skipped_pooled} pooled).`:`Dry-run: ${j.orphans_found} orphaned chat(s) would be removed — click "Clear orphaned chats" to confirm.`,true);
+  loadCaps();
+}catch(e){msg("sessMsg",e.message,false);}}
 async function loadAlerts(){try{const j=await api("/novelty/feed?n=25");document.getElementById("alerts").innerHTML=(j.entries||[]).reverse().map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><b>${esc(x.target)}</b> <span class="dim">${esc((x.summary||[]).join(" · ").slice(0,140))}</span></div>`).join("")||`<div class="empty">No alerts yet.</div>`;}catch(e){}}
 async function loadLog(){if(!CURLOG){const r=Object.values(RUN).find(h=>h&&h.running);if(r)CURLOG=r.program;}if(!CURLOG)return;try{const j=await api("/hunt/log?n=500&program="+encodeURIComponent(CURLOG));const t=document.getElementById("term");const b=t.scrollTop+t.clientHeight>=t.scrollHeight-40;
   t.textContent=(j.lines||[]).join("\n")||"(no log yet — the hunt writes here as it runs)";if(TAIL||b)t.scrollTop=t.scrollHeight;}catch(e){document.getElementById("term").textContent="log error: "+e.message;}}

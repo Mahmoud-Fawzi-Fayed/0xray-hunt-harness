@@ -3,6 +3,17 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.9.0] - 2026-10-06
+### Added — guarded session management (never auto-deletes)
+- **`sessions.py`** — the single sanctioned way to manage Cursor sessions. **Dry-run by default**;
+  deletion only with an explicit `--confirm`. Clears only **orphaned** chat dirs (never a session in a
+  running target's pool); `reset --slug` refuses to touch a running target. `list` shows the inventory.
+- **Bridge** `/sessions/clear` + `/sessions/reset` (confirm-gated) and a `sessions.orphaned_chats` count
+  in `/capabilities`.
+- **Panel** — a "Cursor sessions" box on the Capabilities tab: shows chats on disk + orphaned count, a
+  **Preview clear** (dry-run) and a confirm-gated **Clear orphaned chats** button.
+- `selfcheck` → **70/70** (adds sessions + disposition).
+
 ## [0.8.1] - 2026-10-06
 ### Added
 - **File upload** on the Verify-finding tab — attach the report + evidence (screenshots, HAR,
