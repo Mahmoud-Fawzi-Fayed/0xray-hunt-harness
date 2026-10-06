@@ -164,6 +164,25 @@ def status(cid, base=DEFAULT_BASE):
             "verdict": meta.get("verdict"), "files": _listing(root), "log": log, "open": True}
 
 
+def list_chats(base=DEFAULT_BASE):
+    """All OPEN fix chats across programs — the panel sidebar. Newest first."""
+    import glob
+    out = []
+    for d in glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", "*")):
+        if not os.path.isdir(d):
+            continue
+        cid = os.path.basename(d)
+        if not _chat_id_ok(cid):
+            continue
+        meta = _load_meta(d) or {}
+        prog = meta.get("program") or os.path.basename(os.path.dirname(os.path.dirname(d)))
+        out.append({"chat_id": cid, "program": prog,
+                    "created": meta.get("created") or os.path.getmtime(d),
+                    "verdict": meta.get("verdict"), "files": len(_listing(d))})
+    out.sort(key=lambda x: -(x["created"] or 0))
+    return {"chats": out}
+
+
 def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None, chat_id=None):
     """Open a fix chat: save the uploads, start a fresh agent session, return {chat_id, reply, files}.
     The panel generates chat_id up front (so the URL + Close work immediately); we validate it."""

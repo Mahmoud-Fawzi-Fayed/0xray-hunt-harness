@@ -220,6 +220,9 @@ class Handler(BaseHTTPRequestHandler):
                 q = parse_qs(p.query)
                 r = FC.status(q.get("chat_id", [""])[0], base=self.base)
                 return self._send(200 if not r.get("error") else 404, r)
+            if p.path == "/verify/fixchat/list":
+                import fixchat as FC
+                return self._send(200, FC.list_chats(self.base))
             if p.path == "/novelty/feed":
                 try:
                     n = max(1, min(1000, int((parse_qs(p.query).get("n", ["20"])[0]) or 20)))

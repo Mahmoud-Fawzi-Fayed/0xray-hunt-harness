@@ -202,12 +202,15 @@
         <div style="margin-top:12px"><button class="pri" onclick="verifyFinding()">Verify</button><span class="dim" style="margin-left:10px;font-size:11px">Checks per-class PoC minimum, always-rejected list, scope, the program's qualifying list, severity honesty + dedup.</span></div>
         <div id="vf-msg" class="msg"></div></div></div>
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
-      <div class="box" id="fc-box" style="display:none"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
+      <div id="fc-wrap" style="display:none;grid-template-columns:240px 1fr;gap:14px">
+        <div class="box"><div class="h"><span class="t">Chats</span><span class="dim" style="font-size:11px">open — click to resume</span></div><div class="b" id="fc-list" style="padding:8px"><div class="empty" style="padding:8px">No open chats.</div></div></div>
+        <div class="box" id="fc-box"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
         <div id="fc-files" style="margin-bottom:10px"></div>
         <div id="fc-log" style="max-height:340px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:12px;background:#0b0f1a;margin-bottom:10px;display:flex;flex-direction:column;gap:10px"></div>
         <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" onclick="fcSend()">Send</button><button class="ghost" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button></div>
         <div style="margin-top:10px;display:flex;align-items:center;gap:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg"></span></div>
       </div></div>
+      </div>
     </section>
 
     <!-- CAPABILITIES -->
@@ -252,7 +255,7 @@ function msg(id,t,ok){const e=document.getElementById(id);if(e){e.textContent=t;
 function nav(el){document.querySelectorAll("nav a").forEach(a=>a.classList.remove("on"));el.classList.add("on");go(el.dataset.v);}
 function go(v){VIEW=v;document.querySelectorAll(".page").forEach(p=>p.classList.remove("on"));document.getElementById("p-"+v).classList.add("on");
   document.getElementById("title").textContent={overview:"Overview",targets:"Targets",activity:"Activity",findings:"Findings",verify:"Verify finding",capabilities:"Capabilities",logs:"Live logs"}[v];
-  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();}
+  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();if(v==="verify")fcLoadList();}
 function live(ok){document.getElementById("st").style.background=ok?"var(--grn)":"var(--red)";document.getElementById("stTxt").textContent=ok?"bridge online":"bridge offline";}
 function slug(n){return n.toLowerCase().replace(/[^a-z0-9._-]+/g,"-");}
 function fmtTs(t){try{return new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch(e){return t;}}
@@ -398,11 +401,27 @@ function fcLog(role,text,cls){const l=document.getElementById("fc-log");
   l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:10px;padding:8px 12px"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
 function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
 function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
+async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const el=document.getElementById("fc-list");const wrap=document.getElementById("fc-wrap");
+  const chats=(j.chats||[]);
+  el.innerHTML=chats.map(c=>{const mins=c.created?Math.max(0,Math.round((Date.now()/1000-c.created)/60)):0;
+    const age=mins>=60?Math.round(mins/60)+"h ago":mins+"m ago";
+    const vc={READY:"var(--grn)",NEEDS_FIXES:"var(--amb)",DO_NOT_SUBMIT:"var(--red)"}[c.verdict]||"var(--mut)";
+    return `<div style="padding:7px 8px;border:1px solid ${c.chat_id===FC_ID?'var(--acc)':'var(--line)'};border-radius:8px;margin-bottom:6px;cursor:pointer;background:${c.chat_id===FC_ID?'#101728':'transparent'}" onclick="fcPick('${c.chat_id}')">`+
+    `<div style="font-size:12px;font-weight:600">${esc(c.program||"adhoc")} <span class="dim" style="font-weight:400">${esc(c.chat_id.slice(0,8))}…</span></div>`+
+    `<div class="dim" style="font-size:11px;margin-top:2px">${c.files} file(s) · ${age}${c.verdict?` · <span style="color:${vc}">${esc(c.verdict)}</span>`:""}</div>`+
+    `<div style="margin-top:5px"><button class="ghost" style="padding:1px 8px;font-size:11px" onclick="event.stopPropagation();fcPick('${c.chat_id}')">Open</button> <button class="danger" style="padding:1px 8px;font-size:11px" onclick="event.stopPropagation();fcCloseId('${c.chat_id}')">Remove</button></div></div>`;}).join("")||'<div class="empty" style="padding:8px">No open chats.</div>';
+  if(chats.length||FC_ID){wrap.style.display="grid";}else{wrap.style.display="none";document.getElementById("fc-box").style.display="none";}
+  }catch(e){}}
+function fcPick(id){if(id===FC_ID)return;location.hash="fc="+id;}   // the hashchange listener resumes it
+async function fcCloseId(id){if(!confirm("Remove this chat? Its files + agent session are deleted."))return;
+  try{await api("/verify/fixchat/close","POST",{chat_id:id});
+    if(id===FC_ID){FC_ID=null;fcHash(null);document.getElementById("fc-box").style.display="none";}
+    fcLoadList();}catch(e){alert(e.message);}}
 async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);return;}
   if(FC_OPENING||FC_ID)return;                       // already opening/open — don't double-open
   FC_ID=fcUuid();fcHash(FC_ID);                      // id up front: URL works + Close works immediately
   FC_OPENING=true;fcSetReady(false);
-  const box=document.getElementById("fc-box");box.style.display="block";document.getElementById("fc-log").innerHTML="";
+  const box=document.getElementById("fc-box");box.style.display="block";document.getElementById("fc-wrap").style.display="grid";document.getElementById("fc-log").innerHTML="";
   const t0=Date.now();
   fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (0s). You can type your message now — it will be sent when the agent is ready.","color:var(--mut)");
   FC_TICK=setInterval(()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("Opening fix chat"))l.children[1].textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s). You can type now — your message sends when it's ready.`;},1000);
@@ -427,7 +446,7 @@ async function fcResume(cid){                       // restore a chat after a pa
     document.getElementById("fc-log").innerHTML="";
     (d.log||[]).forEach(m=>fcLog(m.role==="you"?"you":m.role==="agent"?"agent":"system",m.text,m.role==="agent"?"":"color:var(--mut)"));
     if(!(d.log||[]).length)fcLog("system","chat restored — your files are below; type to continue (the agent reads the files again if this chat never got its first reply).","color:var(--mut)");
-    fcRenderFiles(d.files);fcSetReady(true);
+    fcRenderFiles(d.files);fcSetReady(true);fcLoadList();
   }catch(e){fcHash(null);msg("vf-msg","That fix chat is closed or expired — open a new one from a verdict.",false);}}
 async function fcSend(){const inp=document.getElementById("fc-input");const t=inp.value.trim();
   if(!t)return;
@@ -455,7 +474,7 @@ async function fcClose(){                            // works ALWAYS — even wh
   FC_ID=null;FC_PENDING=null;fcHash(null);
   try{const d=await api("/verify/fixchat/close","POST",{chat_id:cid});
     document.getElementById("fc-box").style.display="none";FC_MTIMES={};
-    msg("vf-msg",d.closed?"Chat closed — session + files removed.":"Close failed: "+(d.error||"?"),!!d.closed);
+    msg("vf-msg",d.closed?"Chat closed — session + files removed.":"Close failed: "+(d.error||"?"),!!d.closed);fcLoadList();
   }catch(e){msg("vf-msg",e.message,false);}}
 async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});setTimeout(refresh,1000);}catch(e){alert(e.message);}}
