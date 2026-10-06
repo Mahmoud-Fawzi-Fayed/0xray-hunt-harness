@@ -435,17 +435,28 @@ class Handler(BaseHTTPRequestHandler):
                 if intake:
                     f["evidence"] = ((f.get("evidence", "") or "") + "\n" + intake["text"]).strip()
                     f["_images"] = intake["images"]
+                    f["_files_dir"] = intake.get("dir")               # triager reads images/scripts from here
+                    f["_file_names"] = [s["name"] for s in intake["saved"]]
                 res = V.verify_finding(f, program=prog, base=self.base)
                 res["extracted"] = {k: parsed[k] for k in ("vuln_class", "severity", "url", "title") if parsed.get(k)}
                 if intake:
                     res["uploads"] = {"saved": [s["name"] for s in intake["saved"]],
                                       "rejected": intake["rejected"], "images": intake["images"]}
+                op = None
                 if b.get("deep"):
                     op = V.deep_opinion_all(f, res, program=prog, base=self.base)   # one triager per pool model
                     res["triager_opinion"] = op
                     if op.get("verdict"):
                         res["verdict"] = V.combine_verdict(res, op)  # strictest across ALL models + the gate
                         res["accept"] = res["verdict"] == "READY"
+                res["summary"] = V._summarize(res, op)               # brief reflects the FINAL verdict
+                # verify-only hygiene: remove the uploaded files + the ephemeral triager chat sessions
+                try:
+                    V._cleanup(paths=[intake["dir"]] if intake and intake.get("dir") else [],
+                               session_ids=(op or {}).get("session_ids") or [])
+                    res["cleaned"] = True
+                except Exception:  # noqa: BLE001
+                    res["cleaned"] = False
                 return self._send(200, res)
 
             if p.path == "/sessions/clear":

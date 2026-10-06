@@ -229,10 +229,12 @@ def verify_finding(f, program=None, base=DEFAULT_BASE):
         verdict = "NEEDS_FIXES"
     else:
         verdict = "READY"
-    return {"verdict": verdict, "score": score, "program": program or f.get("program"),
-            "vuln_class": cls, "severity": sev, "url": url,
-            "checks": checks, "failed": [c["check"] for c in fails], "missing": missing,
-            "dedup": dedup, "accept": verdict == "READY"}
+    out = {"verdict": verdict, "score": score, "program": program or f.get("program"),
+           "vuln_class": cls, "severity": sev, "url": url,
+           "checks": checks, "failed": [c["check"] for c in fails], "missing": missing,
+           "dedup": dedup, "accept": verdict == "READY"}
+    out["summary"] = _summarize(out)
+    return out
 
 
 def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
@@ -252,16 +254,41 @@ def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
 
 
 def _triager_task(f, det, scope):
+    # everything the operator uploaded reaches the triager: full finding JSON (text + scripts already
+    # merged into evidence) AND the on-disk dir so the agent can READ the images/scripts itself.
+    files_dir = f.get("_files_dir")
+    names = ", ".join(f.get("_file_names") or [])
+    files_note = (f"\nUPLOADED EVIDENCE FILES are saved at: {files_dir} ({names}). "
+                  "READ them with your file tools — images show the PoC, scripts are the exploit — "
+                  "and factor what you see into the verdict.\n" if files_dir else "")
     return (
         "You are a STRICT bug-bounty triager. Decide if this draft finding is submittable. "
         "Be harsh: reflection-only, error-only, no-impact, theoretical, out-of-scope, non-qualifying, "
         "or an impact that depends on a victim secret the PoC never obtains (a session/id/token) = REJECT.\n\n"
-        f"FINDING:\n{json.dumps(f, indent=2)[:3500]}\n\n"
+        f"FINDING:\n{json.dumps(f, indent=2)[:24000]}\n{files_note}\n"
         f"PROGRAM non-qualifying: {scope.get('non_qualifying', [])[:20]}\n"
         f"PROGRAM qualifying classes: {scope.get('qualifying_classes', [])}\n"
         f"Deterministic pre-check: verdict={det['verdict']}, failed={det['failed']}\n\n"
         "Reply ONLY JSON: {\"verdict\":\"READY|NEEDS_FIXES|DO_NOT_SUBMIT\",\"reasons\":[...],"
         "\"missing\":[...],\"severity_opinion\":\"...\"}")
+
+
+def _cleanup(paths=(), session_ids=()):
+    """Verify is verify-only: after the review, remove the upload dir AND the ephemeral triager chat
+    sessions it opened. Pooled/running hunt sessions are never touched (sessions.drop_ids guards)."""
+    import shutil
+    for p in paths:
+        try:
+            if p and os.path.isdir(p):
+                shutil.rmtree(p)
+        except OSError:
+            pass
+    if session_ids:
+        try:
+            import sessions as SESS
+            SESS.drop_ids(session_ids)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _pool_models():
@@ -287,11 +314,17 @@ def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_
     def _one(m):
         try:
             r = A.run_agent(task, context=None, model=m, timeout=per_model_timeout, attempts=1)
+            sid = r.get("session_id")
             js = A.extract_json(r.get("result", "")) if hasattr(A, "extract_json") else None
             if isinstance(js, dict) and js.get("verdict"):
                 js["model"] = r.get("model") or m
+                if sid:
+                    js["session_id"] = sid
                 return js
-            return {"model": m, "error": "no verdict"}
+            out = {"model": m, "error": "no verdict"}
+            if sid:
+                out["session_id"] = sid
+            return out
         except Exception as e:  # noqa: BLE001
             return {"model": m, "error": str(e)[:100]}
 
@@ -301,14 +334,20 @@ def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_
     final = max(verdicts, key=lambda v: _VERDICT_ORDER[v]) if verdicts else None
     return {"verdict": final, "opinions": opinions,
             "models_run": [o.get("model") for o in opinions],
+            "session_ids": [o["session_id"] for o in opinions if o.get("session_id")],
             "agreement": (len(set(verdicts)) == 1) if verdicts else None}
 
 
 # ------- secure file intake (uploaded report + evidence) -------
-ALLOWED_TEXT = {".md", ".txt", ".json", ".log", ".har", ".csv", ".xml", ".yaml", ".yml", ".http", ".nb"}
+# scripts are TEXT here (captured for the triager to read) — they are stored chmod 600, never
+# executed or served, and deleted right after the verify run.
+ALLOWED_TEXT = {".md", ".txt", ".json", ".log", ".har", ".csv", ".xml", ".yaml", ".yml", ".http", ".nb",
+                ".py", ".sh", ".bash", ".js", ".ts", ".php", ".rb", ".pl", ".ps1", ".java", ".go",
+                ".html", ".htm", ".css", ".sql", ".ini", ".conf", ".cfg", ".env", ".burp", ".sm"}
 ALLOWED_BIN = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"}
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
+MAX_TEXT_PER_FILE = 60000          # chars of each text/script file forwarded to the triager
 _VERDICT_ORDER = {"READY": 0, "NEEDS_FIXES": 1, "DO_NOT_SUBMIT": 2}
 
 
@@ -352,11 +391,30 @@ def ingest_files(files, program=None, base=DEFAULT_BASE):
         total += len(raw)
         saved.append({"name": name, "bytes": len(raw)})
         if ext in ALLOWED_TEXT:
-            texts.append(f"--- {name} ---\n" + raw.decode("utf-8", "ignore")[:20000])
+            texts.append(f"--- {name} ---\n" + raw.decode("utf-8", "ignore")[:MAX_TEXT_PER_FILE])
         else:
             images += 1
     return {"saved": saved, "rejected": rejected, "text": "\n".join(texts),
             "images": images, "dir": root if saved else None}
+
+
+def _summarize(det, opinion=None):
+    """One short human brief: the verdict, why, and what to do next."""
+    v = det.get("verdict", "NEEDS_FIXES")
+    fails = [c for c in det.get("checks", []) if not c.get("pass")]
+    reasons = [f"{c['check']}" + (f" ({c['note']})" if c.get("note") else "") for c in fails]
+    if v == "READY":
+        why = "All checks pass: real PoC, repro steps, demonstrated impact, in-scope, qualifying class, not a duplicate."
+        nxt = "Ready to report. Keep the two-account / impact evidence attached and redact any PII."
+    elif v == "DO_NOT_SUBMIT":
+        why = "Would likely be closed (RTFS / Informative / N/A): " + ("; ".join(reasons) if reasons else "fails a hard gate.")
+        nxt = "Do NOT submit as-is. Prove the missing precondition (how the attacker gets the victim's session/id) or pick a stronger finding."
+    else:
+        why = "Close, but not submittable yet: " + ("; ".join(reasons) if reasons else "some checks need attention.")
+        nxt = "Fix the failed checks above, then re-verify."
+    if opinion and opinion.get("verdict") and opinion.get("verdict") != det.get("verdict"):
+        why += f" Expert review was stricter ({opinion['verdict']})."
+    return {"verdict": v, "why": why, "next": nxt}
 
 
 def combine_verdict(det, opinion):
@@ -488,7 +546,7 @@ def _selftest():
     files = [
         {"name": "report.md", "b64": _b64.b64encode(b"# IDOR\naccount B reads account A order (cross-account)").decode()},
         {"name": "../../../tmp/evil.md", "b64": _b64.b64encode(b"path traversal attempt").decode()},  # traversal + allowed ext
-        {"name": "shell.php", "b64": _b64.b64encode(b"<?php system($_GET[c]);?>").decode()},  # bad type -> reject
+        {"name": "exploit.py", "b64": _b64.b64encode(b"import requests  # PoC script").decode()},      # script -> captured as TEXT
         {"name": "x.exe", "b64": _b64.b64encode(b"MZ").decode()},                             # bad type -> reject
         {"name": "big.txt", "b64": _b64.b64encode(b"A" * (MAX_FILE + 1)).decode()},           # oversized -> reject
         {"name": "shot.png", "b64": _b64.b64encode(b"\x89PNG\r\n\x1a\n").decode()},           # image
@@ -498,7 +556,8 @@ def _selftest():
     rej = " ".join(r["name"] + ":" + r["reason"] for r in ing["rejected"])
     assert "report.md" in saved and "shot.png" in saved, saved
     assert "evil.md" in saved, saved                    # traversal collapsed to basename, stored IN the dir
-    assert "shell.php" in rej and "x.exe" in rej and "big.txt" in rej, rej
+    assert "exploit.py" in saved and "PoC script" in ing["text"], saved   # scripts reach the triager as text
+    assert "x.exe" in rej and "big.txt" in rej, rej
     assert "cross-account" in ing["text"] and ing["images"] == 1, ing
     # traversal defeated: nothing written outside the upload dir
     import glob as _g

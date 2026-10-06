@@ -91,6 +91,28 @@ def clear_orphans(base=DEFAULT_BASE, confirm=False):
     return out
 
 
+def drop_ids(ids, base=DEFAULT_BASE):
+    """Remove SPECIFIC chat dirs by session id — used to clean up ephemeral one-shot sessions (e.g.
+    verify triager runs) right after they finish. Safety: an id that is in ANY target's pool is
+    never removed, so a live hunt can never lose a session to this."""
+    pooled = {i for ids_ in _pools(base).values() for i in ids_}
+    removed, skipped = 0, 0
+    for sid in (ids or []):
+        sid = re.sub(r"[^A-Za-z0-9._-]", "", str(sid or ""))
+        if not sid:
+            continue
+        if sid in pooled:
+            skipped += 1
+            continue
+        for cdir in glob.glob(os.path.join(CHATS, "*", sid)):
+            try:
+                shutil.rmtree(cdir)
+                removed += 1
+            except OSError:
+                pass
+    return {"removed": removed, "skipped_pooled": skipped}
+
+
 def reset_target(slug, base=DEFAULT_BASE, confirm=False):
     slug = _slug(slug)
     inv = inventory(base)
