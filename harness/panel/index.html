@@ -146,6 +146,17 @@
   #fc-wrap{align-items:start}
   #fc-wrap.sideoff{grid-template-columns:1fr}
   #fc-wrap.sideoff>#fc-side{display:none}
+  /* Claude/Cursor-style conversation */
+  .fc-log{max-height:min(58vh,640px);min-height:300px;overflow-y:auto;overflow-x:hidden;padding:8px 4px;margin-bottom:12px;display:flex;flex-direction:column;gap:18px}
+  .fc-row{display:flex;gap:10px;align-items:flex-start}
+  .fc-av{flex:0 0 26px;width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#5b96f7,#2f6ae0);color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;margin-top:1px;box-shadow:0 0 10px rgba(47,106,224,.35)}
+  .fc-you{align-self:flex-end;background:linear-gradient(180deg,#3a6fd8,#2b5cc4);color:#f2f6ff;border-radius:18px 18px 4px 18px;padding:9px 14px;max-width:72%;box-shadow:0 2px 10px rgba(47,106,224,.22);font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .fc-sys{align-self:center;font-size:11.5px;color:var(--mut);text-align:center;max-width:94%}
+  .fc-composer{display:flex;align-items:flex-end;gap:8px;background:#0d1219;border:1px solid #232c3e;border-radius:16px;padding:7px 7px 7px 14px;transition:border-color .15s ease,box-shadow .15s ease}
+  .fc-composer:focus-within{border-color:var(--acc);box-shadow:0 0 0 3px rgba(91,150,247,.14)}
+  .fc-composer textarea{flex:1;min-width:0;border:none !important;background:transparent !important;box-shadow:none !important;padding:6px 0;resize:none;max-height:160px;min-height:24px;font-size:13.5px;line-height:1.5;border-radius:0;font-family:inherit}
+  button.fc-send{flex:0 0 34px;width:34px;height:34px;border-radius:50%;padding:0;background:linear-gradient(180deg,#3f7aef,#2f6ae0);border-color:#4a85f5;color:#fff}
+  button.fc-send:hover{background:linear-gradient(180deg,#4c88f6,#3774ec);transform:none}
   /* misc */
   details>summary{transition:color .15s ease}
   details>summary:hover{color:var(--ink)}
@@ -314,11 +325,11 @@
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
       <div id="fc-wrap" style="display:none;gap:14px">
         <div class="box" id="fc-side"><div class="h"><span class="t">Chats</span><span style="display:flex;align-items:center;gap:6px"><span class="dim" style="font-size:11px">open — click to resume</span><button class="ghost sm" onclick="fcSide(false)" title="Hide the chat list">‹</button></span></div><div class="b" id="fc-list" style="padding:8px"><div class="empty" style="padding:8px">No open chats.</div></div></div>
-        <div class="box" id="fc-box"><div class="h"><span class="t"><button class="ghost sm" id="fc-showside" onclick="fcSide(true)" style="display:none;margin-right:8px">☰ chats</button>Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
-        <div id="fc-files" style="margin-bottom:10px"></div>
-        <div id="fc-log" style="max-height:min(56vh,620px);min-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:14px;background:#0b0f1a;margin-bottom:10px;display:flex;flex-direction:column;gap:10px"></div>
-        <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" onclick="fcSend()">Send</button><button class="ghost" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button></div>
-        <div style="margin-top:10px;display:flex;align-items:center;gap:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg"></span></div>
+        <div class="box" id="fc-box"><div class="h"><span class="t"><button class="ghost sm" id="fc-showside" onclick="fcSide(true)" style="display:none;margin-right:8px">☰ chats</button>Fix chat — agent edits your files</span><span style="display:flex;align-items:center;gap:10px"><span class="dim" style="font-size:11px">id in URL · refresh-safe</span><button class="danger sm" onclick="fcClose()">Close chat</button></span></div><div class="b">
+        <div id="fc-files" style="margin-bottom:6px"></div>
+        <div id="fc-log" class="fc-log"></div>
+        <div class="fc-composer"><textarea id="fc-input" rows="1" placeholder="Message the fix agent…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();fcSend();}" oninput="this.style.height='auto';this.style.height=Math.min(160,this.scrollHeight)+'px'"></textarea><button class="ghost sm" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button><button class="fc-send" id="fc-send" onclick="fcSend()" title="Send"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0l-6 6m6-6l6 6"/></svg></button></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:7px"><span class="dim" style="font-size:11px">Enter to send · Shift+Enter for a new line · Close chat removes the session + files — download anything you need first</span><span id="fc-msg" class="msg" style="margin:0"></span></div>
       </div></div>
       </div>
     </section>
@@ -507,8 +518,10 @@ function fcUuid(){return (crypto.randomUUID?crypto.randomUUID():"xxxxxxxx-xxxx-4
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
   document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
 function fcLog(role,text,cls){const l=document.getElementById("fc-log");
-  const bubble=role==="you"?`align-self:flex-end;background:linear-gradient(180deg,#1a2a4a,#152138);border:1px solid #2a3f6e;max-width:85%`:(role==="agent"?`align-self:flex-start;background:#101725;border:1px solid #1e2736;max-width:85%`:`align-self:center;max-width:95%`);
-  l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:12px;padding:9px 13px;box-shadow:0 2px 8px rgba(0,0,0,.22)"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
+  if(role==="you")l.insertAdjacentHTML("beforeend",`<div class="fc-you">${esc(text)}</div>`);
+  else if(role==="agent")l.insertAdjacentHTML("beforeend",`<div class="fc-row"><div class="fc-av">0x</div><div style="flex:1;min-width:0;padding-top:3px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:13.5px;line-height:1.65;${cls||""}">${esc(text)}</div></div>`);
+  else l.insertAdjacentHTML("beforeend",`<div class="fc-sys" style="${cls||""}">${esc(text)}</div>`);
+  l.scrollTop=l.scrollHeight;}
 function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
 function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
 async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const el=document.getElementById("fc-list");const wrap=document.getElementById("fc-wrap");
@@ -537,7 +550,7 @@ async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);ret
   const box=document.getElementById("fc-box");box.style.display="block";document.getElementById("fc-wrap").style.display="grid";document.getElementById("fc-log").innerHTML="";
   const t0=Date.now();
   fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (0s). You can type your message now — it will be sent when the agent is ready.","color:var(--mut)");
-  FC_TICK=setInterval(()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("Opening fix chat"))l.children[1].textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s). You can type now — your message sends when it's ready.`;},1000);
+  FC_TICK=setInterval(()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.classList.contains("fc-sys")&&l.textContent.includes("Opening fix chat"))l.textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s). You can type now — your message sends when it's ready.`;},1000);
   box.scrollIntoView({behavior:"smooth"});
   FC_ABORT=new AbortController();
   try{const req=VF_LAST.req;
@@ -563,10 +576,11 @@ async function fcResume(cid){                       // restore a chat after a pa
   }catch(e){fcHash(null);msg("vf-msg","That fix chat is closed or expired — open a new one from a verdict.",false);}}
 async function fcSend(){const inp=document.getElementById("fc-input");const t=inp.value.trim();
   if(!t)return;
-  if(FC_OPENING){FC_PENDING=t;inp.value="";fcLog("you",t);fcLog("system","queued — sends automatically when the agent is ready.","color:var(--mut)");return;}
+  inp.value="";inp.style.height="auto";
+  if(FC_OPENING){FC_PENDING=t;fcLog("you",t);fcLog("system","queued — sends automatically when the agent is ready.","color:var(--mut)");return;}
   if(!FC_ID){fcLog("system","the chat isn't open — click “Open fix chat” under the verdict first.","color:var(--amb)");return;}
   if(FC_BUSY){fcLog("system","agent is still working on your previous message…","color:var(--amb)");return;}
-  inp.value="";fcSend2(t);}
+  fcSend2(t);}
 async function fcSend2(t){if(!FC_ID||FC_BUSY)return;
   FC_BUSY=true;fcSetReady(true);
   fcLog("you",t);fcLog("system","agent is working (may edit files)…","color:var(--mut)");
