@@ -152,6 +152,18 @@ def verify_finding(f, program=None, base=DEFAULT_BASE):
             break
     add("not an always-rejected class", hard_reject is None, hard_reject or "")
 
+    # 4b) RTFS / Informative — structural, vendor-agnostic. A hold is not drafted.
+    try:
+        import disposition as DP
+        dres = DP.check(f, program=program or f.get("program"), base=base)
+    except Exception as e:  # noqa: BLE001
+        dres = {"verdict": "HOLD_RTFS", "reason": f"disposition gate error: {e}"}
+    held = dres.get("verdict") != "PASS"
+    add("disposition (not RTFS / Informative)", not held,
+        "" if not held else f"{dres.get('verdict')}: {dres.get('reason','')}")
+    if held:
+        hard_reject = hard_reject or f"{dres.get('verdict')}: {dres.get('reason','')}"
+
     # 5) per-class PoC minimum
     if cls in PER_CLASS:
         need, downgrade_pats, proof_pat = PER_CLASS[cls]
@@ -182,6 +194,32 @@ def verify_finding(f, program=None, base=DEFAULT_BASE):
     except Exception:  # noqa: BLE001
         dedup = {"verdict": "unknown"}
         add("dedup (not a known duplicate)", True, "dedup oracle unavailable — check manually")
+
+    # 8) RTFS / Informative disposition gate (generic — catches "hypothetical precondition" closures)
+    try:
+        import disposition as DSP
+        dsp = DSP.check(f, program=program, base=base)
+        dv = dsp.get("verdict", "PASS")
+        add("disposition (not RTFS/Informative)", dv == "PASS",
+            "" if dv == "PASS" else f"{dv}: {dsp.get('reason', '')[:150]}")
+        if dv != "PASS":
+            hard_reject = hard_reject or f"disposition gate: {dv}"
+    except Exception:  # noqa: BLE001
+        add("disposition (not RTFS/Informative)", True, "disposition gate unavailable")
+
+    # 9) generic precondition check — the #1 RTFS cause: impact needs a victim secret the PoC never obtains
+    _precond = re.compile(r"stolen session|obtain(?:s|ed|ing)? (?:a |the )?(?:victim'?s? )?(?:vendor |user )?session|"
+                          r"cookie theft|session hijack|shared machine|physical access|\bmitm\b|man-in-the-middle|"
+                          r"anyone who obtains|attacker who obtains|leaked (?:transaction|object|order|invoice) id")
+    _proven = re.compile(r"document\.cookie|samesite\s*=\s*none|xss.{0,80}(executed|fired|exfiltrat)|"
+                         r"cross-site form|csrf reproduced|in-scope (?:api|response|endpoint).{0,60}(?:uuid|id)|"
+                         r"response (?:lists|returned) (?:another|other|victim)|enumerable|sequential id|"
+                         r"demonstrated (?:a |the )?(?:way|method) to obtain|obtained from an in-scope")
+    if _precond.search(blob) and not _proven.search(blob):
+        add("impact precondition is demonstrated (not hypothetical)", False,
+            "impact assumes obtaining a victim session/secret the PoC never obtains — show how an attacker "
+            "gets it (XSS/CSRF/enumerable id/in-scope oracle), or it's RTFS 'hypothetical'")
+        hard_reject = hard_reject or "hypothetical precondition (victim secret not obtained)"
 
     fails = [c for c in checks if not c["pass"]]
     score = round(100 * (len(checks) - len(fails)) / max(1, len(checks)))

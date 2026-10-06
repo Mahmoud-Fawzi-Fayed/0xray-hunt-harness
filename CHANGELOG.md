@@ -3,6 +3,19 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.9.1] - 2026-10-06
+### Added — RTFS / Informative protection (generic, every program)
+- **`verify.py` now runs the `disposition.py` RTFS/Informative gate** plus a generic
+  **precondition check** — the #1 closure cause: impact that assumes obtaining a victim's session /
+  transaction-id / token the PoC never demonstrates. Such findings now return DO_NOT_SUBMIT with the
+  exact reason, instead of being green-lit and closed as RTFS.
+- **New skill `triage-rtfs`** — the methodology: the precondition ladder (own-session / asserted-leak /
+  capability-URL → RTFS/Informative; in-scope oracle / enumerable id / reproduced XSS-CSRF / write-past-
+  terminal-lock → VALID), a pre-draft self-check, and how to rescue a held finding. Registered as a
+  default skill so it's loaded on every hunt. Skills 80 → 81.
+- Proven against the two real closures: own-session 2FA-disable ATO and asserted-leak checkout rewrite
+  both → DO_NOT_SUBMIT; a valid cross-account enumerable IDOR stays READY. selfcheck 70/70.
+
 ## [0.9.0] - 2026-10-06
 ### Added — guarded session management (never auto-deletes)
 - **`sessions.py`** — the single sanctioned way to manage Cursor sessions. **Dry-run by default**;

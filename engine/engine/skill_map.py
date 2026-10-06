@@ -98,7 +98,7 @@ def tech_skills(tech):
     return out
 
 
-def skill_paths(vuln_class, tech=None, extra=("security-arsenal",)):
+def skill_paths(vuln_class, tech=None, extra=("security-arsenal", "triage-rtfs")):
     """Absolute SKILL.md paths for the class (+ tech) skills that actually exist on disk, so a
     cursor-agent can READ and follow the real methodology/payloads — not merely see a skill name."""
     names = skills_for(vuln_class) + (tech_skills(tech) if tech else []) + list(extra)
