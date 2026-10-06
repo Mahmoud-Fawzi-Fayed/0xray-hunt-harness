@@ -344,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"audit": audit, "accounts_per_program": counts,
                                         "cap": _G.max_accounts()})
             return self._send(404, {"error": "not found"})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return  # client (n8n/panel poller) hung up mid-response — benign, don't double-fault
         except Exception as e:
             return self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -487,6 +489,8 @@ class Handler(BaseHTTPRequestHandler):
                                         "sessions_killed": killed, "chats_removed": chats_removed})
 
             return self._send(404, {"error": "not found"})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return  # client (n8n/panel poller) hung up mid-response — benign, don't double-fault
         except Exception as e:
             return self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
