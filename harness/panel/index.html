@@ -387,7 +387,7 @@ function renderVerdict(d){
     brief+liv+
     `<div style="margin:9px 0 12px" class="dim">dedup: ${esc((d.dedup||{}).verdict||"—")}${(d.missing&&d.missing.length)?` · missing: ${esc(d.missing.join(", "))}`:""}</div>`+
     exd+up+checks+op+
-    `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><button class="pri" onclick="fcOpen()">Open fix chat — let the agent edit your files to fix this</button> <span class="dim" style="font-size:11px">it rewrites the report in place (adds steps/PoC sections, fixes severity, redacts PII) · you download the fixed files · closing removes the session + files</span></div>;}
+    `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><button class="pri" onclick="fcOpen()">Open fix chat — let the agent edit your files to fix this</button> <span class="dim" style="font-size:11px">it rewrites the report in place (adds steps/PoC sections, fixes severity, redacts PII) · you download the fixed files · closing removes the session + files</span></div>`;}
 async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
 let VF_LAST=null,FC_ID=null,FC_MTIMES={};
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
