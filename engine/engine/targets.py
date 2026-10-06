@@ -42,9 +42,19 @@ def _slug(p):
     return re.sub(r"[^a-z0-9._-]+", "-", str(p or "").strip().lower()).strip("-") or "unknown"
 
 
+# two-label public suffixes where the registrable apex needs THREE labels (x.vwfs.co.za -> vwfs.co.za)
+_TWO_LABEL_TLDS = {
+    "com.cn", "net.cn", "org.cn", "co.uk", "org.uk", "gov.uk", "ac.uk", "co.za", "com.au", "net.au",
+    "org.au", "com.br", "com.ar", "com.mx", "co.in", "co.kr", "com.tw", "com.tr", "co.jp", "com.sg",
+    "com.hk", "com.my", "co.nz", "com.co", "com.pe", "com.ph", "com.vn", "co.id", "com.ua", "co.il",
+}
+
+
 def _apex(h):
     h = (h or "").lstrip("*").lstrip(".").lower().split("/")[0]
     parts = [x for x in h.split(".") if x]
+    if len(parts) >= 3 and ".".join(parts[-2:]) in _TWO_LABEL_TLDS:
+        return ".".join(parts[-3:])
     return ".".join(parts[-2:]) if len(parts) >= 2 else h
 
 
