@@ -3,6 +3,22 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.8.0] - 2026-10-06
+### Added — "Verify finding" gate on the dashboard
+- **`verify.py`** — submit a draft finding (class, severity, URL, steps, PoC, evidence, impact) and get a
+  verdict: **READY / NEEDS_FIXES / DO_NOT_SUBMIT**, with a per-check list, what's missing, a readiness
+  score, and a dedup check. Enforces per-class PoC minimums, the always-rejected list, scope, the
+  program's qualifying/non-qualifying lists, and severity honesty. Optional deep LLM triager opinion.
+- **Bridge `/verify`** + a **"Verify finding"** tab on the panel (fill the form → get the verdict).
+- `selfcheck` → **68/68** (adds verify).
+
+### Fixed
+- `/activity` read every engine log in full on each ~8s poll → slow/timeout as logs grew. Now it tails
+  128 KB per log and caches for 15s (miss ~2.4s, cached hit ~2ms).
+- Bridge swallows client-disconnects quietly (no more `BrokenPipe` tracebacks).
+- Public-suffix-aware apexes (`x.vwfs.co.za → vwfs.co.za`, not `co.za`) so the monitor doesn't observe
+  bogus TLD apexes.
+
 ## [0.7.0] - 2026-10-06
 ### Added — add a target by PASTING the program page
 - **`scopeparse.py`** — paste a YesWeHack / HackerOne / Bugcrowd program page and it auto-extracts

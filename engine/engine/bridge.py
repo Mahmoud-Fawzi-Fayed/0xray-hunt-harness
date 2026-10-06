@@ -39,6 +39,7 @@ VERSION = "1.3"
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 TOKEN = os.environ.get("HUNT_BRIDGE_TOKEN", "")
 MAX_BODY = int(os.environ.get("HUNT_BRIDGE_MAX_BODY", str(2 * 1024 * 1024)))   # 2 MB request cap
+_ACT_CACHE = {}   # /activity is polled ~every 8s and is CPU-heavy on big logs -> short-TTL cache
 
 
 def _now():
@@ -260,6 +261,10 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, TypeError):
                     n = 80
                 prog = q.get("program", [""])[0]
+                _ck = (prog, n); _tnow = datetime.now(timezone.utc).timestamp()
+                _cc = _ACT_CACHE.get(_ck)
+                if _cc and _tnow - _cc[0] < 15:
+                    return self._send(200, _cc[1])
                 if prog:
                     import targets as T
                     logs = [os.path.join(os.path.expanduser(self.base), T._slug(prog), "engine.log")]
@@ -273,7 +278,13 @@ class Handler(BaseHTTPRequestHandler):
                     if not os.path.isfile(lg):
                         continue
                     pn = os.path.basename(os.path.dirname(lg))
-                    for line in open(lg, encoding="utf-8", errors="ignore"):
+                    try:                                  # tail only — recent events are at the end; keeps /activity fast as logs grow
+                        with open(lg, "rb") as _fh:
+                            _fh.seek(0, 2); _sz = _fh.tell(); _fh.seek(max(0, _sz - 131072))
+                            _lines = _fh.read().decode("utf-8", "ignore").splitlines()
+                    except OSError:
+                        continue
+                    for line in _lines:
                         m = HUNT.search(line)
                         if m:
                             ts, cls, url, model, sk = m.groups()
@@ -294,7 +305,9 @@ class Handler(BaseHTTPRequestHandler):
                             events.append({"ts": ts, "program": pn, "phase": "confirmed", "class": cls,
                                            "url": url, "model": "", "skills": [], "severity": sev})
                 events.sort(key=lambda e: e["ts"], reverse=True)
-                return self._send(200, {"events": events[:n], "models": models})
+                _payload = {"events": events[:n], "models": models}
+                _ACT_CACHE[_ck] = (_tnow, _payload)
+                return self._send(200, _payload)
             if p.path == "/capabilities":
                 import sms as _SMS
                 import learn as _L
@@ -389,6 +402,14 @@ class Handler(BaseHTTPRequestHandler):
                 items = b.get("items") or b.get("reports") or []
                 added = D.Corpus(b.get("program", ""), base=self.base).ingest(items, source=b.get("source"))
                 return self._send(200, {"added": added, "supplied": len(items)})
+
+            if p.path == "/verify":
+                import verify as V
+                f = b.get("finding") or b
+                res = V.verify_finding(f, program=(b.get("program") or f.get("program")), base=self.base)
+                if b.get("deep"):
+                    res["triager_opinion"] = V.deep_opinion(f, res, program=(b.get("program") or f.get("program")), base=self.base)
+                return self._send(200, res)
 
             if p.path == "/notify":
                 ok = NO.send_safe(b.get("subject", "(no subject)"), b.get("body", ""),
