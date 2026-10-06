@@ -103,7 +103,9 @@ def _hunt_running(base):
                 age = int(_t.time() - _o.path.getmtime(logf))
                 with open(logf, "rb") as fh:                     # last line only, no full read
                     fh.seek(0, 2)
-                    tail = fh.read(max(2, min(fh.tell(), 4096))).decode("utf-8", "replace").strip().splitlines()
+                    size = fh.tell()
+                    fh.seek(max(0, size - 4096))
+                    tail = fh.read().decode("utf-8", "replace").strip().splitlines()
                 last = tail[-1].split("  ", 1)[-1] if tail else ""
                 sleeping = any(last.startswith(m) for m in idle)
             except OSError:

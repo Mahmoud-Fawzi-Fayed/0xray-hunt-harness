@@ -11,8 +11,9 @@ Chains every piece of the harness into one auditable, resumable run:
 - recon..validate : delegated to engine.Engine (deterministic control flow; the LLM is used only for
                 the hunt + adversarial validation steps). rank() already blends impact, yield, and a
                 dedup down-rank, so known-issue surface sinks automatically.
-- DRAFT-GATE  : every CONFIRMED finding is scored by the dedup oracle. LIKELY_DUP is HELD (not
-                drafted) unless you flag it a regression; NOVEL / REVIEW become platform-ready drafts.
+- DRAFT-GATE  : every CONFIRMED finding is scored by disposition.py first (HOLD_RTFS /
+                HOLD_INFORMATIVE are not drafted), then by the dedup oracle. LIKELY_DUP is HELD
+                unless you flag it a regression; NOVEL / REVIEW become platform-ready drafts.
 - STOP        : writes the drafts + an approval.md that lists exactly what a human must approve and
                 the bb-platforms MCP calls to draft/submit. No submission is EVER performed here.
 
@@ -118,12 +119,23 @@ class Orchestrator:
         held_dir = os.path.join(self.eng.eng.dir, "held")
         os.makedirs(drafts_dir, exist_ok=True)
         os.makedirs(held_dir, exist_ok=True)
-        drafted, held = [], []
+        import disposition as DP
+        drafted, held, policy = [], [], []
         for i, f in enumerate(confirmed, 1):
+            name = f"{i:02d}-{(f.get('vuln_class') or 'finding')}.md"
+            disp = DP.check(f)
+            if disp["verdict"] != "PASS":
+                body = ("# HELD — " + disp["verdict"] + "\n\n" + disp["reason"] + "\n\n"
+                        + "\n".join(f"- **{r['id']}:** {r['reason']}" for r in disp.get("rules") or []))
+                open(os.path.join(held_dir, name), "w").write(body + "\n")
+                policy.append({"finding": f, "disposition": disp, "file": os.path.join(held_dir, name)})
+                E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"),
+                       "held-" + disp["verdict"].lower().replace("_", "-"),
+                       disp.get("reason", ""), base=self.base)
+                continue
             v = cp.check({"vuln_class": f.get("vuln_class", ""), "url": f.get("url", ""),
                           "title": f.get("evidence", "")})
             md = _draft_md(f, v)
-            name = f"{i:02d}-{(f.get('vuln_class') or 'finding')}.md"
             if v["verdict"] == "LIKELY_DUP":
                 open(os.path.join(held_dir, name), "w").write(md)
                 held.append({"finding": f, "dedup": v, "file": os.path.join(held_dir, name)})
@@ -135,8 +147,9 @@ class Orchestrator:
                 drafted.append({"finding": f, "dedup": v, "file": os.path.join(drafts_dir, name), "link": link})
                 E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "reported",
                        v.get("verdict", ""), base=self.base)
+        self._policy = policy
         self._write_index(drafted)
-        self._approval(drafted, held)
+        self._approval(drafted, held, policy)
         return drafted, held
 
     # ---- publish findings to the public viewer -------------------------------
@@ -218,11 +231,13 @@ class Orchestrator:
         except Exception as e:  # noqa: BLE001
             self.eng.eng.log(f"index: skipped ({e})")
 
-    def _approval(self, drafted, held):
+    def _approval(self, drafted, held, policy=None):
+        policy = policy or []
         p = os.path.join(self.eng.eng.dir, "approval.md")
         lines = [f"# Approval gate — {self.eng.scope.name}", "",
                  f"Pipeline stopped at DRAFT. **Nothing has been submitted.** "
-                 f"{len(drafted)} draft(s) ready, {len(held)} held as likely-duplicate.", "",
+                 f"{len(drafted)} draft(s) ready, {len(held)} held as likely-duplicate, "
+                 f"{len(policy)} held by the disposition gate (RTFS / Informative).", "",
                  "## Ready to review -> approve -> submit", ""]
         if not drafted:
             lines.append("_No novel findings drafted._")
@@ -230,6 +245,13 @@ class Orchestrator:
             f, v = d["finding"], d["dedup"]
             lines += [f"- **{(f.get('vuln_class') or '?').upper()}** @ `{f.get('url','')}` "
                       f"— {f.get('severity','?')} — dedup {v['verdict']} ({v['score']}) — `{d['file']}`"]
+        lines += ["", "## Held by disposition (RTFS / Informative — do NOT draft)", ""]
+        if not policy:
+            lines.append("_None._")
+        for h in policy:
+            f, d = h["finding"], h["disposition"]
+            lines += [f"- **{(f.get('vuln_class') or '?').upper()}** @ `{f.get('url','')}` "
+                      f"— {d.get('verdict')} — {d.get('reason','')} — `{h['file']}`"]
         lines += ["", "## Held (likely duplicate — do NOT submit without a differentiator)", ""]
         if not held:
             lines.append("_None._")
@@ -299,6 +321,7 @@ class Orchestrator:
             self.eng.eng.log("orchestrator: no confirmed finding THIS pass — NOT a conclusion. "
                              "Rotate classes / re-recon for new surface (redteam-mindset: DO NOT STOP).")
         summary = {**self.eng.eng.summary(), "drafted": len(drafted), "held_dups": len(held),
+                   "held_policy": len(getattr(self, "_policy", []) or []),
                    "submitted": 0, "dir": self.eng.eng.dir}
         self.eng.eng.log(f"orchestrator done | {summary}")
         return summary
@@ -356,6 +379,8 @@ class Orchestrator:
             if rounds and r >= rounds:
                 break
             if interval:
+                nxt = time.strftime("%H:%M", time.gmtime(time.time() + interval))
+                self.eng.eng.log(f"persist: round {r} done — sleeping {int(interval/60)}m, next round ~{nxt} UTC")
                 time.sleep(interval)
         return {"rounds": r, "drafted_total": drafted_total, "dir": self.eng.eng.dir}
 
