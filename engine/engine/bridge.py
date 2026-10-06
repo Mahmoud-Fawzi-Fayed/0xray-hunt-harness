@@ -98,6 +98,14 @@ def _hunt_running(base):
             env = pr.get("pm2_env", {}) or {}
             slug = name[5:]
             age, sleeping = None, False
+            interval_m = 180                                      # default 3h if not in args
+            try:
+                args = env.get("args") or []
+                if isinstance(args, str):
+                    args = args.split()
+                interval_m = max(0, int(args[-1]) // 60) if args and str(args[-1]).isdigit() else 180
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 logf = _o.path.join(base, slug, "engine.log")
                 age = int(_t.time() - _o.path.getmtime(logf))
@@ -112,7 +120,8 @@ def _hunt_running(base):
                 pass
             out.append({"program": slug, "pid": pr.get("pid"),
                         "running": env.get("status") == "online", "restarts": env.get("restart_time", 0),
-                        "wd_restarts": wd.get(name, 0), "log_age_s": age, "sleeping": sleeping})
+                        "wd_restarts": wd.get(name, 0), "log_age_s": age, "sleeping": sleeping,
+                        "interval_m": interval_m})
     return out
 
 
