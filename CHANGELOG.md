@@ -3,6 +3,18 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.7.0] - 2026-10-06
+### Added — add a target by PASTING the program page
+- **`scopeparse.py`** — paste a YesWeHack / HackerOne / Bugcrowd program page and it auto-extracts
+  in/out-of-scope hosts, the mandatory User-Agent suffix, qualifying + non-qualifying vuln classes
+  (mapped to hunt classes), the reward grid, and the rules-of-engagement → a full dynamic scope +
+  a human-readable `program.md`. No hand-editing.
+- **Bridge `/targets/ingest`** — POST the pasted page → parsed + registered (guards an empty paste).
+- **Panel** — a new "Add by pasting the program page" box on the Targets tab (textarea + *Parse & add*).
+  The panel source is now version-controlled at [`harness/panel/index.html`](harness/panel/index.html).
+- Registered **Paddle** via this flow (12 in-scope, 2 out-of-scope, UA + `BugBounty`, 13 classes).
+- `selfcheck` → **67/67** (adds scopeparse).
+
 ## [0.6.0] - 2026-10-05
 ### Added — authenticated & advanced hunting (the "find more bugs" upgrade)
 - **Authenticated sessions** (`authn.py`): per-target operator-provided sessions (cookie/bearer/headers)

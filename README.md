@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
 ![skills](https://img.shields.io/badge/skills-80-blue)
-![engine modules](https://img.shields.io/badge/engine%20modules-29-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-30-blue)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
@@ -96,6 +96,10 @@ through a proxy with a real browser fingerprint. The bugs that pay (reading othe
 access control) live **behind login**, so if you give it a logged-in session — ideally two accounts —
 it hunts that deeper surface and automatically checks whether account B can read account A's data.
 
+**Or just paste the page:** on the dashboard go to **Targets → Add by pasting the program page**, paste
+the whole YesWeHack / HackerOne / Bugcrowd program page, and it auto-fills the in/out-of-scope hosts,
+qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent — no config editing.
+
 ---
 
 ## Repository layout
@@ -106,7 +110,7 @@ it hunts that deeper surface and automatically checks whether account B can read
 | [`harness/.env.example`](harness/.env.example) | every setting documented — copy to `.env` and fill in |
 | [`.cursor/agents/`](.cursor/agents/) | 5 subagents (orchestrator, recon, vuln-hunter, dedup, report) |
 | [`.cursor/rules/`](.cursor/rules/) | always-on rules: SOP, dedup/novelty, triager-grade reporting |
-| [`engine/`](engine/) | the full engine (29 modules) + 80 skills |
+| [`engine/`](engine/) | the full engine (30 modules) + 80 skills |
 | [`MANUAL.md`](MANUAL.md) | the deep operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 

@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>0xRay · Hunt Ops Console</title>
+<meta name="description" content="0xRay — autonomous, anti-duplicate bug-hunting harness. Cursor agents · self-learning · stop-at-draft.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="favicon.svg">
+<link rel="mask-icon" href="favicon.svg" color="#4b8bf4">
+<meta name="theme-color" content="#0b0e14">
+<style>
+  :root{
+    --bg:#0a0c10; --rail:#0c0f15; --panel:#11151e; --panel2:#0e1118; --line:#1b2230;
+    --ink:#d7dce4; --mut:#6b7482; --dim:#454d5c; --acc:#4b8bf4; --acc2:#2f6ae0;
+    --grn:#3fb950; --amb:#d7a21a; --red:#f05a4f; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box} html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;display:flex}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#1f2634;border-radius:6px}
+  a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+  .mono{font-family:var(--mono)} .dim{color:var(--mut)}
+  /* rail */
+  .rail{width:216px;flex:0 0 216px;background:var(--rail);border-right:1px solid var(--line);display:flex;flex-direction:column;height:100vh;position:sticky;top:0}
+  .brand{display:flex;align-items:center;gap:11px;padding:16px 16px 14px;border-bottom:1px solid var(--line)}
+  .brand .logo{filter:drop-shadow(0 0 6px rgba(75,139,244,.45));flex:0 0 34px}
+  .brand .wm{font-weight:800;letter-spacing:.3px;font-size:19px;color:var(--ink);line-height:1}.brand .wm span{color:var(--acc)}
+  .brand .sub{font-size:9.5px;color:var(--mut);letter-spacing:2px;text-transform:uppercase;margin-top:4px}
+  nav{padding:10px 8px;flex:1}
+  nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;color:var(--mut);font-weight:500;cursor:pointer;margin:1px 0}
+  nav a:hover{background:#12161f;color:var(--ink);text-decoration:none}
+  nav a.on{background:#141a26;color:var(--ink)} nav a.on .ic{background:var(--acc)}
+  .ic{width:7px;height:7px;border-radius:2px;background:#2a3344;flex:0 0 7px}
+  .railft{padding:12px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--mut)}
+  .st{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--grn);margin-right:6px}
+  /* main */
+  main{flex:1;min-width:0;height:100vh;overflow:auto}
+  .bar{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(10,12,16,.86);backdrop-filter:blur(6px);z-index:5}
+  .bar h1{margin:0;font-size:14px;font-weight:600;letter-spacing:.3px}
+  .bar .meta{font-size:11px;color:var(--mut)}
+  .page{padding:20px 22px;display:none} .page.on{display:block}
+  /* kpis */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:18px}
+  .kpi{background:var(--panel);padding:14px 16px}
+  .kpi .v{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums}
+  .kpi .k{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--mut);margin-top:3px}
+  /* panels */
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:1000px){.cols{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}.rail{display:none}}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:16px}
+  .box>.h{display:flex;align-items:center;justify-content:space-between;padding:11px 15px;border-bottom:1px solid var(--line)}
+  .box>.h .t{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--mut)}
+  .box>.b{padding:12px 15px}
+  table{width:100%;border-collapse:collapse}
+  th{font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:600}
+  td{padding:9px 10px;border-bottom:1px solid #141a25;font-size:12.5px;vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  .chip{display:inline-block;padding:1px 8px;border-radius:4px;font-size:10.5px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;border:1px solid transparent}
+  .c-run{color:#8ff0a4;background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.3)}
+  .c-idle{color:var(--mut);background:#141a25;border-color:var(--line)}
+  .c-hunt{color:#9cc3ff;background:rgba(75,139,244,.12)} .c-val{color:#e8c56b;background:rgba(215,162,26,.12)}
+  .c-conf{color:#ff9b91;background:rgba(240,90,79,.14)}
+  .sev{font-weight:700;text-transform:uppercase;font-size:10.5px;padding:1px 7px;border-radius:4px}
+  .s-critical{color:#fff;background:#8b1a12}.s-high{color:#ffd9d4;background:rgba(240,90,79,.22)}.s-medium{color:#f0d79a;background:rgba(215,162,26,.2)}.s-low{color:#a9c7ff;background:rgba(75,139,244,.2)}
+  .mbar{height:6px;background:#141a25;border-radius:3px;overflow:hidden;margin-top:5px}.mbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--acc2),var(--acc))}
+  .mrow{display:flex;justify-content:space-between;font-size:12px;margin-top:10px}.mrow .n{color:var(--mut)}
+  input,textarea,select{width:100%;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--ink);font:inherit;font-size:12.5px}
+  textarea{font-family:var(--mono);min-height:78px;resize:vertical}
+  label{font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);display:block;margin:0 0 4px}
+  .fld{margin-bottom:11px}
+  button{border:1px solid var(--line);background:#141a25;color:var(--ink);padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}
+  button:hover{border-color:#2b3650} button.pri{background:var(--acc2);border-color:var(--acc2);color:#fff}
+  button.danger{color:#ffb4ad;border-color:#39242420}button.ghost{background:transparent}
+  .term{background:#05070b;border:1px solid var(--line);border-radius:6px;padding:12px;height:440px;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;color:#aeb9cc}
+  .msg{font-size:11.5px;min-height:15px;margin-top:8px}.ok{color:var(--grn)}.err{color:var(--red)}
+  .row2{display:flex;gap:10px}.row2>div{flex:1}
+  .empty{color:var(--dim);font-size:12px;padding:14px 4px}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--mut)}
+</style>
+</head>
+<body>
+  <aside class="rail">
+    <div class="brand">
+      <svg class="logo" width="36" height="36" viewBox="0 0 64 64" fill="none" aria-label="0xRay">
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6aa0ff"/><stop offset="1" stop-color="#2f6ae0"/></linearGradient>
+          <radialGradient id="core" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#bcd6ff"/><stop offset="1" stop-color="#2f6ae0"/></radialGradient>
+          <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6aa0ff" stop-opacity=".5"/><stop offset="1" stop-color="#6aa0ff" stop-opacity="0"/></linearGradient>
+        </defs>
+        <path d="M32 7.5l21.2 12.2v24.6L32 56.5 10.8 44.3V19.7L32 7.5z" stroke="url(#bg)" stroke-width="2.6" stroke-linejoin="round"/>
+        <circle cx="32" cy="32" r="13.5" stroke="#223049" stroke-width="1.3"/>
+        <circle cx="32" cy="32" r="8" stroke="#2b3d5e" stroke-width="1.1"/>
+        <path d="M32 32 L32 18.5 A13.5 13.5 0 0 1 43.9 25.6 Z" fill="url(#sweep)">
+          <animateTransform attributeName="transform" type="rotate" from="0 32 32" to="360 32 32" dur="4.5s" repeatCount="indefinite"/>
+        </path>
+        <path d="M32 11.5v7.5M32 45v7.5M11.5 32h7.5M45 32h7.5" stroke="#6aa0ff" stroke-width="2.6" stroke-linecap="round"/>
+        <circle cx="32" cy="32" r="4.8" fill="url(#core)">
+          <animate attributeName="opacity" values="1;.55;1" dur="2.2s" repeatCount="indefinite"/>
+        </circle>
+      </svg>
+      <div><div class="wm"><span>0x</span>Ray</div><div class="sub">Hunt Harness</div></div>
+    </div>
+    <nav>
+      <a class="on" data-v="overview" onclick="nav(this)"><i class="ic"></i>Overview</a>
+      <a data-v="targets" onclick="nav(this)"><i class="ic"></i>Targets</a>
+      <a data-v="activity" onclick="nav(this)"><i class="ic"></i>Activity</a>
+      <a data-v="findings" onclick="nav(this)"><i class="ic"></i>Findings</a>
+      <a data-v="capabilities" onclick="nav(this)"><i class="ic"></i>Capabilities</a>
+      <a data-v="logs" onclick="nav(this)"><i class="ic"></i>Live logs</a>
+    </nav>
+    <div class="railft"><span class="st" id="st"></span><span id="stTxt">bridge online</span><div class="dim" style="margin-top:4px" id="sync">—</div>
+      <div class="dim" style="margin-top:8px;font-size:10px;letter-spacing:.5px">built by <b style="color:var(--acc)">0xRay</b> · anti-dup harness</div></div>
+  </aside>
+
+  <main>
+    <div class="bar"><h1 id="title">Overview</h1><div class="meta">read-only · stop-at-draft · cursor-agent · <span id="pool" class="tag"></span></div></div>
+
+    <!-- OVERVIEW -->
+    <section class="page on" id="p-overview">
+      <div class="kpis">
+        <div class="kpi"><div class="v" id="k-t">–</div><div class="k">Targets</div></div>
+        <div class="kpi"><div class="v" id="k-r" style="color:var(--grn)">–</div><div class="k">Hunts running</div></div>
+        <div class="kpi"><div class="v" id="k-f" style="color:var(--acc)">–</div><div class="k">Findings</div></div>
+        <div class="kpi"><div class="v" id="k-a" style="color:var(--amb)">–</div><div class="k">Surface alerts</div></div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="v" id="k-steps">–</div><div class="k">Hunt steps</div></div>
+        <div class="kpi"><div class="v" id="k-mods">–</div><div class="k">Models rotating</div></div>
+        <div class="kpi"><div class="v" id="k-learn" style="color:var(--acc)">–</div><div class="k">Learned skills</div></div>
+        <div class="kpi"><div class="v" id="k-tools" style="color:var(--grn)">–</div><div class="k">Tools ready</div></div>
+      </div>
+      <div class="cols">
+        <div>
+          <div class="box"><div class="h"><span class="t">Running hunts</span></div><div class="b"><table><tbody id="ov-run"><tr><td class="empty">—</td></tr></tbody></table></div></div>
+          <div class="box"><div class="h"><span class="t">Model usage</span><span class="dim" style="font-size:11px">rotation across the pool</span></div><div class="b" id="ov-models"><div class="empty">—</div></div></div>
+          <div class="box"><div class="h"><span class="t">System &amp; guardrails</span></div><div class="b" id="ov-system"><div class="empty">—</div></div></div>
+        </div>
+        <div class="box"><div class="h"><span class="t">Recent activity</span><a onclick="go('activity')">view all</a></div><div class="b" style="padding:0"><table><tbody id="ov-act"><tr><td class="empty" style="padding:14px">—</td></tr></tbody></table></div></div>
+      </div>
+    </section>
+
+    <!-- TARGETS -->
+    <section class="page" id="p-targets">
+      <div class="box"><div class="h"><span class="t">Targets</span><button class="ghost" onclick="refresh()">Refresh</button></div>
+        <div class="b" style="padding:0"><table><thead><tr><th>Program</th><th>In-scope</th><th>Monitored apexes</th><th>Hunt</th><th></th></tr></thead><tbody id="tg"><tr><td colspan="5" class="empty" style="padding:14px">loading…</td></tr></tbody></table></div></div>
+      <div class="box"><div class="h"><span class="t">Add / update target</span></div><div class="b">
+        <div class="row2"><div class="fld"><label>Program</label><input id="prog" placeholder="acme"></div><div class="fld"><label>Platform</label><input id="plat" placeholder="yeswehack / hackerone / bugcrowd"></div></div>
+        <div class="fld"><label>In-scope hosts — one per line, wildcards ok</label><textarea id="hosts" placeholder="*.acme.com&#10;api.acme.com&#10;login.acme.com"></textarea></div>
+        <button class="pri" onclick="addTarget()">Add target</button><span class="dim" style="margin-left:10px;font-size:11px">In-scope only. Registered instantly → monitored + huntable.</span>
+        <div id="addMsg" class="msg"></div></div></div>
+      <div class="box"><div class="h"><span class="t">Add by pasting the program page</span><span class="dim" style="font-size:11px">YesWeHack / H1 / Bugcrowd — paste once, it auto-fills scope + rules + UA</span></div><div class="b">
+        <div class="fld"><label>Paste the full program page (scopes, vuln types, rules, user-agent…)</label><textarea id="pgtext" style="min-height:150px" placeholder="Paste the entire program page here…"></textarea></div>
+        <div class="fld" style="max-width:320px"><label>Program name (optional — auto-detected)</label><input id="pgname" placeholder="auto"></div>
+        <button class="pri" onclick="ingestTarget()">Parse &amp; add</button><span class="dim" style="margin-left:10px;font-size:11px">Extracts in/out-of-scope hosts, qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent.</span>
+        <div id="ingMsg" class="msg"></div></div></div>
+    </section>
+
+    <!-- ACTIVITY -->
+    <section class="page" id="p-activity">
+      <div class="cols" style="grid-template-columns:2.4fr 1fr">
+        <div class="box"><div class="h"><span class="t">Hunt activity — model &amp; skills per step</span><button class="ghost" onclick="loadActivity()">Refresh</button></div>
+          <div class="b" style="padding:0"><table><thead><tr><th>Time</th><th>Phase</th><th>Program</th><th>Class</th><th>Endpoint</th><th>Model</th><th>Skills</th></tr></thead><tbody id="act"><tr><td colspan="7" class="empty" style="padding:14px">no hunt steps yet — start a hunt and recon runs first (~1–2 min), then steps appear here</td></tr></tbody></table></div></div>
+        <div class="box"><div class="h"><span class="t">Models used</span></div><div class="b" id="act-models"><div class="empty">—</div></div></div>
+      </div>
+    </section>
+
+    <!-- FINDINGS -->
+    <section class="page" id="p-findings">
+      <div class="cols">
+        <div class="box"><div class="h"><span class="t">Findings</span><span class="dim" style="font-size:11px">published to finding.redtracefai.com</span></div><div class="b" id="find"><div class="empty">—</div></div></div>
+        <div class="box"><div class="h"><span class="t">New-surface alerts</span></div><div class="b" id="alerts"><div class="empty">—</div></div></div>
+      </div>
+    </section>
+
+    <!-- CAPABILITIES -->
+    <section class="page" id="p-capabilities">
+      <div class="kpis">
+        <div class="kpi"><div class="v" id="c-ws" style="font-size:18px">–</div><div class="k">Web search</div></div>
+        <div class="kpi"><div class="v" id="c-id" style="font-size:18px">–</div><div class="k">Temp-mail identity</div></div>
+        <div class="kpi"><div class="v" id="c-sms" style="font-size:18px">–</div><div class="k">Phone / SMS</div></div>
+        <div class="kpi"><div class="v" id="c-learn" style="font-size:18px">–</div><div class="k">Learned skills</div></div>
+      </div>
+      <div class="cols">
+        <div>
+          <div class="box"><div class="h"><span class="t">Autonomous capabilities</span><span class="dim" style="font-size:11px">all guardrail-gated</span></div><div class="b" id="cap-list"><div class="empty">—</div></div></div>
+          <div class="box"><div class="h"><span class="t">Accounts &amp; write-action audit</span><span class="dim" style="font-size:11px">in-scope only · capped · no bruteforce</span></div><div class="b" id="cap-audit" style="padding:0"><div class="empty" style="padding:14px">—</div></div></div>
+        </div>
+        <div class="box"><div class="h"><span class="t">Self-learning journal</span><button class="ghost" onclick="loadCaps()">Refresh</button></div><div class="b" id="cap-learn"><div class="empty">—</div></div></div>
+      </div>
+    </section>
+
+    <!-- LOGS -->
+    <section class="page" id="p-logs">
+      <div class="box"><div class="h"><span class="t">Background log</span><span><select id="logSel" style="width:auto;display:inline-block" onchange="CURLOG=this.value;LOGPICKED=true;loadLog()"></select> <button class="ghost" id="tailBtn" onclick="TAIL=!TAIL;tailBtn.textContent=TAIL?'❙❙ pause':'▶ follow'">❙❙ pause</button></span></div>
+        <div class="b"><div class="term" id="term">select a target…</div></div></div>
+    </section>
+  </main>
+
+<script>
+const API="/panel/api"; let TAIL=true, CURLOG="", VIEW="overview", LOGPICKED=false;
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(path,method="GET",body=null){const o={method,headers:{}};if(body){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body);}
+  const r=await fetch(API+path,o);let j={};try{j=await r.json();}catch(e){}if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
+function msg(id,t,ok){const e=document.getElementById(id);if(e){e.textContent=t;e.className="msg "+(ok?"ok":"err");}}
+function nav(el){document.querySelectorAll("nav a").forEach(a=>a.classList.remove("on"));el.classList.add("on");go(el.dataset.v);}
+function go(v){VIEW=v;document.querySelectorAll(".page").forEach(p=>p.classList.remove("on"));document.getElementById("p-"+v).classList.add("on");
+  document.getElementById("title").textContent={overview:"Overview",targets:"Targets",activity:"Activity",findings:"Findings",capabilities:"Capabilities",logs:"Live logs"}[v];
+  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();}
+function live(ok){document.getElementById("st").style.background=ok?"var(--grn)":"var(--red)";document.getElementById("stTxt").textContent=ok?"bridge online":"bridge offline";}
+function slug(n){return n.toLowerCase().replace(/[^a-z0-9._-]+/g,"-");}
+function fmtTs(t){try{return new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch(e){return t;}}
+
+let RUN={};
+async function loadCore(){try{
+  const [s,t,st]=await Promise.all([api("/stats"),api("/targets/list"),api("/hunt/status")]);
+  live(true);document.getElementById("sync").textContent="synced "+new Date().toLocaleTimeString();
+  document.getElementById("k-t").textContent=s.targets;document.getElementById("k-r").textContent=s.running;
+  document.getElementById("k-f").textContent=s.findings;document.getElementById("k-a").textContent=s.alerts;
+  api("/capabilities").then(c=>{
+    const le=document.getElementById("k-learn");if(le)le.textContent=(c.learn&&c.learn.learned_skills)||0;
+    const ready=[c.websearch&&c.websearch.ready,c.identity&&c.identity.ready,true,c.guardrails&&c.guardrails.no_bruteforce,c.sms&&c.sms.enabled].filter(Boolean).length;
+    const te=document.getElementById("k-tools");if(te)te.textContent=ready+"/5";
+    const sy=document.getElementById("ov-system");
+    if(sy)sy.innerHTML=[
+      ["Runtime","cursor-agent (headless)"],
+      ["Chat sessions",c.sessions?(c.sessions.chats_on_disk+" open · pooled "+c.sessions.pool_per_target+"/target (reused, not per-step)"):"—"],
+      ["Model pool",(document.getElementById("pool")||{}).textContent||"—"],
+      ["Web search",c.websearch&&c.websearch.ready?"ready — "+esc(c.websearch.provider):"off"],
+      ["Test identities","mail.tm · cap "+((c.identity&&c.identity.max_accounts)||0)+"/program"],
+      ["Phone / SMS",c.sms&&c.sms.enabled?("on — "+esc(c.sms.provider)):"disabled"],
+      ["Self-learning",((c.learn&&c.learn.learned_skills)||0)+" skills · "+((c.learn&&c.learn.gaps)||0)+" gap(s)"],
+      ["Guardrails","in-scope only · no bruteforce · audited"],
+    ].map(([k,v])=>`<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #141a25"><span class="dim">${esc(k)}</span><span style="text-align:right">${esc(v)}</span></div>`).join("");
+  }).catch(()=>{});
+  RUN={};(st.hunts||[]).forEach(h=>RUN[h.program]=h);
+  // overview running
+  const run=(st.hunts||[]).filter(h=>h.running);
+  document.getElementById("ov-run").innerHTML=run.length?run.map(h=>`<tr><td><b>${esc(h.program)}</b></td><td><span class="chip c-run">running</span></td><td class="tag">pid ${h.pid} · ${h.restarts||0} restarts</td></tr>`).join(""):`<tr><td class="empty">no hunts running</td></tr>`;
+  // targets table
+  const sel=document.getElementById("logSel");
+  sel.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");
+  const runh=(st.hunts||[]).find(h=>h.running);
+  if(!LOGPICKED){CURLOG=runh?runh.program:((t.targets||[])[0]||{}).name||"";}
+  if(CURLOG)sel.value=CURLOG;
+  document.getElementById("tg").innerHTML=(t.targets||[]).map(x=>{const sg=slug(x.name);const on=RUN[sg]&&RUN[sg].running;
+    return `<tr><td><b>${esc(x.name)}</b></td><td>${(x.in_scope||[]).length}</td><td class="tag">${esc((x.monitor_apexes||[]).slice(0,4).join(", "))}</td>
+      <td>${on?`<span class="chip c-run">running</span> <button class="danger" onclick="stopHunt('${esc(x.name)}')">Stop</button>`:`<button onclick="startHunt('${esc(x.name)}')">Start</button>`}</td>
+      <td><button class="ghost" onclick="removeTarget('${esc(x.name)}')">Remove</button></td></tr>`;}).join("")||`<tr><td colspan="5" class="empty" style="padding:14px">No targets — add one below.</td></tr>`;
+}catch(e){live(false);}}
+function modelBars(models,el){const ent=Object.entries(models||{}).sort((a,b)=>b[1]-a[1]);const max=Math.max(1,...ent.map(e=>e[1]));
+  el.innerHTML=ent.length?ent.map(([m,c])=>`<div class="mrow"><span class="mono">${esc(m)}</span><span class="n">${c}</span></div><div class="mbar"><i style="width:${Math.round(c/max*100)}%"></i></div>`).join(""):`<div class="empty">no steps yet</div>`;}
+async function loadActivity(){try{const j=await api("/activity?n=120");
+  const rows=(j.events||[]).map(e=>{const ph={hunt:'c-hunt',validate:'c-val',confirmed:'c-conf'}[e.phase]||'c-idle';
+    return `<tr><td class="tag">${fmtTs(e.ts)}</td><td><span class="chip ${ph}">${esc(e.phase)}</span></td><td>${esc(e.program)}</td>
+      <td>${esc(e.class)}${e.severity?` <span class="sev s-${esc(e.severity)}">${esc(e.severity)}</span>`:""}</td>
+      <td class="tag">${esc((e.url||"").replace(/^https?:\/\//,""))}</td><td class="mono">${esc(e.model||"—")}</td>
+      <td class="tag">${esc((e.skills||[]).join(", "))}</td></tr>`;}).join("");
+  document.getElementById("act").innerHTML=rows||`<tr><td colspan="7" class="empty" style="padding:14px">no hunt steps yet — recon runs first, then each tested endpoint shows its model + skills here</td></tr>`;
+  modelBars(j.models,document.getElementById("act-models"));modelBars(j.models,document.getElementById("ov-models"));
+  const steps=Object.values(j.models||{}).reduce((a,b)=>a+(+b||0),0);
+  const se=document.getElementById("k-steps");if(se)se.textContent=steps;
+  const me=document.getElementById("k-mods");if(me)me.textContent=Object.keys(j.models||{}).length;
+  const oa=(j.events||[]).slice(0,8).map(e=>`<tr><td class="tag">${fmtTs(e.ts)}</td><td><span class="chip ${({hunt:'c-hunt',validate:'c-val',confirmed:'c-conf'}[e.phase]||'c-idle')}">${esc(e.phase)}</span></td><td>${esc(e.class)}</td><td class="mono">${esc(e.model||"—")}</td></tr>`).join("");
+  document.getElementById("ov-act").innerHTML=oa||`<tr><td class="empty" style="padding:14px">no activity yet</td></tr>`;
+}catch(e){}}
+function dot(ok){return `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${ok?'var(--grn)':'var(--amb)'};margin-right:6px"></span>`;}
+async function loadCaps(){try{
+  const c=await api("/capabilities");
+  document.getElementById("c-ws").innerHTML=dot(c.websearch&&c.websearch.ready)+"ready";
+  document.getElementById("c-id").innerHTML=dot(c.identity&&c.identity.ready)+"mail.tm";
+  document.getElementById("c-sms").innerHTML=dot(c.sms&&c.sms.enabled)+(c.sms&&c.sms.enabled?esc(c.sms.provider||"on"):"off");
+  document.getElementById("c-learn").textContent=(c.learn&&c.learn.learned_skills)||0;
+  document.getElementById("cap-list").innerHTML=[
+    ["Web search",c.websearch.ready,"DuckDuckGo HTML — look up CVEs, docs, disclosed reports mid-hunt"],
+    ["Temp-mail identity",c.identity.ready,`mail.tm disposable inbox · cap ${c.identity.max_accounts}/program for A/B auth testing`],
+    ["Phone / SMS OTP",c.sms.enabled,c.sms.enabled?`provider ${esc(c.sms.provider)}`:"disabled — set SMS_PROVIDER + SMS_API_KEY to enable phone-gated signups"],
+    ["Self-learning",true,`${c.learn.learned_skills} skills authored · ${c.learn.gaps} gap(s) seen · auto-drafts a SKILL.md for unknown stacks`],
+    ["Guardrails",c.guardrails.no_bruteforce,"in-scope only · per-program account cap · no bruteforce · every write audited"],
+  ].map(([n,ok,d])=>`<div style="padding:8px 0;border-bottom:1px solid #141a25">${dot(ok)}<b>${esc(n)}</b><div class="dim" style="margin-left:14px;font-size:12px">${esc(d)}</div></div>`).join("");
+  const lj=await api("/learn/journal?n=40");
+  const ls=(lj.learned_skills||[]).map(s=>`<div style="padding:6px 0;border-bottom:1px solid #141a25"><b>${esc(s.name)}</b> <span class="tag">${esc(s.kind)}</span> <span class="dim">refs ${s.refs||0}</span></div>`).join("");
+  const je=(lj.entries||[]).slice().reverse().slice(0,20).map(e=>`<div style="padding:5px 0;font-size:12px"><span class="tag">${esc((e.ts||'').slice(11,19))}</span> <b>${esc(e.type)}</b> ${esc(e.name||e.vuln_class||e.slug||'')} <span class="dim">${esc((e.context||e.note||'').slice(0,60))}</span></div>`).join("");
+  document.getElementById("cap-learn").innerHTML=(ls?`<div style="margin-bottom:8px"><div class="dim" style="font-size:11px;margin-bottom:4px">AUTHORED SKILLS</div>${ls}</div>`:"")+(je||`<div class="empty">No learning events yet.</div>`);
+  const ac=await api("/accounts?n=60");
+  const rows=(ac.audit||[]).slice().reverse().map(r=>`<tr><td class="tag">${esc((r.ts||'').slice(11,19))}</td><td>${esc(r.program)}</td><td>${esc(r.action)}</td><td><span class="chip ${r.allowed?'c-run':'c-idle'}">${r.allowed?'allow':'refuse'}</span></td><td class="dim" style="font-size:11px">${esc((r.reason||'').slice(0,50))}</td></tr>`).join("");
+  const per=Object.entries(ac.accounts_per_program||{}).map(([p,n])=>`${esc(p)}: ${n}/${ac.cap}`).join(" · ");
+  document.getElementById("cap-audit").innerHTML=`<div class="dim" style="padding:8px 14px;font-size:11px">accounts used — ${per||'none'}</div><table><thead><tr><th>Time</th><th>Program</th><th>Action</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty" style="padding:12px">No write-actions yet.</td></tr>'}</tbody></table>`;
+}catch(e){}}
+async function loadFindings(){try{const j=await api("/findings");document.getElementById("find").innerHTML=(j.findings||[]).map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><a href="${esc(x.url)}" target="_blank">${esc(x.file)}</a><div class="tag">${new Date(x.mtime*1000).toLocaleString()}</div></div>`).join("")||`<div class="empty">No findings yet.</div>`;}catch(e){}}
+async function loadAlerts(){try{const j=await api("/novelty/feed?n=25");document.getElementById("alerts").innerHTML=(j.entries||[]).reverse().map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><b>${esc(x.target)}</b> <span class="dim">${esc((x.summary||[]).join(" · ").slice(0,140))}</span></div>`).join("")||`<div class="empty">No alerts yet.</div>`;}catch(e){}}
+async function loadLog(){if(!CURLOG){const r=Object.values(RUN).find(h=>h&&h.running);if(r)CURLOG=r.program;}if(!CURLOG)return;try{const j=await api("/hunt/log?n=500&program="+encodeURIComponent(CURLOG));const t=document.getElementById("term");const b=t.scrollTop+t.clientHeight>=t.scrollHeight-40;
+  t.textContent=(j.lines||[]).join("\n")||"(no log yet — the hunt writes here as it runs)";if(TAIL||b)t.scrollTop=t.scrollHeight;}catch(e){document.getElementById("term").textContent="log error: "+e.message;}}
+async function addTarget(){const program=prog.value.trim(),hosts=document.getElementById("hosts").value.trim();if(!program||!hosts){msg("addMsg","Enter a program and hosts.",false);return;}
+  try{const j=await api("/targets/add","POST",{program,hosts});msg("addMsg",`Added ${j.added}: ${j.in_scope} host(s), ${(j.monitor_apexes||[]).length} apex(es).`,true);prog.value="";document.getElementById("hosts").value="";refresh();}catch(e){msg("addMsg",e.message,false);}}
+async function ingestTarget(){const text=document.getElementById("pgtext").value.trim();const program=document.getElementById("pgname").value.trim()||null;
+  if(text.length<40){msg("ingMsg","Paste the full program page first.",false);return;}
+  msg("ingMsg","Parsing…",true);
+  try{const j=await api("/targets/ingest","POST",{text,program});
+    msg("ingMsg",`Added ${j.added} (${j.public?'public':'private'}): ${j.in_scope} in-scope, ${j.out_of_scope} out-of-scope, classes [${(j.classes||[]).join(", ")}], UA set.`,true);
+    document.getElementById("pgtext").value="";document.getElementById("pgname").value="";refresh();go("targets");}catch(e){msg("ingMsg",e.message,false);}}
+async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
+async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
+async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});setTimeout(refresh,1000);}catch(e){alert(e.message);}}
+function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURLOG&&TAIL)loadLog();}
+function tick(){loadCore();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
+document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
+refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
+</script>
+</body>
+</html>

@@ -428,6 +428,20 @@ class Handler(BaseHTTPRequestHandler):
                 # session STATE is kept on stop -> a rerun RESUMES the same sessions (no new ones)
                 return self._send(200, {"stopped": slug, "sessions_killed": killed, "state_kept": True})
 
+            if p.path == "/targets/ingest":
+                text = b.get("text", "")
+                if not text.strip():
+                    return self._send(400, {"error": "provide 'text' (the pasted program page)"})
+                import scopeparse as SP
+                parsed = SP.parse(text, name=(b.get("program") or None))
+                sc = SP.to_scope(parsed)
+                if not sc["in_scope"]:
+                    return self._send(400, {"error": "no in-scope hosts found — paste the full page incl. the Scopes section"})
+                SP.register(sc, parsed, base=self.base)
+                return self._send(200, {"added": sc["name"], "in_scope": len(sc["in_scope"]),
+                                        "out_of_scope": len(sc["out_of_scope"]), "public": sc["public"],
+                                        "user_agent": sc["user_agent"], "classes": sc["qualifying_classes"]})
+
             if p.path == "/targets/add":
                 import targets as T
                 prog = (b.get("program") or "").strip()
