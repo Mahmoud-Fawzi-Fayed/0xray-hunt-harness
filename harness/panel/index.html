@@ -202,11 +202,11 @@
         <div style="margin-top:12px"><button class="pri" onclick="verifyFinding()">Verify</button><span class="dim" style="margin-left:10px;font-size:11px">Checks per-class PoC minimum, always-rejected list, scope, the program's qualifying list, severity honesty + dedup.</span></div>
         <div id="vf-msg" class="msg"></div></div></div>
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
-      <div class="box" id="fc-box" style="display:none"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">closing removes the session + files</span></div><div class="b">
+      <div class="box" id="fc-box" style="display:none"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
         <div id="fc-files" style="margin-bottom:10px"></div>
-        <div id="fc-log" style="max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:10px;background:#0b0f1a;margin-bottom:8px"></div>
-        <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" disabled onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" disabled onclick="fcSend()">Send</button><button class="ghost" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button></div>
-        <div style="margin-top:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg" style="margin-left:8px"></span></div>
+        <div id="fc-log" style="max-height:340px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:12px;background:#0b0f1a;margin-bottom:10px;display:flex;flex-direction:column;gap:10px"></div>
+        <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" onclick="fcSend()">Send</button><button class="ghost" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button></div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg"></span></div>
       </div></div>
     </section>
 
@@ -389,46 +389,54 @@ function renderVerdict(d){
     exd+up+checks+op+
     `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><button class="pri" onclick="fcOpen()">Open fix chat — let the agent edit your files to fix this</button> <span class="dim" style="font-size:11px">it rewrites the report in place (adds steps/PoC sections, fixes severity, redacts PII) · you download the fixed files · closing removes the session + files</span></div>`;}
 async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
-let VF_LAST=null,FC_ID=null,FC_MTIMES={},FC_OPENING=false,FC_BUSY=false,FC_ABORT=null,FC_TICK=null;
+let VF_LAST=null,FC_ID=null,FC_MTIMES={},FC_OPENING=false,FC_BUSY=false,FC_ABORT=null,FC_TICK=null,FC_PENDING=null;
+function fcUuid(){return (crypto.randomUUID?crypto.randomUUID():"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c==="x"?r:(r&3|8)).toString(16);}));}
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
   document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
-function fcLog(role,text,cls){const l=document.getElementById("fc-log");l.insertAdjacentHTML("beforeend",`<div style="margin:0 0 10px"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
-function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=!ready;if(i)i.disabled=!ready;if(c)c.style.display=ready?"none":(FC_OPENING?"inline-block":"none");}
+function fcLog(role,text,cls){const l=document.getElementById("fc-log");
+  const bubble=role==="you"?`align-self:flex-end;background:#15203a;border:1px solid #22335c;max-width:85%`:(role==="agent"?`align-self:flex-start;background:#101728;border:1px solid var(--line);max-width:85%`:`align-self:center;max-width:95%`);
+  l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:10px;padding:8px 12px"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
+function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
 function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
 async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);return;}
   if(FC_OPENING||FC_ID)return;                       // already opening/open — don't double-open
+  FC_ID=fcUuid();fcHash(FC_ID);                      // id up front: URL works + Close works immediately
   FC_OPENING=true;fcSetReady(false);
   const box=document.getElementById("fc-box");box.style.display="block";document.getElementById("fc-log").innerHTML="";
   const t0=Date.now();
-  fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (0s — Send unlocks when it's ready)","color:var(--mut)");
-  FC_TICK=setInterval(()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("Opening fix chat"))l.children[1].textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s — Send unlocks when it's ready)`;},1000);
+  fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (0s). You can type your message now — it will be sent when the agent is ready.","color:var(--mut)");
+  FC_TICK=setInterval(()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("Opening fix chat"))l.children[1].textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s). You can type now — your message sends when it's ready.`;},1000);
   box.scrollIntoView({behavior:"smooth"});
   FC_ABORT=new AbortController();
   try{const req=VF_LAST.req;
-    const r=await fetch(API+"/verify/fixchat/start",{method:"POST",headers:{"Content-Type":"application/json"},signal:FC_ABORT.signal,body:JSON.stringify({program:req.program,finding:{vuln_class:req.vuln_class,severity:req.severity,url:req.url,title:req.title,steps:req.steps,poc:req.poc,evidence:req.evidence,impact:req.impact},files:req.files||[],verify:VF_LAST.res})});
+    const r=await fetch(API+"/verify/fixchat/start",{method:"POST",headers:{"Content-Type":"application/json"},signal:FC_ABORT.signal,body:JSON.stringify({chat_id:FC_ID,program:req.program,finding:{vuln_class:req.vuln_class,severity:req.severity,url:req.url,title:req.title,steps:req.steps,poc:req.poc,evidence:req.evidence,impact:req.impact},files:req.files||[],verify:VF_LAST.res})});
     const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));
     clearInterval(FC_TICK);
-    if(d.error&&!d.chat_id){fcLog("system","could not open the chat: "+d.error+" — click “Open fix chat” again to retry.","color:var(--red)");return;}
-    FC_ID=d.chat_id;fcHash(FC_ID);fcRenderFiles(d.files);fcLog("agent",d.reply);fcSetReady(true);
-    document.getElementById("fc-input").focus();
+    if(d.closed_mid_open){return;}                   // user closed while opening — already cleaned up
+    if(d.error&&!d.chat_id){fcLog("system","could not open the chat: "+d.error+" — click “Open fix chat” again to retry.","color:var(--red)");FC_ID=null;fcHash(null);return;}
+    fcRenderFiles(d.files);fcLog("agent",d.reply);
   }catch(e){clearInterval(FC_TICK);
-    fcLog("system",(e.name==="AbortError"?"opening cancelled.":"could not open the chat: "+e.message)+" — click “Open fix chat” under the verdict to retry.","color:var(--red)");}
-  finally{FC_OPENING=false;FC_ABORT=null;}}
+    if(e.name==="AbortError"){return;}               // cancelled/closed by the user
+    fcLog("system","could not open the chat: "+e.message+" — click “Open fix chat” under the verdict to retry.","color:var(--red)");FC_ID=null;fcHash(null);}
+  finally{FC_OPENING=false;FC_ABORT=null;fcSetReady(true);
+    if(FC_ID&&FC_PENDING){const p=FC_PENDING;FC_PENDING=null;fcSend2(p);}}}
 function fcCancelOpen(){if(FC_ABORT)FC_ABORT.abort();}
 async function fcResume(cid){                       // restore a chat after a page refresh
   try{const d=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
     FC_ID=cid;const box=document.getElementById("fc-box");box.style.display="block";
     document.getElementById("fc-log").innerHTML="";
     (d.log||[]).forEach(m=>fcLog(m.role==="you"?"you":m.role==="agent"?"agent":"system",m.text,m.role==="agent"?"":"color:var(--mut)"));
-    if(!(d.log||[]).length)fcLog("system","chat restored — files below; continue the conversation.","color:var(--mut)");
+    if(!(d.log||[]).length)fcLog("system","chat restored — your files are below; type to continue (the agent reads the files again if this chat never got its first reply).","color:var(--mut)");
     fcRenderFiles(d.files);fcSetReady(true);
-  }catch(e){fcHash(null);}}
+  }catch(e){fcHash(null);msg("vf-msg","That fix chat is closed or expired — open a new one from a verdict.",false);}}
 async function fcSend(){const inp=document.getElementById("fc-input");const t=inp.value.trim();
   if(!t)return;
-  if(FC_OPENING){fcLog("system","still opening — wait for the agent's first reply, then send.","color:var(--amb)");return;}
+  if(FC_OPENING){FC_PENDING=t;inp.value="";fcLog("you",t);fcLog("system","queued — sends automatically when the agent is ready.","color:var(--mut)");return;}
   if(!FC_ID){fcLog("system","the chat isn't open — click “Open fix chat” under the verdict first.","color:var(--amb)");return;}
   if(FC_BUSY){fcLog("system","agent is still working on your previous message…","color:var(--amb)");return;}
-  FC_BUSY=true;fcSetReady(false);inp.value="";
+  inp.value="";fcSend2(t);}
+async function fcSend2(t){if(!FC_ID||FC_BUSY)return;
+  FC_BUSY=true;fcSetReady(true);
   fcLog("you",t);fcLog("system","agent is working (may edit files)…","color:var(--mut)");
   try{const d=await api("/verify/fixchat/message","POST",{chat_id:FC_ID,message:t});
     const sys=document.getElementById("fc-log").lastElementChild;if(sys&&sys.textContent.includes("agent is working"))sys.remove();
@@ -438,10 +446,15 @@ async function fcSend(){const inp=document.getElementById("fc-input");const t=in
       fcRenderFiles(d.files);fcLog("agent",d.reply);
     }
   }catch(e){fcLog("system","error: "+e.message+" — your message may not have been sent; try again.","color:var(--red)");}
-  finally{FC_BUSY=false;if(FC_ID)fcSetReady(true);inp.focus();}}
-async function fcClose(){if(!FC_ID)return;if(!confirm("Close the chat? The agent session AND the uploaded/edited files are removed (download anything you need first)."))return;
-  try{const d=await api("/verify/fixchat/close","POST",{chat_id:FC_ID});
-    document.getElementById("fc-box").style.display="none";FC_ID=null;FC_MTIMES={};fcHash(null);
+  finally{FC_BUSY=false;document.getElementById("fc-input").focus();}}
+async function fcClose(){                            // works ALWAYS — even while opening
+  const cid=FC_ID||(location.hash.startsWith("#fc=")?location.hash.slice(4):null);
+  if(!cid){msg("vf-msg","No open chat.",false);return;}
+  if(!confirm("Close the chat? The agent session AND the uploaded/edited files are removed (download anything you need first)."))return;
+  if(FC_ABORT)FC_ABORT.abort();                      // stop waiting on a slow open
+  FC_ID=null;FC_PENDING=null;fcHash(null);
+  try{const d=await api("/verify/fixchat/close","POST",{chat_id:cid});
+    document.getElementById("fc-box").style.display="none";FC_MTIMES={};
     msg("vf-msg",d.closed?"Chat closed — session + files removed.":"Close failed: "+(d.error||"?"),!!d.closed);
   }catch(e){msg("vf-msg",e.message,false);}}
 async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}

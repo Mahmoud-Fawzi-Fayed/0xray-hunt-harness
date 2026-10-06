@@ -56,12 +56,17 @@ def _log_path(root):
 
 def _append_log(root, role, text):
     try:
+        if not os.path.isdir(root):
+            return                                   # chat was closed mid-run — don't resurrect it
         log = json.load(open(_log_path(root)))
     except Exception:  # noqa: BLE001
         log = []
-    log.append({"role": role, "text": str(text or "")[:12000], "ts": time.time()})
-    json.dump(log[-200:], open(_log_path(root), "w"))
-    os.chmod(_log_path(root), 0o600)
+    try:
+        log.append({"role": role, "text": str(text or "")[:12000], "ts": time.time()})
+        json.dump(log[-200:], open(_log_path(root), "w"))
+        os.chmod(_log_path(root), 0o600)
+    except OSError:
+        pass
 
 
 def _load_meta(root):
@@ -159,21 +164,28 @@ def status(cid, base=DEFAULT_BASE):
             "verdict": meta.get("verdict"), "files": _listing(root), "log": log, "open": True}
 
 
-def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None):
-    """Open a fix chat: save the uploads, start a fresh agent session, return {chat_id, reply, files}."""
+def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None, chat_id=None):
+    """Open a fix chat: save the uploads, start a fresh agent session, return {chat_id, reply, files}.
+    The panel generates chat_id up front (so the URL + Close work immediately); we validate it."""
     import agent as A
-    cid = str(uuid.uuid4())
+    cid = chat_id if _chat_id_ok(chat_id) else str(uuid.uuid4())
     root = _dir(base, program, cid)
     os.makedirs(root, exist_ok=True)
     os.chmod(root, 0o700)
     saved, rejected = _save_files(files, root)
     task = _task_start(root, finding, verify_res)
     r = A.run_agent(task, context=None, model=model, timeout=MSG_TIMEOUT, attempts=1)
+    if not os.path.isdir(root):
+        return {"chat_id": cid, "reply": "", "error": "chat was closed while opening",
+                "files": [], "saved": saved, "rejected": rejected, "closed_mid_open": True}
     meta = {"chat_id": cid, "program": _slug(program), "session_id": r.get("session_id"),
             "model": r.get("model"), "created": time.time(),
             "verdict": (verify_res or {}).get("verdict")}
-    json.dump(meta, open(_meta_path(root), "w"))
-    os.chmod(_meta_path(root), 0o600)
+    try:
+        json.dump(meta, open(_meta_path(root), "w"))
+        os.chmod(_meta_path(root), 0o600)
+    except OSError:
+        pass
     _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
     return {"chat_id": cid, "reply": r.get("result") or r.get("error") or "(no reply)",
             "error": r.get("error"), "files": _listing(root),
@@ -192,9 +204,14 @@ def message(cid, text, base=DEFAULT_BASE, program=None):
             "Reply with a short summary of changes.)")
     r = A.run_agent(task, context=None, resume_id=meta.get("session_id"),
                     model=meta.get("model"), timeout=MSG_TIMEOUT, attempts=1)
+    if not os.path.isdir(root):
+        return {"reply": "", "error": "chat was closed", "files": [], "closed_mid_run": True}
     if r.get("session_id"):
         meta["session_id"] = r["session_id"]
-        json.dump(meta, open(_meta_path(root), "w"))
+        try:
+            json.dump(meta, open(_meta_path(root), "w"))
+        except OSError:
+            pass
     _append_log(root, "you", text)
     _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
     return {"reply": r.get("result") or r.get("error") or "(no reply)", "error": r.get("error"),

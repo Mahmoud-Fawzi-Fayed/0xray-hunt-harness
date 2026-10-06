@@ -490,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
                 import fixchat as FC
                 r = FC.start(b.get("program") or (b.get("finding") or {}).get("program"),
                              b.get("finding") or {}, b.get("files") or [],
-                             b.get("verify") or {}, base=self.base)
+                             b.get("verify") or {}, base=self.base, chat_id=b.get("chat_id"))
                 return self._send(200, r)
 
             if p.path == "/verify/fixchat/message":
