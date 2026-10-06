@@ -164,6 +164,20 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             return False   # client went away before we finished — nothing left to do
 
+    def _send_raw(self, code, data, filename="file"):
+        """Binary download response (fix-chat files). Same disconnect-tolerant behavior as _send."""
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            return False
+
     def _authed(self):
         if not TOKEN:                       # fail-closed: refuse everything until a token is set
             self._send(503, {"error": "bridge has no HUNT_BRIDGE_TOKEN set"})
@@ -193,6 +207,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return
         try:
+            if p.path == "/verify/fixchat/download":
+                import fixchat as FC
+                q = parse_qs(p.query)
+                name, data = FC.read_file(q.get("chat_id", [""])[0], q.get("name", [""])[0],
+                                          base=self.base)
+                if data is None:
+                    return self._send(404, {"error": "file not found"})
+                return self._send_raw(200, data, filename=name)
             if p.path == "/novelty/feed":
                 try:
                     n = max(1, min(1000, int((parse_qs(p.query).get("n", ["20"])[0]) or 20)))
@@ -366,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return
         p = urlparse(self.path)
-        cap = VERIFY_MAX_BODY if p.path == "/verify" else MAX_BODY
+        cap = VERIFY_MAX_BODY if p.path in ("/verify", "/verify/fixchat/start") else MAX_BODY
         clen = int(self.headers.get("Content-Length") or 0)
         if clen > cap:
             return self._send(413, {"error": f"body too large (> {cap} bytes)"})
@@ -458,6 +480,23 @@ class Handler(BaseHTTPRequestHandler):
                 import sessions as _SESS
                 r = _SESS.clear_orphans(self.base, confirm=bool(b.get("confirm")))
                 return self._send(200, r)
+
+            if p.path == "/verify/fixchat/start":
+                import fixchat as FC
+                r = FC.start(b.get("program") or (b.get("finding") or {}).get("program"),
+                             b.get("finding") or {}, b.get("files") or [],
+                             b.get("verify") or {}, base=self.base)
+                return self._send(200, r)
+
+            if p.path == "/verify/fixchat/message":
+                import fixchat as FC
+                r = FC.message(b.get("chat_id", ""), b.get("message", ""), base=self.base)
+                return self._send(200 if not r.get("error") else 404, r)
+
+            if p.path == "/verify/fixchat/close":
+                import fixchat as FC
+                r = FC.close(b.get("chat_id", ""), base=self.base)
+                return self._send(200 if not r.get("error") else 404, r)
 
             if p.path == "/sessions/doctor":
                 import sessions as _SESS

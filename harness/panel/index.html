@@ -202,6 +202,12 @@
         <div style="margin-top:12px"><button class="pri" onclick="verifyFinding()">Verify</button><span class="dim" style="margin-left:10px;font-size:11px">Checks per-class PoC minimum, always-rejected list, scope, the program's qualifying list, severity honesty + dedup.</span></div>
         <div id="vf-msg" class="msg"></div></div></div>
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
+      <div class="box" id="fc-box" style="display:none"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">closing removes the session + files</span></div><div class="b">
+        <div id="fc-files" style="margin-bottom:10px"></div>
+        <div id="fc-log" style="max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;padding:10px;background:#0b0f1a;margin-bottom:8px"></div>
+        <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" onclick="fcSend()">Send</button></div>
+        <div style="margin-top:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg" style="margin-left:8px"></span></div>
+      </div></div>
     </section>
 
     <!-- CAPABILITIES -->
@@ -365,7 +371,7 @@ async function verifyFinding(){
   msg("vf-msg","Reading files…",true);
   try{f.files=[];for(const file of VF_FILES)f.files.push({name:file.name,type:file.type,b64:await readB64(file)});}catch(e){msg("vf-msg","Could not read a file: "+e,false);return;}
   msg("vf-msg",f.deep?"Verifying (deep expert triage runs 4 models — can take up to ~5 min, keep the tab open)…":"Verifying…",true);
-  try{const d=await api("/verify","POST",f);renderVerdict(d);msg("vf-msg","",true);}catch(e){msg("vf-msg",e.message,false);}}
+  try{const d=await api("/verify","POST",f);VF_LAST={req:f,res:d};renderVerdict(d);msg("vf-msg","",true);}catch(e){msg("vf-msg",e.message,false);}}
 function renderVerdict(d){
   const box=document.getElementById("vf-resultbox");box.style.display="block";
   const col={READY:"var(--grn)",NEEDS_FIXES:"var(--amb)",DO_NOT_SUBMIT:"var(--red)"}[d.verdict]||"var(--mut)";
@@ -380,8 +386,34 @@ function renderVerdict(d){
     `<div style="font-size:23px;font-weight:700;color:${col}">${esc(d.verdict)} <span class="dim" style="font-size:13px;font-weight:500">· score ${d.score}/100 · ${d.accept?"ready to report":"do not submit yet"}</span></div>`+
     brief+liv+
     `<div style="margin:9px 0 12px" class="dim">dedup: ${esc((d.dedup||{}).verdict||"—")}${(d.missing&&d.missing.length)?` · missing: ${esc(d.missing.join(", "))}`:""}</div>`+
-    exd+up+checks+op;}
+    exd+up+checks+op+
+    `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><button class="pri" onclick="fcOpen()">Open fix chat — let the agent edit your files to fix this</button> <span class="dim" style="font-size:11px">it rewrites the report in place (adds steps/PoC sections, fixes severity, redacts PII) · you download the fixed files · closing removes the session + files</span></div>;}
 async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
+let VF_LAST=null,FC_ID=null,FC_MTIMES={};
+function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
+  document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
+function fcLog(role,text,cls){const l=document.getElementById("fc-log");l.insertAdjacentHTML("beforeend",`<div style="margin:0 0 10px"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
+async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);return;}
+  const box=document.getElementById("fc-box");box.style.display="block";document.getElementById("fc-log").innerHTML="";
+  fcLog("system","Opening fix chat — the agent is reading your files and the failed checks… (first reply can take a minute)","color:var(--mut)");
+  box.scrollIntoView({behavior:"smooth"});
+  try{const req=VF_LAST.req;const d=await api("/verify/fixchat/start","POST",{program:req.program,finding:{vuln_class:req.vuln_class,severity:req.severity,url:req.url,title:req.title,steps:req.steps,poc:req.poc,evidence:req.evidence,impact:req.impact},files:req.files||[],verify:VF_LAST.res});
+    if(d.error&&!d.chat_id){fcLog("system","error: "+d.error,"color:var(--red)");return;}
+    FC_ID=d.chat_id;fcRenderFiles(d.files);fcLog("agent",d.reply);
+  }catch(e){fcLog("system","error: "+e.message,"color:var(--red)");}}
+async function fcSend(){const inp=document.getElementById("fc-input");const t=inp.value.trim();if(!t||!FC_ID)return;inp.value="";
+  fcLog("you",t);fcLog("system","agent is working (may edit files)…","color:var(--mut)");
+  try{const d=await api("/verify/fixchat/message","POST",{chat_id:FC_ID,message:t});
+    const sys=document.getElementById("fc-log").lastElementChild;if(sys&&sys.textContent.includes("agent is working"))sys.remove();
+    if(d.error){fcLog("system","error: "+d.error,"color:var(--red)");return;}
+    (d.files||[]).forEach(x=>{if(FC_MTIMES[x.name]!==undefined&&FC_MTIMES[x.name]!==x.mtime)x._edited=true;else if(FC_MTIMES[x.name]===undefined)x._edited=true;});
+    fcRenderFiles(d.files);fcLog("agent",d.reply);
+  }catch(e){fcLog("system","error: "+e.message,"color:var(--red)");}}
+async function fcClose(){if(!FC_ID)return;if(!confirm("Close the chat? The agent session AND the uploaded/edited files are removed (download anything you need first)."))return;
+  try{const d=await api("/verify/fixchat/close","POST",{chat_id:FC_ID});
+    document.getElementById("fc-box").style.display="none";FC_ID=null;FC_MTIMES={};
+    msg("vf-msg",d.closed?"Chat closed — session + files removed.":"Close failed: "+(d.error||"?"),!!d.closed);
+  }catch(e){msg("vf-msg",e.message,false);}}
 async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});setTimeout(refresh,1000);}catch(e){alert(e.message);}}
 function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURLOG&&TAIL)loadLog();}

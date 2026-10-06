@@ -211,15 +211,25 @@ def _cmd(task, model, resume_id=None):
     return [CURSOR_BIN, "-p", task, "--output-format", "json", "-f"] + (["--model", model] if model else [])
 
 
-def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, timeout=600, attempts=2):
+def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, timeout=600, attempts=2,
+              resume_id=None):
     """Run a headless Cursor agent, REUSING a pooled session for `context` (far fewer chat sessions, far
     less rate-limiting). A fresh session opens only on first use, error/limit, or after
     HUNT_SESSION_MAX_USES turns. context=None => a one-shot ephemeral session (e.g. provisioning).
+    resume_id => one-shot run resuming THAT session (used by the verify fix-chat; no pool involved).
     Returns {result, error, model, session_id, reused, ...}."""
     if os.environ.get("HUNT_MOCK_AGENT") == "1":
         m = _enforce_pool(model or _pick_model())
         return {"result": os.environ.get("HUNT_MOCK_RESULT", "```json\n[]\n```"),
-                "error": None, "model": m or "mock", "duration_s": 0.0, "reused": False}
+                "error": None, "model": m or "mock", "duration_s": 0.0, "reused": False,
+                "session_id": resume_id}
+
+    if resume_id:                           # explicit resume (fix-chat): bypass the pool entirely
+        m = _enforce_pool(model or _pick_model())
+        r = _run_once(_cmd(task, m, resume_id=resume_id), m, timeout)
+        r.setdefault("model", m)
+        r["reused"] = True
+        return r
 
     sl = _acquire(context) if context is not None else {"id": None, "model": None, "uses": 0}
     try:
