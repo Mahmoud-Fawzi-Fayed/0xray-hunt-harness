@@ -401,16 +401,18 @@ async function loadCore(){try{
       ["Phone / SMS",c.sms&&c.sms.enabled?("on — "+esc(c.sms.provider)):"disabled"],
       ["Self-learning",((c.learn&&c.learn.learned_skills)||0)+" skills · "+((c.learn&&c.learn.gaps)||0)+" gap(s)"],
       ["Guardrails","in-scope only · no bruteforce · audited"],
-      ["Watchdog",(st.watchdog&&st.watchdog.ts)?("last sweep "+new Date(st.watchdog.ts*1000).toLocaleTimeString()+" · "+Object.values(st.watchdog.restarts||{}).reduce((a,b)=>a+(+b||0),0)+" stuck-revival(s) total"):"no sweep data yet"],
+      ["Watchdog",(st.watchdog&&st.watchdog.ts)?("last sweep "+new Date(st.watchdog.ts*1000).toLocaleTimeString()+" · "+Object.values(st.watchdog.revived||{}).reduce((a,b)=>a+(+b||0),0)+" stuck-revival(s) total"):"no sweep data yet"],
     ].map(([k,v])=>`<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid #141a25"><span class="dim">${esc(k)}</span><span style="text-align:right">${esc(v)}</span></div>`).join("");
   }).catch(()=>{});
   RUN={};(st.hunts||[]).forEach(h=>RUN[h.program]=h);
   // overview running
   const run=(st.hunts||[]).filter(h=>h.running);
   document.getElementById("ov-run").innerHTML=run.length?run.map(h=>{const sil=h.log_age_s!=null?Math.round(h.log_age_s/60):null;
-    const silTxt=sil==null?"":(sil>=45?` · <span style="color:var(--red)">silent ${sil}m</span>`:` · silent ${sil}m`);
+    const nxt=h.sleeping&&sil!=null?Math.max(0,180-sil):null;   // 3h interval
+    const state=h.sleeping?`<span class="chip c-idle">between rounds</span>`:`<span class="chip c-run">running</span>`;
+    const silTxt=h.sleeping?` · next pass ~${nxt!=null?nxt+"m":"soon"}`:(sil==null?"":(sil>=45?` · <span style="color:var(--red)">silent ${sil}m</span>`:` · silent ${sil}m`));
     const wd=h.wd_restarts?` <span class="chip c-val" title="The watchdog found this hunt stuck mid-round and restarted it">⚠ watchdog revived ×${h.wd_restarts}</span>`:"";
-    return `<tr><td><b>${esc(h.program)}</b>${wd}</td><td><span class="chip c-run">running</span></td><td class="tag">pid ${h.pid} · ${h.restarts||0} restarts${silTxt}</td></tr>`;}).join(""):`<tr><td class="empty">no hunts running</td></tr>`;
+    return `<tr><td><b>${esc(h.program)}</b>${wd}</td><td>${state}</td><td class="tag">pid ${h.pid} · ${h.restarts||0} restarts${silTxt}</td></tr>`;}).join(""):`<tr><td class="empty">no hunts running</td></tr>`;
   // targets table
   const sel=document.getElementById("logSel");
   sel.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");

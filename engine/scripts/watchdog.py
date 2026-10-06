@@ -146,9 +146,10 @@ def run_once(quiet=False):
         alerts.append("bridge was DOWN")
 
     # 2/3. per-hunt health
+    revived = dict(prev.get("revived", {}))     # hunts THE WATCHDOG itself restarted (not manual/pm2 restarts)
     for p in _pm2_jlist():
         name = p.get("name", "")
-        if not name.startswith("hunt-") or name == "hunt-bridge":
+        if not name.startswith("hunt-") or name in ("hunt-bridge", "hunt-watchdog"):
             continue
         slug = name[5:]
         env = p.get("pm2_env", {}) or {}
@@ -160,6 +161,7 @@ def run_once(quiet=False):
         # not online -> restart
         if status != "online":
             _pm2("restart", name)
+            revived[name] = revived.get(name, 0) + 1
             actions.append(f"restarted {name} (status was {status})")
             alerts.append(f"{name} was {status}")
             continue
@@ -167,6 +169,7 @@ def run_once(quiet=False):
         age = _log_age_min(slug)
         if age is not None and age > STUCK_MIN and not _is_sleeping(slug):
             _pm2("restart", name)
+            revived[name] = revived.get(name, 0) + 1
             actions.append(f"restarted {name} (stuck mid-round, no log for {int(age)}m)")
             alerts.append(f"{name} stuck {int(age)}m mid-round")
 
@@ -176,7 +179,7 @@ def run_once(quiet=False):
         rm = _prune_chats()
         actions.append(f"pruned {rm} stale chats ({chats} -> {_chat_count()})")
 
-    _save_state({"ts": time.time(), "restarts": restarts_now})
+    _save_state({"ts": time.time(), "restarts": restarts_now, "revived": revived})
 
     # 5. report / alert (email only when there ARE alerts, to avoid spam)
     summary = f"watchdog: {len(actions)} action(s), {len(alerts)} alert(s); chats={chats}"

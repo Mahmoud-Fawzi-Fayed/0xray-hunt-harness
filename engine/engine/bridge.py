@@ -86,22 +86,31 @@ def _hunt_running(base):
     except Exception:
         return []
     try:
-        wd = (_j.load(open(_o.path.join(base, "_watchdog.json"))) or {}).get("restarts", {}) or {}
+        wd = (_j.load(open(_o.path.join(base, "_watchdog.json"))) or {}).get("revived", {}) or {}
     except Exception:  # noqa: BLE001
         wd = {}
+    # same markers as scripts/watchdog.py: last log line = between rounds (sleeping), not stuck
+    idle = ("orchestrator done", "orchestrator:", "persist:", "draft-gate:", "=== persist round")
     out = []
     for pr in procs:
         name = pr.get("name", "")
         if name.startswith("hunt-") and name not in ("hunt-bridge", "hunt-watchdog"):
             env = pr.get("pm2_env", {}) or {}
             slug = name[5:]
+            age, sleeping = None, False
             try:
-                age = int(_t.time() - _o.path.getmtime(_o.path.join(base, slug, "engine.log")))
+                logf = _o.path.join(base, slug, "engine.log")
+                age = int(_t.time() - _o.path.getmtime(logf))
+                with open(logf, "rb") as fh:                     # last line only, no full read
+                    fh.seek(0, 2)
+                    tail = fh.read(max(2, min(fh.tell(), 4096))).decode("utf-8", "replace").strip().splitlines()
+                last = tail[-1].split("  ", 1)[-1] if tail else ""
+                sleeping = any(last.startswith(m) for m in idle)
             except OSError:
-                age = None
+                pass
             out.append({"program": slug, "pid": pr.get("pid"),
                         "running": env.get("status") == "online", "restarts": env.get("restart_time", 0),
-                        "wd_restarts": wd.get(name, 0), "log_age_s": age})
+                        "wd_restarts": wd.get(name, 0), "log_age_s": age, "sleeping": sleeping})
     return out
 
 
@@ -266,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:  # noqa: BLE001
                     pass
                 return self._send(200, {"hunts": hunts,
-                                        "watchdog": {"ts": wd.get("ts"), "restarts": wd.get("restarts") or {}}})
+                                        "watchdog": {"ts": wd.get("ts"), "revived": wd.get("revived") or {}}})
             if p.path == "/hunt/log":
                 import targets as T
                 q = parse_qs(p.query)
