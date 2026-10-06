@@ -144,6 +144,38 @@
   /* misc */
   details>summary{transition:color .15s ease}
   details>summary:hover{color:var(--ink)}
+
+  /* ——— responsive layer ——— */
+  .mnav{display:none}
+  .box{min-width:0}
+  .cols>*{min-width:0}
+  .box>.b{overflow-x:auto}              /* wide tables scroll inside the card, never stretch the page */
+  td{overflow-wrap:anywhere}
+  #fc-wrap{grid-template-columns:240px minmax(0,1fr)}   /* minmax(0,…) = chat column can shrink, no page-stretch */
+  #vf-result,#fc-files a{overflow-wrap:anywhere}
+  #fc-input{min-width:0}
+  #fc-log{overflow-x:hidden}
+  @media(max-width:1000px){
+    .cols{grid-template-columns:1fr !important}          /* overrides inline 2.4fr 1fr on activity */
+    .mnav{display:flex;gap:4px;overflow-x:auto;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--rail)}
+    .mnav a{flex:0 0 auto;padding:7px 12px;border-radius:8px;color:var(--mut);font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s ease}
+    .mnav a:hover{color:var(--ink);background:#12161f;text-decoration:none}
+    .mnav a.on{background:#141a26;color:var(--ink);box-shadow:inset 0 -2px 0 var(--acc)}
+  }
+  @media(max-width:900px){
+    #fc-wrap{grid-template-columns:1fr}                  /* chat sidebar stacks above the chat */
+    #fc-list{max-height:180px;overflow-y:auto}
+  }
+  @media(max-width:700px){
+    .page{padding:14px}
+    .bar{padding:12px 14px}
+    .bar .meta{display:none}
+    .row2{flex-direction:column;gap:0}
+    .term{height:52vh}
+    .kpi .v{font-size:21px}
+    .box>.b{padding:12px}
+    td,th{padding:8px}
+  }
 </style>
 </head>
 <body>
@@ -182,6 +214,15 @@
   </aside>
 
   <main>
+    <div class="mnav">
+      <a class="on" data-v="overview" onclick="nav(this)">Overview</a>
+      <a data-v="targets" onclick="nav(this)">Targets</a>
+      <a data-v="activity" onclick="nav(this)">Activity</a>
+      <a data-v="findings" onclick="nav(this)">Findings</a>
+      <a data-v="verify" onclick="nav(this)">Verify finding</a>
+      <a data-v="capabilities" onclick="nav(this)">Capabilities</a>
+      <a data-v="logs" onclick="nav(this)">Live logs</a>
+    </div>
     <div class="bar"><h1 id="title">Overview</h1><div class="meta">read-only · stop-at-draft · cursor-agent · <span id="pool" class="tag"></span></div></div>
 
     <!-- OVERVIEW -->
@@ -266,7 +307,7 @@
         <div style="margin-top:12px"><button class="pri" onclick="verifyFinding()">Verify</button><span class="dim" style="margin-left:10px;font-size:11px">Checks per-class PoC minimum, always-rejected list, scope, the program's qualifying list, severity honesty + dedup.</span></div>
         <div id="vf-msg" class="msg"></div></div></div>
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
-      <div id="fc-wrap" style="display:none;grid-template-columns:240px 1fr;gap:14px">
+      <div id="fc-wrap" style="display:none;gap:14px">
         <div class="box"><div class="h"><span class="t">Chats</span><span class="dim" style="font-size:11px">open — click to resume</span></div><div class="b" id="fc-list" style="padding:8px"><div class="empty" style="padding:8px">No open chats.</div></div></div>
         <div class="box" id="fc-box"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
         <div id="fc-files" style="margin-bottom:10px"></div>
@@ -316,10 +357,10 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",
 async function api(path,method="GET",body=null){const o={method,headers:{}};if(body){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body);}
   const r=await fetch(API+path,o);let j={};try{j=await r.json();}catch(e){}if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
 function msg(id,t,ok){const e=document.getElementById(id);if(e){e.textContent=t;e.className="msg "+(ok?"ok":"err");}}
-function nav(el){document.querySelectorAll("nav a").forEach(a=>a.classList.remove("on"));el.classList.add("on");go(el.dataset.v);}
+function nav(el){document.querySelectorAll("nav a, .mnav a").forEach(a=>a.classList.remove("on"));el.classList.add("on");go(el.dataset.v);}
 function go(v){VIEW=v;document.querySelectorAll(".page").forEach(p=>p.classList.remove("on"));document.getElementById("p-"+v).classList.add("on");
   document.getElementById("title").textContent={overview:"Overview",targets:"Targets",activity:"Activity",findings:"Findings",verify:"Verify finding",capabilities:"Capabilities",logs:"Live logs"}[v];
-  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();if(v==="verify")fcLoadList();}
+  document.querySelectorAll("nav a, .mnav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();if(v==="verify")fcLoadList();}
 function live(ok){document.getElementById("st").style.background=ok?"var(--grn)":"var(--red)";document.getElementById("stTxt").textContent=ok?"bridge online":"bridge offline";}
 function slug(n){return n.toLowerCase().replace(/[^a-z0-9._-]+/g,"-");}
 function fmtTs(t){try{return new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch(e){return t;}}
@@ -462,7 +503,7 @@ function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x
   document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
 function fcLog(role,text,cls){const l=document.getElementById("fc-log");
   const bubble=role==="you"?`align-self:flex-end;background:linear-gradient(180deg,#1a2a4a,#152138);border:1px solid #2a3f6e;max-width:85%`:(role==="agent"?`align-self:flex-start;background:#101725;border:1px solid #1e2736;max-width:85%`:`align-self:center;max-width:95%`);
-  l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:12px;padding:9px 13px;box-shadow:0 2px 8px rgba(0,0,0,.22)"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
+  l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:12px;padding:9px 13px;box-shadow:0 2px 8px rgba(0,0,0,.22)"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
 function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
 function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
 async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const el=document.getElementById("fc-list");const wrap=document.getElementById("fc-wrap");
