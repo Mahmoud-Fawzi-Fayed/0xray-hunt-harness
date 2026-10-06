@@ -356,7 +356,7 @@ async function verifyFinding(){
   if(!VF_FILES.length && !(f.vuln_class&&f.url)){msg("vf-msg","Upload your report/evidence files (or open Optional and fill the fields).",false);return;}
   msg("vf-msg","Reading files…",true);
   try{f.files=[];for(const file of VF_FILES)f.files.push({name:file.name,type:file.type,b64:await readB64(file)});}catch(e){msg("vf-msg","Could not read a file: "+e,false);return;}
-  msg("vf-msg",f.deep?"Verifying (deep expert triage can take ~1 min)…":"Verifying…",true);
+  msg("vf-msg",f.deep?"Verifying (deep expert triage runs 4 models — can take up to ~5 min, keep the tab open)…":"Verifying…",true);
   try{const d=await api("/verify","POST",f);renderVerdict(d);msg("vf-msg","",true);}catch(e){msg("vf-msg",e.message,false);}}
 function renderVerdict(d){
   const box=document.getElementById("vf-resultbox");box.style.display="block";
