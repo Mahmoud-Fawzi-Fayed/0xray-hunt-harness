@@ -72,6 +72,72 @@ REQUIRED = ["vuln_class", "url", "title"]
 PROOF_FIELDS = ["poc", "request", "response", "evidence", "steps"]
 
 
+# ------- concrete fix guidance: what to ADD, per failed check (never just "don't submit") -------
+def _fix_for(name, note, cls):
+    """Actionable remediation for a failed check — the exact thing to add/do, class-aware."""
+    if name == "has repro steps":
+        return ("Add numbered steps a stranger can follow: exact URL + params, the account role used, "
+                "what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with "
+                "{...} 3) observe Y in the response'.")
+    if name == "has PoC / evidence":
+        return ("Attach the RAW request + response (Burp 'copy to file' or curl -i) showing the vuln "
+                "firing, plus a screenshot. The response must show the impact data itself — a bare 200 "
+                "or an error message is not proof.")
+    if name == "has impact stated":
+        return ("State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any "
+                "authenticated user can read any other user's invoices (PII: name, address, amount)'.")
+    if name == "in scope":
+        return "The URL host is outside the program scope — re-target an in-scope host; do not report this one."
+    if name == "class is qualifying":
+        return ("This class is on the program's NON-qualifying list — reporting it earns RTFS/N/A. "
+                "Either chain it into a qualifying impact (e.g. use it for ATO) or hunt a qualifying class.")
+    if name == "not an always-rejected class":
+        return ("This pattern is always rejected as-is. The only way through: chain it to a demonstrated "
+                "higher impact (e.g. self-XSS → stored XSS hitting other users) and show the full chain working.")
+    if name.startswith("PoC minimum for"):
+        per_cls = {
+            "idor": "Create TWO accounts (A=victim, B=attacker). As A, create/note the object id. As B, "
+                    "request A's id. Paste BOTH responses side-by-side with A's data highlighted in B's response.",
+            "bola": "Same two-account proof as IDOR, at the object level: B receives an object owned by A.",
+            "xss": "Show the payload EXECUTING in a victim-context page: screenshot of the alert/callback + "
+                   "the unencoded payload in the response HTML. Reflection or &lt;encoding is not enough.",
+            "ssrf": "Show the internal RESPONSE BODY (or an OOB callback with content) — a DNS pingback alone "
+                    "is not accepted. Hit 169.254.169.254 or an internal host and paste what came back.",
+            "sqli": "Extract something real (version(), current_user, a row) or show a clear boolean/time "
+                    "difference (SLEEP(5) → 5s delay, n>=10 timings). An error message alone is not enough.",
+            "rce": "Paste the command output (id / whoami / uname -a) as returned by the target.",
+            "cors": "Show Origin reflected + Access-Control-Allow-Credentials:true AND a credentialed "
+                    "cross-origin read working in a browser (fetch with credentials:'include').",
+            "open-redirect": "Show the 3xx with Location: https://attacker — and if you claim token theft, "
+                             "reproduce the full chain end-to-end.",
+            "secret": "Prove the secret is VALID: use it (read-only) and show what it unlocks. Public "
+                      "publishable keys (pk_live, maps, firebase config) are not findings.",
+            "ssti": "Prove SERVER-side evaluation: {{7*7}} → 49 in the response, or read a server "
+                    "config/class. In Angular, {{7*7}} rendering is client-side (CSTI), not SSTI.",
+            "lfi": "Paste actual file contents returned (e.g. root:x:0:0 from /etc/passwd) — a 200 on a "
+                   "traversal path is not enough.",
+            "csrf": "Show a STATE-CHANGING action (email/password change) performed cross-site with the "
+                    "victim's session — logout/login/cart CSRF is not accepted.",
+        }
+        return per_cls.get(cls, "Add the proof that demonstrates real impact for this class (see the note).")
+    if name == "severity supported by evidence":
+        return ("Either lower the severity to match what you actually proved, or attach the stronger "
+                "evidence (cross-account data / command output / metadata) that justifies it.")
+    if name.startswith("dedup"):
+        return ("This looks like a known duplicate. Only report if you can show a concrete differentiator: "
+                "a new endpoint/param, a bypass of the original fix, or a stronger impact than the known report.")
+    if name.startswith("disposition"):
+        return ("The impact depends on a precondition you never demonstrate (e.g. possessing a victim "
+                "session/id). Add the step that obtains it from an IN-SCOPE vector — XSS, CSRF, an enumerable/"
+                "leaked id, an in-scope oracle — with it working in the PoC, or do not submit.")
+    if name == "impact precondition is demonstrated (not hypothetical)":
+        return ("Show HOW the attacker gets the victim's session/id: is the id sequential or returned by "
+                "another in-scope endpoint? Is there an XSS/CSRF that grabs it? Add that step + proof.")
+    if name.startswith("live reproduction"):
+        return note or "Reproduce it live and paste the exact request/response that proves it."
+    return "Address the note on this check, then re-verify."
+
+
 def _text(f):
     return " ".join(str(f.get(k, "")) for k in
                     ("title", "steps", "poc", "impact", "request", "response", "evidence", "proof_note")).lower()
@@ -98,7 +164,160 @@ def _in_scope(url, scope):
         return None
 
 
-def verify_finding(f, program=None, base=DEFAULT_BASE):
+# ------- live reproduction: actually probe the vuln (READ-ONLY, in-scope only, no brute force) -------
+_LIVE_LOCK = __import__("threading").Lock()
+_SQL_ERR = re.compile(r"sql syntax|mysql|mariadb|postgres|psql|sqlite|ora-\d{4}|odbc|jdbc|"
+                      r"unclosed quotation|unterminated string|syntax error.*sql", re.I)
+
+
+def _probe_url_and_param(f):
+    """The URL to probe + a guess at the injectable param (from the url query, else from the PoC)."""
+    from urllib.parse import urlparse, parse_qsl
+    url = f.get("url", "")
+    for cand in [url] + re.findall(r"https?://[^\s\"')<>]+", str(f.get("poc", ""))):
+        q = parse_qsl(urlparse(cand).query)
+        if q:
+            return cand, q[0][0]
+    return url, None
+
+
+def _xss_payload(f):
+    m = re.search(r"(<[^\n>]{0,100}(?:script|svg|alert|onerror|img)[^\n>]{0,40}>?)", str(f.get("poc", "")), re.I)
+    return (m.group(1) if m else '"><svg/onload=alert(1)>')[:120]
+
+
+def _payload_core(payload):
+    """The tag core used for the reflection check (the send payload may carry breakout prefixes)."""
+    m = re.search(r"<[^\n>]+>?", payload)
+    return (m.group(0) if m else payload).lower()
+
+
+def live_check(f, program=None, base=DEFAULT_BASE, max_probes=4):
+    """Try to REPRODUCE the finding with a few read-only GETs. Hard guards: https only, the host must
+    be confirmed IN the program scope (no scope / out-of-scope => never probed), GET only, at most
+    max_probes requests, one payload per class (no lists/brute force). Returns
+    {attempted, probes, confirmed(True/False/None), note}."""
+    from urllib.parse import urlparse, urlencode, parse_qsl, urlunparse
+    out = {"attempted": False, "probes": [], "confirmed": None, "note": ""}
+    url = (f.get("url") or "").strip()
+    if not url.startswith("http"):
+        out["note"] = "no URL to probe"
+        return out
+    scope = _load_scope(program or f.get("program"), base)
+    if not scope:
+        out["note"] = "no program scope — live check skipped (never probe unknown scope)"
+        return out
+    if _in_scope(url, scope) is not True:
+        out["note"] = "URL not confirmed in-scope — live check skipped"
+        return out
+    try:
+        import netget
+    except Exception as e:  # noqa: BLE001
+        out["note"] = f"prober unavailable: {e}"
+        return out
+
+    def _get(u):
+        h = {"User-Agent": scope["user_agent"]} if scope.get("user_agent") else None
+        with _LIVE_LOCK:                       # env is process-wide; keep set/probe/restore atomic
+            saved = {k: os.environ.get(k) for k in ("HUNT_IMPERSONATE", "HUNT_PROXY")}
+            if scope.get("impersonate"):
+                os.environ["HUNT_IMPERSONATE"] = scope["impersonate"]
+            if scope.get("proxy"):
+                os.environ["HUNT_PROXY"] = scope["proxy"]
+            try:
+                return netget.get(u, headers=h, timeout=15)
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    cls = (f.get("vuln_class") or "").lower()
+    purl, param = _probe_url_and_param(f)
+    out["attempted"] = True
+
+    def _add(name, u, st, txt, hd, signal=""):
+        out["probes"].append({"name": name, "url": u[:200], "status": st,
+                              "bytes": len(txt or ""), "signal": signal})
+
+    # 1) baseline — is the endpoint even reachable, and does it need auth?
+    st, txt, hd = _get(purl)
+    if st == 0:
+        out["note"] = f"endpoint unreachable ({hd.get('_error', '')[:80]}) — check the URL/host"
+        _add("baseline", purl, st, txt, hd)
+        return out
+    _add("baseline", purl, st, txt, hd,
+         "auth required" if st in (401, 403) else "")
+    base_len = len(txt or "")
+
+    # 2) one class-specific probe (single payload — no brute force)
+    if cls == "xss" and param:
+        payload = _xss_payload(f)
+        q = urlencode([(param, payload)] + [(k, v) for k, v in parse_qsl(urlparse(purl).query) if k != param])
+        u2 = urlunparse(urlparse(purl)._replace(query=q))
+        st2, txt2, hd2 = _get(u2)
+        if _payload_core(payload) in (txt2 or "").lower():
+            out["confirmed"] = True
+            out["note"] = f"payload reflected UNENCODED in the response (HTTP {st2}) — live signal confirms it"
+            _add("xss-reflection", u2, st2, txt2, hd2, "payload reflected unencoded")
+        elif re.search(r"&lt;|&gt;|&quot;", txt2 or ""):
+            out["confirmed"] = False
+            out["note"] = ("payload comes back HTML-ENCODED — not exploitable on this sink as-is. "
+                           "Try another param/sink, an attribute-breakout payload, or a different context")
+            _add("xss-reflection", u2, st2, txt2, hd2, "reflected encoded")
+        else:
+            if st2 != st or st2 in (401, 403, 429):
+                out["note"] = (f"probe got HTTP {st2} vs baseline {st} — WAF/auth interference, "
+                               "inconclusive; re-test in Burp and paste the real request/response")
+                _add("xss-reflection", u2, st2, txt2, hd2, "inconclusive (blocked)")
+            else:
+                out["confirmed"] = False
+                out["note"] = ("the claimed reflection does NOT reproduce live (param ignored or wrong "
+                               "sink) — re-test in Burp, find the real reflecting param/context, and paste "
+                               "the working request/response")
+                _add("xss-reflection", u2, st2, txt2, hd2, "no reflection")
+    elif cls == "open-redirect" and param:
+        q = urlencode([(param, "https://example.com/")] + [(k, v) for k, v in parse_qsl(urlparse(purl).query) if k != param])
+        u2 = urlunparse(urlparse(purl)._replace(query=q))
+        st2, txt2, hd2 = _get(u2)
+        loc = hd2.get("location", "")
+        if st2 in (301, 302, 303, 307, 308) and "example.com" in loc:
+            out["confirmed"] = True
+            out["note"] = f"redirects to an external host (Location: {loc[:80]}) — live signal confirms it"
+            _add("open-redirect", u2, st2, txt2, hd2, f"Location: {loc[:60]}")
+        elif st2 != st or st2 in (401, 403, 429):
+            out["note"] = (f"probe got HTTP {st2} vs baseline {st} — WAF/auth interference, inconclusive; "
+                           "re-test in Burp")
+            _add("open-redirect", u2, st2, txt2, hd2, "inconclusive (blocked)")
+        else:
+            out["confirmed"] = False
+            out["note"] = (f"no external redirect (HTTP {st2}, Location: {loc[:60] or 'none'}) — "
+                           "try bypasses (//host, /\\host, %2f%2f, .evil-suffix) or another param")
+            _add("open-redirect", u2, st2, txt2, hd2, "no external redirect")
+    elif cls == "sqli" and param:
+        q = urlencode([(param, "'")] + [(k, v) for k, v in parse_qsl(urlparse(purl).query) if k != param])
+        u2 = urlunparse(urlparse(purl)._replace(query=q))
+        st2, txt2, hd2 = _get(u2)
+        if _SQL_ERR.search(txt2 or ""):
+            out["confirmed"] = True
+            out["note"] = ("single quote triggers a DB error — injection point signal confirmed. "
+                           "Now EXTRACT data (version()/a row) or show a time/boolean difference to prove impact")
+            _add("sqli-error", u2, st2, txt2, hd2, "DB error on quote")
+        else:
+            out["note"] = ("no DB error on a quote — could still be blind; prove with SLEEP(5) timing "
+                           "(n>=10) or boolean diff, and paste the timings")
+            _add("sqli-error", u2, st2, txt2, hd2, "no error signal")
+    else:
+        # idor/ssrf/lfi/rce/... : can't be proven with one anonymous GET — say exactly what to capture
+        if st in (401, 403):
+            out["note"] = ("endpoint requires auth — reproduce it with your TWO accounts (A creates, B "
+                           "accesses A's object) and paste both responses side-by-side")
+        else:
+            out["note"] = (f"endpoint reachable (HTTP {st}, {base_len}B). This class can't be confirmed "
+                           "with an anonymous GET — attach the full request/response that proves the impact "
+                           "(cross-account data / file contents / command output)")
+    return out
+
+
+def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
     checks, missing = [], []
     cls = (f.get("vuln_class") or "").lower().strip()
     sev = (f.get("severity") or "").lower().strip()
@@ -221,7 +440,26 @@ def verify_finding(f, program=None, base=DEFAULT_BASE):
             "gets it (XSS/CSRF/enumerable id/in-scope oracle), or it's RTFS 'hypothetical'")
         hard_reject = hard_reject or "hypothetical precondition (victim secret not obtained)"
 
+    # 10) LIVE reproduction — actually probe the vuln (read-only, in-scope only). A negative signal
+    # (payload encoded / no redirect) fails the check with guidance; inconclusive (auth needed) never does.
+    lv = None
+    if live:
+        try:
+            lv = live_check(f, program=program or f.get("program"), base=base)
+        except Exception as e:  # noqa: BLE001
+            lv = {"attempted": False, "probes": [], "confirmed": None, "note": f"live check error: {e}"}
+        if lv.get("attempted"):
+            if lv["confirmed"] is True:
+                add("live reproduction", True, lv["note"])
+            elif lv["confirmed"] is False:
+                add("live reproduction", False, lv["note"])
+                missing.append("live-proof")
+            else:
+                add("live reproduction (inconclusive)", True, lv["note"])
+
     fails = [c for c in checks if not c["pass"]]
+    for c in fails:                                  # every failure comes with the exact fix
+        c["fix"] = _fix_for(c["check"], c.get("note", ""), cls)
     score = round(100 * (len(checks) - len(fails)) / max(1, len(checks)))
     if hard_reject or insc is False:
         verdict = "DO_NOT_SUBMIT"
@@ -232,7 +470,10 @@ def verify_finding(f, program=None, base=DEFAULT_BASE):
     out = {"verdict": verdict, "score": score, "program": program or f.get("program"),
            "vuln_class": cls, "severity": sev, "url": url,
            "checks": checks, "failed": [c["check"] for c in fails], "missing": missing,
+           "how_to_fix": [{"check": c["check"], "fix": c["fix"]} for c in fails],
            "dedup": dedup, "accept": verdict == "READY"}
+    if lv:
+        out["live"] = lv
     out["summary"] = _summarize(out)
     return out
 
@@ -399,22 +640,25 @@ def ingest_files(files, program=None, base=DEFAULT_BASE):
 
 
 def _summarize(det, opinion=None):
-    """One short human brief: the verdict, why, and what to do next."""
+    """One short human brief: the verdict, why, what to do next — and the exact fixes to add."""
     v = det.get("verdict", "NEEDS_FIXES")
     fails = [c for c in det.get("checks", []) if not c.get("pass")]
     reasons = [f"{c['check']}" + (f" ({c['note']})" if c.get("note") else "") for c in fails]
+    fixes = [c["fix"] for c in fails if c.get("fix")]
     if v == "READY":
         why = "All checks pass: real PoC, repro steps, demonstrated impact, in-scope, qualifying class, not a duplicate."
         nxt = "Ready to report. Keep the two-account / impact evidence attached and redact any PII."
     elif v == "DO_NOT_SUBMIT":
         why = "Would likely be closed (RTFS / Informative / N/A): " + ("; ".join(reasons) if reasons else "fails a hard gate.")
-        nxt = "Do NOT submit as-is. Prove the missing precondition (how the attacker gets the victim's session/id) or pick a stronger finding."
+        nxt = ("Do NOT submit as-is. " + (fixes[0] if fixes else
+               "Prove the missing precondition (how the attacker gets the victim's session/id) or pick a stronger finding."))
     else:
         why = "Close, but not submittable yet: " + ("; ".join(reasons) if reasons else "some checks need attention.")
-        nxt = "Fix the failed checks above, then re-verify."
+        nxt = ("Add what's missing, then re-verify: " + " | ".join(fixes[:3])) if fixes else \
+              "Fix the failed checks above, then re-verify."
     if opinion and opinion.get("verdict") and opinion.get("verdict") != det.get("verdict"):
         why += f" Expert review was stricter ({opinion['verdict']})."
-    return {"verdict": v, "why": why, "next": nxt}
+    return {"verdict": v, "why": why, "next": nxt, "how_to_fix": fixes}
 
 
 def combine_verdict(det, opinion):
@@ -501,12 +745,13 @@ def _main(argv=None):
     pc = sub.add_parser("check")
     pc.add_argument("--file"); pc.add_argument("--stdin", action="store_true")
     pc.add_argument("--program"); pc.add_argument("--deep", action="store_true")
+    pc.add_argument("--live", action="store_true", help="probe the vuln read-only (in-scope only)")
     sub.add_parser("selftest")
     a = ap.parse_args(argv)
     if a.cmd == "selftest":
         return _selftest()
     f = json.loads(sys.stdin.read()) if a.stdin else json.load(open(os.path.expanduser(a.file)))
-    out = verify_finding(f, program=a.program, base=a.base)
+    out = verify_finding(f, program=a.program, base=a.base, live=a.live)
     if a.deep:
         out["triager_opinion"] = deep_opinion(f, out, program=a.program, base=a.base)
     print(json.dumps(out, indent=2))
@@ -566,6 +811,48 @@ def _selftest():
     # 5) combined verdict = stricter of gate + expert opinion
     assert combine_verdict({"verdict": "READY"}, {"verdict": "DO_NOT_SUBMIT"}) == "DO_NOT_SUBMIT"
     assert combine_verdict({"verdict": "NEEDS_FIXES"}, {"verdict": "READY"}) == "NEEDS_FIXES"
+
+    # 5b) every failed check carries a concrete fix + the summary lists how_to_fix
+    assert all("fix" in c for c in rb["checks"] if not c["pass"]), rb
+    assert rb.get("how_to_fix") and rb["summary"].get("how_to_fix"), rb.get("summary")
+    fixes_txt = " ".join(str(x) for x in rb["summary"]["how_to_fix"]).lower()
+    assert "chain" in fixes_txt or "account" in fixes_txt, fixes_txt
+
+    # 5c) LIVE CHECK — offline, mocked prober. No scope => never probes. In-scope XSS: unencoded =>
+    # confirmed; encoded => negative signal + fix guidance. Open-redirect => Location signal.
+    import types as _T
+    fake = _T.ModuleType("netget")
+    calls = []
+    def _fake_get(u, headers=None, timeout=15, **kw):
+        calls.append(u)
+        if "payload" in u or "svg" in u:
+            return 200, "<html>&lt;svg/onload=alert(1)&gt;</html>", {}          # encoded reflection
+        return 200, "<html>search results</html>", {"server": "test"}
+    fake.get = _fake_get
+    sys.modules["netget"] = fake
+    try:
+        import targets as _TG
+        bse2 = _tf.mkdtemp()
+        os.makedirs(os.path.join(bse2, "_targets"))
+        json.dump({"program": "acme-live", "in_scope": ["app.example.com"], "out_of_scope": []},
+                  open(os.path.join(bse2, "_targets", "acme-live.json"), "w"))
+        xss = {"vuln_class": "xss", "url": "https://app.example.com/search?q=test",
+               "title": "t", "poc": '"><svg/onload=alert(1)> reflects'}
+        lv = live_check(xss, program="acme-live", base=bse2)
+        assert lv["attempted"] and lv["confirmed"] is False and "encoded" in lv["note"].lower(), lv
+        # unencoded reflection confirms
+        fake.get = lambda u, headers=None, timeout=15, **kw: (200, '..."><svg/onload=alert(1)>...', {})
+        lv2 = live_check(xss, program="acme-live", base=bse2)
+        assert lv2["confirmed"] is True, lv2
+        # no scope => never touched
+        lv3 = live_check(xss, program=None, base=bse2)
+        assert not lv3["attempted"] and "skipped" in lv3["note"], lv3
+        # wired into verify_finding: negative live signal fails the check with a fix attached
+        rlive = verify_finding(xss, program="acme-live", base=bse2, live=True)
+        lc = [c for c in rlive["checks"] if c["check"].startswith("live reproduction")]
+        assert lc and rlive.get("live", {}).get("attempted"), rlive.get("live")
+    finally:
+        sys.modules.pop("netget", None)
     # 6) extract a finding straight from an uploaded report
     report = ("# IDOR on /api/orders exposes other users' orders\n"
               "Severity: High\nURL: https://app.example.com/api/orders/1032\n\n"

@@ -432,7 +432,7 @@ class Handler(BaseHTTPRequestHandler):
                     f["_images"] = intake["images"]
                     f["_files_dir"] = intake.get("dir")               # triager reads images/scripts from here
                     f["_file_names"] = [s["name"] for s in intake["saved"]]
-                res = V.verify_finding(f, program=prog, base=self.base)
+                res = V.verify_finding(f, program=prog, base=self.base, live=bool(b.get("live", True)))
                 res["extracted"] = {k: parsed[k] for k in ("vuln_class", "severity", "url", "title") if parsed.get(k)}
                 if intake:
                     res["uploads"] = {"saved": [s["name"] for s in intake["saved"]],
