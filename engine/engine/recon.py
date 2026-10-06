@@ -352,8 +352,10 @@ def classes_for_param(name, url=""):
 
 
 def _gau_urls(scope, log):
-    """Passive: gau historical parameterized URLs (in-scope). url -> source."""
-    import subprocess
+    """Passive: gau historical parameterized URLs (in-scope). url -> source.
+    Bounded: per-apex timeout + a total time budget + progress logs — a silent
+    multi-apex hang looks exactly like a stuck hunt to the watchdog."""
+    import subprocess, time
     from urllib.parse import urlparse
     if not which("gau"):
         log("params: gau not installed — skipping historical param discovery")
@@ -364,28 +366,48 @@ def _gau_urls(scope, log):
         if h:
             apexes.add(".".join(h.split(".")[-2:]))
     urls = {}
-    for apex in sorted(apexes):
+    apexes = sorted(apexes)
+    t0 = time.time()
+    for i, apex in enumerate(apexes, 1):
+        if time.time() - t0 > 360:                       # total gau budget: 6 min
+            log(f"params: gau budget exhausted after {i-1}/{len(apexes)} apex(es) — continuing with what we have")
+            break
         try:
-            out = subprocess.run(["gau", apex], capture_output=True, text=True, timeout=120).stdout
+            out = subprocess.run(["gau", apex], capture_output=True, text=True, timeout=90).stdout
         except Exception:
             out = ""
         for u in out.splitlines():
             u = u.strip()
             if u and "?" in u and scope.in_scope_host(u):
                 urls.setdefault(u, "gau-historical")
+        if i % 5 == 0 or i == len(apexes):
+            log(f"params: gau {i}/{len(apexes)} apex(es), {len(urls)} URL(s) so far ({int(time.time()-t0)}s)")
     log(f"params: gau -> {len(urls)} in-scope parameterized historical URL(s)"
         + ("" if urls else " (0 — gau likely rate-limited/transient this run; katana below is independent)"))
     return urls
 
 
-def _katana_urls(scope, log, depth=2, timeout=150):
-    """Active live crawl (katana, GET-only) -> in-scope URLs. Independent of gau's flakiness."""
-    import subprocess
+def _katana_urls(scope, log, depth=2, timeout=45, max_seeds=30, budget_s=480):
+    """Active live crawl (katana, GET-only) -> in-scope URLs. Independent of gau's flakiness.
+    Bounded: crawls a ROTATING window of at most max_seeds seeds per pass, per-seed timeout,
+    a total time budget, and progress logs. Before this, a program with hundreds of seeds
+    crawled silently for ~1h and the watchdog (correctly) read it as a stuck hunt."""
+    import subprocess, time, hashlib
     if not which("katana"):
         log("params: katana not installed — skipping live crawl")
         return {}
+    seeds = list(scope.seeds)
+    if len(seeds) > max_seeds:
+        # deterministic rotating window (~per 3h pass): full coverage across passes, bounded per pass
+        off = int(hashlib.md5(str(int(time.time() // 10800)).encode()).hexdigest(), 16) % len(seeds)
+        seeds = (seeds[off:] + seeds[:off])[:max_seeds]
+        log(f"params: katana crawling a rotating window of {len(seeds)}/{len(scope.seeds)} seeds this pass")
     urls, crawled = {}, 0
-    for seed in scope.seeds:
+    t0 = time.time()
+    for i, seed in enumerate(seeds, 1):
+        if time.time() - t0 > budget_s:
+            log(f"params: katana budget exhausted after {i-1}/{len(seeds)} seed(s) — continuing with what we have")
+            break
         try:
             out = subprocess.run(["katana", "-u", seed, "-silent", "-jc", "-d", str(depth),
                                   "-kf", "all", "-c", "10", "-timeout", "10", "-rl", "100"],
@@ -398,6 +420,8 @@ def _katana_urls(scope, log, depth=2, timeout=150):
                 crawled += 1
                 if "?" in u:
                     urls.setdefault(u, "katana-crawl")
+        if i % 5 == 0 or i == len(seeds):
+            log(f"params: katana {i}/{len(seeds)} seed(s), {len(urls)} parameterized so far ({int(time.time()-t0)}s)")
     log(f"params: katana live-crawl -> {crawled} in-scope URL(s), {len(urls)} parameterized")
     return urls
 

@@ -73,8 +73,11 @@ def _pm2(args, timeout=25):
 
 
 def _hunt_running(base):
-    """[{program, pid, running}] from pm2 — so hunts survive bridge restarts/crashes and stay tracked."""
+    """[{program, pid, running, restarts, wd_restarts, log_age_s}] from pm2 + watchdog state —
+    so hunts survive bridge restarts/crashes and stuck-revivals are visible on the panel."""
     import json as _j
+    import os as _o
+    import time as _t
     r = _pm2(["jlist"])
     if not r or not r.stdout:
         return []
@@ -82,13 +85,23 @@ def _hunt_running(base):
         procs = _j.loads(r.stdout)
     except Exception:
         return []
+    try:
+        wd = (_j.load(open(_o.path.join(base, "_watchdog.json"))) or {}).get("restarts", {}) or {}
+    except Exception:  # noqa: BLE001
+        wd = {}
     out = []
     for pr in procs:
         name = pr.get("name", "")
-        if name.startswith("hunt-") and name != "hunt-bridge":
+        if name.startswith("hunt-") and name not in ("hunt-bridge", "hunt-watchdog"):
             env = pr.get("pm2_env", {}) or {}
-            out.append({"program": name[5:], "pid": pr.get("pid"),
-                        "running": env.get("status") == "online", "restarts": env.get("restart_time", 0)})
+            slug = name[5:]
+            try:
+                age = int(_t.time() - _o.path.getmtime(_o.path.join(base, slug, "engine.log")))
+            except OSError:
+                age = None
+            out.append({"program": slug, "pid": pr.get("pid"),
+                        "running": env.get("status") == "online", "restarts": env.get("restart_time", 0),
+                        "wd_restarts": wd.get(name, 0), "log_age_s": age})
     return out
 
 
@@ -246,7 +259,14 @@ class Handler(BaseHTTPRequestHandler):
                 import targets as T
                 return self._send(200, {"targets": T.all_targets(self.base)})
             if p.path == "/hunt/status":
-                return self._send(200, {"hunts": _hunt_running(self.base)})
+                hunts = _hunt_running(self.base)
+                wd = {}
+                try:
+                    wd = json.load(open(os.path.join(self.base, "_watchdog.json"))) or {}
+                except Exception:  # noqa: BLE001
+                    pass
+                return self._send(200, {"hunts": hunts,
+                                        "watchdog": {"ts": wd.get("ts"), "restarts": wd.get("restarts") or {}}})
             if p.path == "/hunt/log":
                 import targets as T
                 q = parse_qs(p.query)
