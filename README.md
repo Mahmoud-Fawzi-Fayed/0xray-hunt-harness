@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
 ![skills](https://img.shields.io/badge/skills-80-blue)
-![engine modules](https://img.shields.io/badge/engine%20modules-31-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-33-blue)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
@@ -110,7 +110,7 @@ qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent �
 | [`harness/.env.example`](harness/.env.example) | every setting documented — copy to `.env` and fill in |
 | [`.cursor/agents/`](.cursor/agents/) | 5 subagents (orchestrator, recon, vuln-hunter, dedup, report) |
 | [`.cursor/rules/`](.cursor/rules/) | always-on rules: SOP, dedup/novelty, triager-grade reporting |
-| [`engine/`](engine/) | the full engine (31 modules) + 80 skills |
+| [`engine/`](engine/) | the full engine (33 modules) + 80 skills |
 | [`MANUAL.md`](MANUAL.md) | the deep operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
