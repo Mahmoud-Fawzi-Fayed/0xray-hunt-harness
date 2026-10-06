@@ -463,7 +463,9 @@ function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURL
 function tick(){loadCore();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
-if(location.hash.startsWith("#fc=")){go("verify");fcResume(location.hash.slice(4));}
+function fcHashGo(){if(location.hash.startsWith("#fc=")){const id=location.hash.slice(4);if(id&&id!==FC_ID){go("verify");fcResume(id);}}}
+if(location.hash.startsWith("#fc="))fcHashGo();
+window.addEventListener("hashchange",fcHashGo);   // pasting a #fc= link in the SAME tab doesn't reload — this catches it
 (function(){const dz=document.getElementById("vf-drop");if(!dz)return;
   ["dragenter","dragover"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.add("over");}));
   ["dragleave","dragend"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.remove("over");}));
