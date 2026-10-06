@@ -316,19 +316,14 @@ class Handler(BaseHTTPRequestHandler):
                 import guardrails as _G
                 import sessions as _SESS
                 _sinv = _SESS.inventory(self.base)
-                # count chat sessions on disk (proves the pool keeps them low, not ballooning)
-                chats = 0
-                cbase = os.path.expanduser("~/.cursor/chats")
-                try:
-                    for ws in os.listdir(cbase):
-                        wsp = os.path.join(cbase, ws)
-                        if os.path.isdir(wsp):
-                            chats += sum(1 for c in os.listdir(wsp) if os.path.isdir(os.path.join(wsp, c)))
-                except OSError:
-                    pass
+                _dead = sum(len(h.get("dead", [])) for h in _sinv["pool_health"].values())
+                _corrupt = sum(1 for h in _sinv["pool_health"].values() if h.get("corrupt"))
                 return self._send(200, {
-                    "sessions": {"chats_on_disk": chats,
+                    "sessions": {"chats_on_disk": len(_sinv["chats"]),
+                                 "transcripts_on_disk": len(_sinv["transcripts"]),
+                                 "orphaned": len(_sinv["transcript_orphans"]) + len(_sinv["empty_chats"]) + len(_sinv["husks"]),
                                  "orphaned_chats": len(_sinv["orphans"]),
+                                 "pool_dead_ids": _dead, "pool_corrupt": _corrupt,
                                  "pool_per_target": int(os.environ.get("HUNT_SESSION_POOL", "3")),
                                  "max_uses": int(os.environ.get("HUNT_SESSION_MAX_USES", "25"))},
                     "websearch": {"ready": True, "provider": "duckduckgo-html"},
@@ -462,6 +457,11 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == "/sessions/clear":
                 import sessions as _SESS
                 r = _SESS.clear_orphans(self.base, confirm=bool(b.get("confirm")))
+                return self._send(200, r)
+
+            if p.path == "/sessions/doctor":
+                import sessions as _SESS
+                r = _SESS.doctor(self.base, confirm=bool(b.get("confirm")))
                 return self._send(200, r)
 
             if p.path == "/sessions/reset":

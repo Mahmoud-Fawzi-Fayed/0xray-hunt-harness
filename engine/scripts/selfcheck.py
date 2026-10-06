@@ -213,10 +213,20 @@ def _session_pool():
         s1["id"] = "sess-abc"; agent._release(s1)
         assert agent._acquire("p")["id"] == "sess-abc"          # slot remembers its session across leases
         # persistence: ids survive a process "restart" (pool cleared + reseeded from per-target file)
+        # — but only sessions that are still ALIVE on disk (a dead id must be dropped, not resumed)
+        _chats = tempfile.mkdtemp(); _proj = tempfile.mkdtemp()
+        os.environ["HUNT_CHATS_DIR"] = _chats; os.environ["HUNT_PROJECTS_DIR"] = _proj
+        os.makedirs(os.path.join(_proj, "ws", "agent-transcripts", "sess-abc"))   # alive
         agent._persist_pool("p")
         assert os.path.isfile(agent._pool_file("p")), "per-target session state file written"
         agent._POOL.clear()
         assert agent._acquire("p")["id"] == "sess-abc", "pool must persist across restarts"
+        # dead persisted id -> skipped on reseed (resuming a dead id silently loses all context)
+        import json as _json
+        _json.dump({"ids": ["sess-dead"]}, open(agent._pool_file("p"), "w"))
+        agent._POOL.clear()
+        assert agent._acquire("p")["id"] is None, "dead pooled id must not be reseeded"
+        os.environ.pop("HUNT_CHATS_DIR", None); os.environ.pop("HUNT_PROJECTS_DIR", None)
     finally:
         agent._POOL.clear()
         if _saved_base is not None:

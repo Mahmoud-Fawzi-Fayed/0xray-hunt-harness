@@ -163,12 +163,26 @@ def _persist_pool(context):
         pass
 
 
+def _session_alive(sid):
+    """True iff the session id exists on disk in any cursor store. cursor-agent --resume on a DEAD id
+    does NOT error — it silently starts a zero-context session under the same id (the 'lost connection'
+    symptom), so existence-on-disk is the only reliable liveness check before resuming."""
+    if not sid:
+        return False
+    try:
+        import sessions as SESS
+        return SESS.is_alive(sid)
+    except Exception:  # noqa: BLE001
+        return True                     # if we can't check, don't break the happy path
+
+
 def _acquire(context):
     with _POOL_LOCK:
         slots = _POOL.setdefault(context, [])
         if not slots:                       # first use in this process: seed from the persisted pool
             for sid in _load_pool_ids(context)[:POOL_SIZE]:
-                slots.append({"id": sid, "model": None, "uses": 0, "inuse": False})
+                if _session_alive(sid):     # skip dead persisted ids — resuming one loses all context
+                    slots.append({"id": sid, "model": None, "uses": 0, "inuse": False})
         for sl in slots:
             if not sl["inuse"]:
                 sl["inuse"] = True
@@ -210,6 +224,11 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
     sl = _acquire(context) if context is not None else {"id": None, "model": None, "uses": 0}
     try:
         reuse = bool(sl["id"] and sl["uses"] < MAX_SESSION_USES and not model)
+        if reuse and not _session_alive(sl["id"]):
+            # dead pooled session (its on-disk dir is gone) — resuming it would silently restart with
+            # zero context; drop it so a fresh session is opened and its NEW id persisted instead.
+            sl.update(id=None, model=None, uses=0)
+            reuse = False
         if reuse:
             m, cmd = sl["model"], _cmd(task, sl["model"], resume_id=sl["id"])
         else:                               # fresh session (rotate to next approved-pool model)
