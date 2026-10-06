@@ -80,6 +80,70 @@
   .drop:hover,.drop.over{border-color:var(--acc);background:#10131c}
   .fchip{display:inline-flex;align-items:center;gap:7px;background:#141a25;border:1px solid var(--line);border-radius:14px;padding:3px 10px;margin:3px 3px 0 0;font-size:12px}
   .fchip .x{cursor:pointer;color:var(--mut);font-weight:700}.fchip .x:hover{color:var(--red)}
+
+  /* ——— professional polish layer (overrides above) ——— */
+  body{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  ::selection{background:rgba(91,150,247,.32)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#242e40;border:2px solid var(--bg);border-radius:8px}
+  ::-webkit-scrollbar-thumb:hover{background:#2e3a52}
+  :focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+  /* nav */
+  nav a{position:relative;transition:all .15s ease;padding:9px 12px}
+  nav a.on{background:linear-gradient(90deg,rgba(91,150,247,.16),rgba(91,150,247,.04));color:var(--ink)}
+  nav a.on::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--acc);box-shadow:0 0 8px rgba(91,150,247,.6)}
+  nav a.on .ic{background:var(--acc);box-shadow:0 0 6px rgba(91,150,247,.7)}
+  /* top bar */
+  .bar{background:rgba(10,12,16,.78);backdrop-filter:blur(10px);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+  .bar h1{font-size:15px;font-weight:650}
+  /* cards */
+  .box{border-radius:12px;background:linear-gradient(180deg,#12161f 0%,#10141c 100%);box-shadow:0 1px 2px rgba(0,0,0,.28)}
+  .box>.h{padding:12px 16px}
+  .box>.b{padding:14px 16px}
+  /* kpis */
+  .kpis{border-radius:12px}
+  .kpi{transition:background .15s ease}
+  .kpi:hover{background:#131824}
+  .kpi .v{font-size:26px;font-weight:700;letter-spacing:-.02em}
+  /* tables */
+  tbody tr{transition:background .12s ease}
+  tbody tr:hover td{background:rgba(91,150,247,.035)}
+  /* inputs */
+  input,textarea,select{background:#0b0f16;border-color:#212a3b;border-radius:8px;padding:9px 12px;transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+  input::placeholder,textarea::placeholder{color:#48505f}
+  input:hover,textarea:hover,select:hover{border-color:#2c3850}
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(91,150,247,.16);background:#0c1119}
+  input[type=checkbox]{width:auto;accent-color:var(--acc);cursor:pointer}
+  select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%237d8695' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px;cursor:pointer}
+  label{margin-bottom:5px}
+  /* buttons */
+  button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-color:#232c3e;background:linear-gradient(180deg,#171d29,#131824);padding:7px 14px;border-radius:8px;font-size:12.5px;letter-spacing:.01em;transition:all .15s ease;white-space:nowrap;user-select:none}
+  button:hover{border-color:#33405a;background:linear-gradient(180deg,#1b2231,#151b28);transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.3)}
+  button:active{transform:translateY(0);box-shadow:none}
+  button:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
+  button.pri{background:linear-gradient(180deg,#3f7aef,#2f6ae0);border-color:#4a85f5;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 4px 14px rgba(47,106,224,.28)}
+  button.pri:hover{background:linear-gradient(180deg,#4c88f6,#3774ec);border-color:#5b96f7;box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 6px 18px rgba(47,106,224,.42)}
+  button.danger{color:#ff9d95;border-color:rgba(240,90,79,.35);background:rgba(240,90,79,.07)}
+  button.danger:hover{background:rgba(240,90,79,.15);border-color:rgba(240,90,79,.55);box-shadow:0 3px 10px rgba(240,90,79,.12)}
+  button.ghost{background:transparent;border-color:transparent;color:var(--mut)}
+  button.ghost:hover{color:var(--ink);background:#151b27;border-color:var(--line);box-shadow:none}
+  button.sm{padding:3px 10px;font-size:11.5px;border-radius:6px}
+  /* chips */
+  .chip{border-radius:5px;padding:2px 8px}
+  .fchip{border-radius:16px;transition:border-color .15s ease}
+  .fchip:hover{border-color:#2c3850}
+  /* dropzone */
+  .drop{border-radius:12px;transition:all .18s ease}
+  .drop:hover,.drop.over{border-color:var(--acc);background:#0e1420;box-shadow:inset 0 0 0 1px rgba(91,150,247,.25),0 0 24px rgba(91,150,247,.06)}
+  /* terminal */
+  .term{border-radius:8px;box-shadow:inset 0 2px 8px rgba(0,0,0,.4)}
+  /* fix-chat sidebar items */
+  .fc-item{transition:border-color .15s ease,background .15s ease}
+  .fc-item:hover{border-color:#33405a !important;background:#121826 !important}
+  /* misc */
+  details>summary{transition:color .15s ease}
+  details>summary:hover{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -181,7 +245,7 @@
     <section class="page" id="p-verify">
       <div class="box"><div class="h"><span class="t">Verify a finding before you report it</span><span class="dim" style="font-size:11px">upload your report + evidence → READY / NEEDS-FIXES / DO-NOT-SUBMIT</span></div><div class="b">
         <div id="vf-drop" class="drop" onclick="document.getElementById('vf-files').click()">
-          <div style="font-size:26px;line-height:1">⬆</div>
+          <div style="line-height:1;color:var(--acc)"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0l-4 4m4-4l4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg></div>
           <div style="margin-top:6px"><b>Drop your report + evidence here</b>, or <span style="color:var(--acc)">click to choose</span></div>
           <div class="dim" style="font-size:11px;margin-top:4px">multiple files OK — report (.md/.txt/.json) + screenshots / HAR / request-response. Class, severity, URL, steps, PoC &amp; impact are auto-extracted from the files.</div>
           <input type="file" id="vf-files" multiple style="display:none" onchange="vfAddFiles(this.files);this.value='';">
@@ -294,8 +358,8 @@ async function loadCore(){try{
   if(CURLOG)sel.value=CURLOG;
   document.getElementById("tg").innerHTML=(t.targets||[]).map(x=>{const sg=slug(x.name);const on=RUN[sg]&&RUN[sg].running;
     return `<tr><td><b>${esc(x.name)}</b></td><td>${(x.in_scope||[]).length}</td><td class="tag">${esc((x.monitor_apexes||[]).slice(0,4).join(", "))}</td>
-      <td>${on?`<span class="chip c-run">running</span> <button class="danger" onclick="stopHunt('${esc(x.name)}')">Stop</button>`:`<button onclick="startHunt('${esc(x.name)}')">Start</button>`}</td>
-      <td><button class="ghost" onclick="removeTarget('${esc(x.name)}')">Remove</button></td></tr>`;}).join("")||`<tr><td colspan="5" class="empty" style="padding:14px">No targets — add one below.</td></tr>`;
+      <td>${on?`<span class="chip c-run">running</span> <button class="danger sm" onclick="stopHunt('${esc(x.name)}')">Stop</button>`:`<button class="sm" onclick="startHunt('${esc(x.name)}')">Start</button>`}</td>
+      <td><button class="ghost sm" onclick="removeTarget('${esc(x.name)}')">Remove</button></td></tr>`;}).join("")||`<tr><td colspan="5" class="empty" style="padding:14px">No targets — add one below.</td></tr>`;
 }catch(e){live(false);}}
 function modelBars(models,el){const ent=Object.entries(models||{}).sort((a,b)=>b[1]-a[1]);const max=Math.max(1,...ent.map(e=>e[1]));
   el.innerHTML=ent.length?ent.map(([m,c])=>`<div class="mrow"><span class="mono">${esc(m)}</span><span class="n">${c}</span></div><div class="mbar"><i style="width:${Math.round(c/max*100)}%"></i></div>`).join(""):`<div class="empty">no steps yet</div>`;}
@@ -397,8 +461,8 @@ function fcUuid(){return (crypto.randomUUID?crypto.randomUUID():"xxxxxxxx-xxxx-4
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
   document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
 function fcLog(role,text,cls){const l=document.getElementById("fc-log");
-  const bubble=role==="you"?`align-self:flex-end;background:#15203a;border:1px solid #22335c;max-width:85%`:(role==="agent"?`align-self:flex-start;background:#101728;border:1px solid var(--line);max-width:85%`:`align-self:center;max-width:95%`);
-  l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:10px;padding:8px 12px"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
+  const bubble=role==="you"?`align-self:flex-end;background:linear-gradient(180deg,#1a2a4a,#152138);border:1px solid #2a3f6e;max-width:85%`:(role==="agent"?`align-self:flex-start;background:#101725;border:1px solid #1e2736;max-width:85%`:`align-self:center;max-width:95%`);
+  l.insertAdjacentHTML("beforeend",`<div style="${bubble};border-radius:12px;padding:9px 13px;box-shadow:0 2px 8px rgba(0,0,0,.22)"><div class="dim" style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px">${role}</div><div style="white-space:pre-wrap;font-size:13px;${cls||""}">${esc(text)}</div></div>`);l.scrollTop=l.scrollHeight;}
 function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
 function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
 async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const el=document.getElementById("fc-list");const wrap=document.getElementById("fc-wrap");
@@ -406,10 +470,10 @@ async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const 
   el.innerHTML=chats.map(c=>{const mins=c.created?Math.max(0,Math.round((Date.now()/1000-c.created)/60)):0;
     const age=mins>=60?Math.round(mins/60)+"h ago":mins+"m ago";
     const vc={READY:"var(--grn)",NEEDS_FIXES:"var(--amb)",DO_NOT_SUBMIT:"var(--red)"}[c.verdict]||"var(--mut)";
-    return `<div style="padding:7px 8px;border:1px solid ${c.chat_id===FC_ID?'var(--acc)':'var(--line)'};border-radius:8px;margin-bottom:6px;cursor:pointer;background:${c.chat_id===FC_ID?'#101728':'transparent'}" onclick="fcPick('${c.chat_id}')">`+
+    return `<div class="fc-item" style="padding:8px 10px;border:1px solid ${c.chat_id===FC_ID?'var(--acc)':'var(--line)'};border-radius:10px;margin-bottom:6px;cursor:pointer;background:${c.chat_id===FC_ID?'#121a2c':'transparent'}" onclick="fcPick('${c.chat_id}')">`+
     `<div style="font-size:12px;font-weight:600">${esc(c.program||"adhoc")} <span class="dim" style="font-weight:400">${esc(c.chat_id.slice(0,8))}…</span></div>`+
     `<div class="dim" style="font-size:11px;margin-top:2px">${c.files} file(s) · ${age}${c.verdict?` · <span style="color:${vc}">${esc(c.verdict)}</span>`:""}</div>`+
-    `<div style="margin-top:5px"><button class="ghost" style="padding:1px 8px;font-size:11px" onclick="event.stopPropagation();fcPick('${c.chat_id}')">Open</button> <button class="danger" style="padding:1px 8px;font-size:11px" onclick="event.stopPropagation();fcCloseId('${c.chat_id}')">Remove</button></div></div>`;}).join("")||'<div class="empty" style="padding:8px">No open chats.</div>';
+    `<div style="margin-top:6px;display:flex;gap:6px"><button class="ghost sm" onclick="event.stopPropagation();fcPick('${c.chat_id}')">Open</button><button class="danger sm" onclick="event.stopPropagation();fcCloseId('${c.chat_id}')">Remove</button></div></div>`;}).join("")||'<div class="empty" style="padding:8px">No open chats.</div>';
   if(chats.length||FC_ID){wrap.style.display="grid";}else{wrap.style.display="none";document.getElementById("fc-box").style.display="none";}
   }catch(e){}}
 function fcPick(id){if(id===FC_ID)return;location.hash="fc="+id;}   // the hashchange listener resumes it
