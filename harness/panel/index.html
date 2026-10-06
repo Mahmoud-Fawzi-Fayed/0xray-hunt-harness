@@ -141,6 +141,11 @@
   /* fix-chat sidebar items */
   .fc-item{transition:border-color .15s ease,background .15s ease}
   .fc-item:hover{border-color:#33405a !important;background:#121826 !important}
+  /* comfortable chat: centered column, collapsible history sidebar */
+  #fc-box{max-width:960px;width:100%;margin:0 auto}
+  #fc-wrap{align-items:start}
+  #fc-wrap.sideoff{grid-template-columns:1fr}
+  #fc-wrap.sideoff>#fc-side{display:none}
   /* misc */
   details>summary{transition:color .15s ease}
   details>summary:hover{color:var(--ink)}
@@ -308,10 +313,10 @@
         <div id="vf-msg" class="msg"></div></div></div>
       <div class="box" id="vf-resultbox" style="display:none"><div class="h"><span class="t">Verdict</span></div><div class="b" id="vf-result"></div></div>
       <div id="fc-wrap" style="display:none;gap:14px">
-        <div class="box"><div class="h"><span class="t">Chats</span><span class="dim" style="font-size:11px">open — click to resume</span></div><div class="b" id="fc-list" style="padding:8px"><div class="empty" style="padding:8px">No open chats.</div></div></div>
-        <div class="box" id="fc-box"><div class="h"><span class="t">Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
+        <div class="box" id="fc-side"><div class="h"><span class="t">Chats</span><span style="display:flex;align-items:center;gap:6px"><span class="dim" style="font-size:11px">open — click to resume</span><button class="ghost sm" onclick="fcSide(false)" title="Hide the chat list">‹</button></span></div><div class="b" id="fc-list" style="padding:8px"><div class="empty" style="padding:8px">No open chats.</div></div></div>
+        <div class="box" id="fc-box"><div class="h"><span class="t"><button class="ghost sm" id="fc-showside" onclick="fcSide(true)" style="display:none;margin-right:8px">☰ chats</button>Fix chat — agent edits your files</span><span class="dim" style="font-size:11px">id in URL · refresh-safe · closing removes session + files</span></div><div class="b">
         <div id="fc-files" style="margin-bottom:10px"></div>
-        <div id="fc-log" style="max-height:340px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:12px;background:#0b0f1a;margin-bottom:10px;display:flex;flex-direction:column;gap:10px"></div>
+        <div id="fc-log" style="max-height:min(56vh,620px);min-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:14px;background:#0b0f1a;margin-bottom:10px;display:flex;flex-direction:column;gap:10px"></div>
         <div style="display:flex;gap:8px"><input id="fc-input" placeholder="e.g. tighten the impact section, add the two-account steps…" style="flex:1" onkeydown="if(event.key==='Enter')fcSend();"><button class="pri" id="fc-send" onclick="fcSend()">Send</button><button class="ghost" id="fc-cancel" onclick="fcCancelOpen()" style="display:none">Cancel</button></div>
         <div style="margin-top:10px;display:flex;align-items:center;gap:10px"><button class="danger" onclick="fcClose()">Close chat &amp; remove files + session</button><span id="fc-msg" class="msg"></span></div>
       </div></div>
@@ -518,6 +523,9 @@ async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const 
   if(chats.length||FC_ID){wrap.style.display="grid";}else{wrap.style.display="none";document.getElementById("fc-box").style.display="none";}
   }catch(e){}}
 function fcPick(id){if(id===FC_ID)return;location.hash="fc="+id;}   // the hashchange listener resumes it
+function fcSide(on){document.getElementById("fc-wrap").classList.toggle("sideoff",!on);
+  document.getElementById("fc-showside").style.display=on?"none":"inline-flex";
+  try{localStorage.setItem("fc-side",on?"1":"0");}catch(e){}}
 async function fcCloseId(id){if(!confirm("Remove this chat? Its files + agent session are deleted."))return;
   try{await api("/verify/fixchat/close","POST",{chat_id:id});
     if(id===FC_ID){FC_ID=null;fcHash(null);document.getElementById("fc-box").style.display="none";}
@@ -587,6 +595,7 @@ function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURL
 function tick(){loadCore();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
+try{if(localStorage.getItem("fc-side")==="0")fcSide(false);}catch(e){}
 function fcHashGo(){if(location.hash.startsWith("#fc=")){const id=location.hash.slice(4);if(id&&id!==FC_ID){go("verify");fcResume(id);}}}
 if(location.hash.startsWith("#fc="))fcHashGo();
 window.addEventListener("hashchange",fcHashGo);   // pasting a #fc= link in the SAME tab doesn't reload — this catches it
