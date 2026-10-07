@@ -215,11 +215,12 @@ _PROOF_SHOWN = re.compile(
     r"|169\.254\.169\.254|metadata.*(token|credential|role)"
     r"|union select|sleep\(\d|extracted (the )?(data|rows|password|hash|version)"
     r"|stole (the )?(session|token|cookie)|session (token |cookie )?(stolen|hijacked|exfiltrated)"
-    # info-disclosure proof: sensitive internal data actually RETURNED in the response (a config/secret dump)
-    r"|response (?:contains?|returned|included?|exposes?|lists?) [^\n]{0,50}"
-    r"(?:config|secret|credential|token|api[_ ]?key|internal|employee|service account|system prompt|private key)"
-    r"|\d[\d,]{2,}[^\n]{0,30}(?:config(?:uration)?|secret|credential|record|entr(?:y|ies))"
-    r"|(?:gcp|aws|azure) (?:project|account) (?:number|id)|service account id|dynamic ?config",
+    # info-disclosure proof — GENERIC (any class/target, no finding-specific nouns): sensitive data actually
+    # RETURNED in a response, or a quantified dump. Works for configs, PII, invoices, secrets, keys, etc.
+    r"|(?:response|endpoint|api|server)\b[^\n]{0,20}(?:contains?|returned|included?|expos\w+|disclos\w+|leak\w*|lists?)"
+    r"[^\n]{0,60}(?:secret|credential|password|token|api[_ ]?key|private key|internal|sensitive|personal|pii|another|other user)"
+    r"|\d[\d,]{2,}\s+(?:entr(?:y|ies)|records?|rows?|users?|accounts?|objects?|items?)\b"
+    r"[^\n]{0,20}(?:returned|exposed|disclos\w+|leaked|accessible|in the response)",
     re.I)
 
 

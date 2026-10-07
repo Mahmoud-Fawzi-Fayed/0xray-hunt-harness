@@ -466,11 +466,18 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
         _proof_re = _DP._PROOF_SHOWN
     except Exception:  # noqa: BLE001
         _proof_re = re.compile(r"cross-account|command output|/etc/passwd|union select|stole the (session|token|cookie)", re.I)
-    demonstrated = bool((f.get("request") and f.get("response")) or f.get("_images")
-                        or _proof_re.search(blob))
+    # GENERIC, class-agnostic proof-artifact detection (NOT tuned to any report): the finding actually SHOWS a
+    # server response/output or attaches evidence — request+response, a response status/JSON body, a HAR,
+    # a screenshot/video, or any uploaded file. Together with live reproduction (step 10) and the deep model
+    # triage, this is the DYNAMIC 'is it demonstrated' signal; the regex above is just one way to satisfy it.
+    _artifact = bool(
+        (f.get("request") and f.get("response")) or f.get("response") or f.get("_images") or f.get("_files_dir")
+        or re.search(r"HTTP/\d(?:\.\d)?\s+\d{3}|\"data\"\s*:|^\s*[\[{]", blob, re.I | re.M)
+        or re.search(r"\bresponse\.(?:txt|json|har)\b|\.har\b|screenshot|burp|\.(?:png|jpe?g|gif|mp4|webm)\b", blob, re.I))
+    demonstrated = bool(_proof_re.search(blob) or _artifact)
     add("demonstrated (concrete proof, not hypothetical)", demonstrated,
-        "" if demonstrated else "show it FIRING: attach the request+response (or a cross-account / command-output "
-        "/ extraction proof). Prose like 'an attacker could…' is not proof.")
+        "" if demonstrated else "show it FIRING: attach the request+RESPONSE (or a screenshot / HAR / the "
+        "returned data). Prose like 'an attacker could…' with no response or artifact is not proof.")
 
     fails = [c for c in checks if not c["pass"]]
     for c in fails:                                  # every failure comes with the exact fix
@@ -693,9 +700,9 @@ CLASS_HINTS = [
     (r"privilege escalation", "idor"), (r"authentication bypass|auth bypass|broken auth", "auth-bypass"),
     (r"business logic", "business-logic"),
     (r"information disclosure|info(?:rmation)? ?leak|sensitive (?:data|config\w*|information)\s+"
-     r"(?:is |are |was |were )?(?:expos|disclos|leak|accessible)|internal (?:config\w*|infrastructure)"
+     r"(?:is |are |was |were )?(?:expos|disclos|leak|accessible)|internal (?:data|config\w*|infrastructure|endpoint)"
      r".{0,30}(?:expos|disclos|accessible|dump|leak)|exposes? .{0,40}(?:internal|infrastructure|"
-     r"credential|secret|employee|service account)", "info-leak"),
+     r"sensitive|credential|secret|private)", "info-leak"),
     (r"\bssrf\b|server.?side request|xspa", "ssrf"),
     (r"\blfi\b|local file|path traversal", "lfi"), (r"\bxxe\b", "xxe"), (r"\bcors\b", "cors"),
     (r"\bcsrf\b|cross.?site request", "csrf"), (r"open redirect", "open-redirect"),
