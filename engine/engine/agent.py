@@ -97,8 +97,8 @@ def _run_once(cmd, m, timeout):
         return {"result": res, "error": "rate-limited" if rl else "agent-error", "model": m, "duration_s": dur}
     if any(k in low for k in ("usage limit", "rate limit", "quota exceeded")):
         return {"result": res, "error": "rate-limited", "model": m, "duration_s": dur}
-    return {"result": res, "error": None, "model": m, "session_id": data.get("session_id"),
-            "usage": data.get("usage"), "duration_s": dur}
+    return {"result": res, "error": None, "model": data.get("model") or m,
+            "session_id": data.get("session_id"), "usage": data.get("usage"), "duration_s": dur}
 
 
 # --- session pool (minimise chat sessions) -----------------------------------------------------------
@@ -181,6 +181,17 @@ def _load_pool_ids(context):
         return []
 
 
+def _load_pool_models(context):
+    """{id: model} for persisted pool sessions, so a RESUMED session keeps its model LABEL across
+    restarts. Without this, every resumed session logs model=None in the activity panel even though
+    cursor-agent is still running it on its original approved-pool model."""
+    try:
+        m = json.load(open(_pool_file(context))).get("models", {})
+        return m if isinstance(m, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _persist_pool(context):
     """Save THIS target's live session ids (per-target file) so stop+rerun RESUMES them, no new sessions.
     Snapshot under the lock (no mid-iteration mutation) + atomic write (no torn file under concurrency)."""
@@ -189,10 +200,12 @@ def _persist_pool(context):
             slots = list(_POOL.get(context, []))
             ids = [s["id"] for s in slots if s.get("id")]
             model = slots[0].get("model") if slots else None
+            models = {s["id"]: s["model"] for s in slots if s.get("id") and s.get("model")}
         path = _pool_file(context)
         tmp = path + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump({"context": context, "ids": ids, "ts": time.time(), "model": model}, fh)
+            json.dump({"context": context, "ids": ids, "models": models,
+                       "ts": time.time(), "model": model}, fh)
         os.replace(tmp, path)                   # atomic: readers never see a half-written file
     except Exception:  # noqa: BLE001
         pass
@@ -215,9 +228,10 @@ def _acquire(context):
     with _POOL_LOCK:
         slots = _POOL.setdefault(context, [])
         if not slots:                       # first use in this process: seed from the persisted pool
+            models = _load_pool_models(context)
             for sid in _load_pool_ids(context)[:POOL_SIZE]:
                 if _session_alive(sid):     # skip dead persisted ids — resuming one loses all context
-                    slots.append({"id": sid, "model": None, "uses": 0, "inuse": False})
+                    slots.append({"id": sid, "model": models.get(sid), "uses": 0, "inuse": False})
         for sl in slots:
             if not sl["inuse"]:
                 sl["inuse"] = True
@@ -287,6 +301,8 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
             if r.get("session_id"):
                 sl["id"] = r["session_id"]  # remember so the next call --resume's it (across rounds too)
                 _register_created(r["session_id"])   # harness-owned id -> eligible for safe auto-prune
+            if r.get("model") and not sl.get("model"):
+                sl["model"] = r["model"]    # learn a resumed session's model -> labeled in activity + persisted
             if r.get("error") not in _RETRYABLE or attempt >= attempts:
                 break
             time.sleep(2 * attempt)
