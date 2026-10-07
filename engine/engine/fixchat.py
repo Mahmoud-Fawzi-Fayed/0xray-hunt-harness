@@ -30,7 +30,7 @@ DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
-MSG_TIMEOUT = int(os.environ.get("HUNT_FIXCHAT_TIMEOUT", "900"))   # active repro (accounts + re-test) needs time
+MSG_TIMEOUT = int(os.environ.get("HUNT_FIXCHAT_TIMEOUT", "2400"))  # active repro (accounts + re-test + rewrite) needs time
 
 
 def _slug(s):
