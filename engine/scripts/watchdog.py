@@ -162,6 +162,31 @@ def run_once(quiet=False):
             alerts.append(f"suite over capacity on {CORES} cores — stopped hunt-{slug} "
                           f"(box max {MAX_HUNTS_BOX}; raise WATCHDOG_MAX_HUNTS_BOX or use a bigger box)")
 
+    # 1c. AUTO-FILL — a free slot (a target was shed/deleted and the box is UNDER its suite cap) gets the
+    # highest-YIELD not-running target (data-driven: yieldrank.rank_targets). Fill-only — it never kills a
+    # running hunt, and it counts ALL pm2 hunt entries (incl. ones about to be revived) so it cannot thrash.
+    # Off with HUNT_AUTOFILL=0.
+    if os.environ.get("HUNT_AUTOFILL", "1") == "1":
+        existing = [p.get("name", "")[5:] for p in _pm2_jlist()
+                    if p.get("name", "").startswith("hunt-")
+                    and p.get("name") not in ("hunt-bridge", "hunt-watchdog")]
+        if len(existing) < MAX_HUNTS_BOX:
+            try:
+                import yieldrank as _YR
+                ranked = _YR.rank_targets(BASE, running=existing)
+            except Exception:  # noqa: BLE001
+                ranked = []
+            runsh = os.environ.get("HUNT_RUN_SH", "/root/BugHunting_0xRay/harness/hunt-run.sh")
+            interval = os.environ.get("HUNT_DEFAULT_INTERVAL", "600")
+            for r in ranked[:MAX_HUNTS_BOX - len(existing)]:
+                prog = r["program"]
+                tj = os.path.join(BASE, "_targets", prog + ".json")
+                if os.path.exists(runsh) and os.path.exists(tj):
+                    _pm2("start", runsh, "--name", "hunt-" + prog, "--interpreter", "bash", "--", tj, interval)
+                    actions.append(f"autofill: free slot -> started hunt-{prog} "
+                                   f"(yield {r['score']}: {', '.join(r['reasons'][:2])})")
+                    alerts.append(f"autofill: started hunt-{prog} to use a free slot")
+
     # 2/3. per-hunt health
     revived = dict(prev.get("revived", {}))     # hunts THE WATCHDOG itself restarted (not manual/pm2 restarts)
     for p in _pm2_jlist():
@@ -232,10 +257,8 @@ def run_once(quiet=False):
     if new_alerts:
         try:
             import notify
-            for a in new_alerts:                   # ON-SITE (panel feed) — the operator's primary surface
+            for a in new_alerts:                   # ON-SITE ONLY (panel feed) — email is reserved for findings
                 notify.site_alert("watchdog", [a], base=BASE, kind="watchdog")
-            notify.send_safe(f"[watchdog] {len(new_alerts)} issue(s) — {new_alerts[0][:60]}…",
-                             summary + "\n\nNew alerts:\n- " + "\n- ".join(new_alerts))
         except Exception:  # noqa: BLE001
             pass
     # append to a small watchdog log

@@ -152,6 +152,58 @@ class Model:
         return rows
 
 
+def rank_targets(base=DEFAULT_BASE, running=None, include_running=False):
+    """Rank REGISTERED targets by expected yield for filling a hunt slot — data-driven from each target's
+    on-disk state (queued/untested surface, auth depth, past confirms/candidates) so it costs nothing (no
+    live probing). Never-hunted targets get an 'explore' baseline so fresh programs get a turn. Returns
+    [{program, score, ...}], best first — used to pick which targets fill the few slots a small box can run."""
+    import glob
+    base = os.path.expanduser(base)
+    running = set(running or [])
+    out = []
+    for f in sorted(glob.glob(os.path.join(base, "_targets", "*.json"))):
+        prog = os.path.basename(f)[:-5]
+        if prog in running and not include_running:
+            continue
+        try:
+            st = json.load(open(os.path.join(base, prog, "state.json")))
+        except Exception:  # noqa: BLE001
+            st = {}
+        surface = len(st.get("surface") or [])
+        tested = st.get("tested")
+        ntested = len(tested) if isinstance(tested, (list, dict)) else 0
+        untested = max(0, surface - ntested)
+        confirmed = len(st.get("confirmed") or [])
+        candidates = len(st.get("candidates") or [])
+        authed = False
+        try:
+            import authn
+            authed = bool(authn.configured(prog, base))
+        except Exception:  # noqa: BLE001
+            pass
+        never = surface == 0
+        # queued work dominates; confirms/candidates are strong signals; auth = deeper reach; a never-hunted
+        # target gets an exploration baseline so fresh surface gets a turn before a picked-over one is re-run.
+        score = (min(untested, 500) * 1.0 + surface * 0.05 + confirmed * 60 + candidates * 12
+                 + (25 if authed else 0) + (40 if never else 0))
+        reasons = []
+        if never:
+            reasons.append("never hunted (explore)")
+        if untested:
+            reasons.append(f"{untested} untested")
+        if authed:
+            reasons.append("authed")
+        if confirmed:
+            reasons.append(f"{confirmed} confirmed")
+        if candidates:
+            reasons.append(f"{candidates} candidate(s)")
+        out.append({"program": prog, "score": round(score, 1), "surface": surface, "untested": untested,
+                    "authed": authed, "confirmed": confirmed, "candidates": candidates,
+                    "running": prog in running, "reasons": reasons or ["no state yet"]})
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="yield-ordered class coverage")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -159,11 +211,23 @@ def main(argv=None):
     pr.add_argument("--base", default=DEFAULT_BASE)
     pr.add_argument("--tech", default="", help="comma-separated detected tech, e.g. next.js,graphql")
     pr.add_argument("--json", action="store_true")
+    rt = sub.add_parser("rank-targets", help="rank registered targets by expected yield for a hunt slot")
+    rt.add_argument("--base", default=DEFAULT_BASE)
+    rt.add_argument("--json", action="store_true")
     sub.add_parser("selftest")
     a = ap.parse_args(argv)
 
     if a.cmd == "selftest":
         return _selftest()
+    if a.cmd == "rank-targets":
+        rows = rank_targets(a.base)
+        if a.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            print(f"{'program':16s} {'score':>7s}  why")
+            for r in rows:
+                print(f"{r['program']:16s} {r['score']:7.1f}  {', '.join(r['reasons'])}")
+        return 0
     tech = [t.strip() for t in a.tech.split(",") if t.strip()]
     rows = Model.load(a.base).rank(tech)
     if a.json:

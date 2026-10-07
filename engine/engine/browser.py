@@ -22,8 +22,11 @@ sys.path.insert(0, ENGINE)
 SKIP_TYPES = {"image", "font", "stylesheet", "media"}
 
 
-def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000, max_req=500):
-    """Render url and return captured requests [{method,url,type}] (XHR/fetch/doc/script/other), scope-filtered."""
+def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000, max_req=500, pages=2):
+    """Render url and return captured requests [{method,url,type}] (XHR/fetch/doc/script/other), scope-filtered.
+    `pages`>0 adds a BOUNDED, read-only deepening pass: scroll (lazy-loaded XHR) + visit up to `pages` more
+    same-/in-scope in-app links (GET navigations only, never logout/delete/pay), under a hard time budget —
+    reaches behind-nav API without turning into a slow crawl."""
     from playwright.sync_api import sync_playwright
     import authn
     reqs, seen = [], set()
@@ -64,6 +67,45 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
         try:
             pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
             pg.wait_for_timeout(int(wait * 1000))
+            if pages > 0:                                   # bounded, read-only deepening (hard budget)
+                import time as _t
+                host0 = urlparse(url).hostname or ""
+
+                def _in_scope(hn):
+                    if not hn:
+                        return False
+                    if scope_hosts:
+                        return any(hn == s or hn.endswith("." + s) for s in scope_hosts)
+                    return hn == host0
+                try:
+                    pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")   # trigger lazy XHR
+                    pg.wait_for_timeout(1200)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    hrefs = pg.eval_on_selector_all("a[href]", "els => els.map(e => e.href)") or []
+                except Exception:  # noqa: BLE001
+                    hrefs = []
+                bad = ("logout", "signout", "sign-out", "/delete", "remove", "/pay", "purchase",
+                       "checkout/complete", "unsubscribe", "cancel")
+                nav, nseen = [], set()
+                for h in hrefs:
+                    hu = urlparse(h)
+                    base = h.split("#")[0]
+                    if (hu.scheme in ("http", "https") and _in_scope(hu.hostname)
+                            and base not in nseen and base != url.split("#")[0]
+                            and not any(x in h.lower() for x in bad)):
+                        nseen.add(base)
+                        nav.append(h)
+                budget = _t.time() + 15                     # hard overall cap for the deepening pass
+                for h in nav[:pages]:
+                    if _t.time() > budget:
+                        break
+                    try:
+                        pg.goto(h, timeout=timeout, wait_until="domcontentloaded")
+                        pg.wait_for_timeout(1500)
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as e:  # noqa: BLE001
             reqs.append({"_nav_error": str(e)[:160]})
         b.close()

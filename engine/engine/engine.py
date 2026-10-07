@@ -36,7 +36,7 @@ CLASS_WEIGHT = {"rce": 100, "sqli": 90, "ssrf": 85, "auth-bypass": 85, "idor": 8
 # OSINT (subdomain/asset enum) is a SEPARATE concern (Claude-OSINT) — not in the engine flow.
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
-ALL_PHASES = ["recon", "rank", "map", "hunt", "validate", "report"]
+ALL_PHASES = ["recon", "rank", "map", "hunt", "validate", "chain", "report"]
 DEFAULT_PHASES = ["recon", "rank", "map"]
 
 # generic infra/hosting/CDN fingerprints that are NOT worth auto-drafting a skill for (too generic)
@@ -211,10 +211,21 @@ class Engine:
             self.eng.add_surface(items)
             self.eng.log(f"recon(mock): {len(items)} item(s)")
             return
-        if self.expand:
-            self._expand_scope()
         import recon as R, osint as O  # deterministic recon: service/tech + endpoints + secrets + params
         from urllib.parse import urlparse
+        # CPU REBALANCE (vuln-first): don't re-run heavy recon (service probe + platform + openapi + SPA/JS
+        # mining) EVERY round — on a small box that starves the hunt. Skip it while the last recon is fresh
+        # AND there's still plenty queued to test; spend the cores on HUNTING. Heavy recon re-runs when the
+        # worklist drains below one hunt-batch (needs fresh surface) or the TTL lapses (catch new surface).
+        ttl = int(os.environ.get("HUNT_RECON_TTL", "10800"))         # 3h default
+        last = self.eng.state.get("recon_ts") or 0
+        queued = len(self.eng.worklist())
+        if last and (time.time() - last) < ttl and queued >= self.max_hunts:
+            self.eng.log(f"recon: cached ({int((time.time()-last)/60)}m old) + {queued} item(s) queued "
+                         f">= {self.max_hunts} — SKIPPING heavy recon, straight to HUNT (cores -> vuln-finding)")
+            return
+        if self.expand:
+            self._expand_scope()
         # AUTHENTICATED recon: when a session exists for this target, run the WHOLE recon as the logged-in
         # user (recon routes _get through netget when HUNT_RECON_IDENT is set) so JS mining + endpoint
         # discovery see the BEHIND-LOGIN app — where the paid bugs live. The session is mirrored into
@@ -265,6 +276,8 @@ class Engine:
         self.eng.log(f"recon: {len(api)} api + {len(plat)} platform + {len(endpoints)} endpoint + "
                      f"{len(params)} param -> {added} categorized (target,class) work unit(s)")
         self._deep_recon(R)                    # authed GraphQL introspection + headless SPA API capture
+        self.eng.state["recon_ts"] = time.time()   # mark heavy recon done -> next rounds hunt the cache
+        self.eng.save()
 
     def _authn_ready(self):
         """True iff an authn A/B session exists for this target (operator-provided or provisioned, mirrored
@@ -463,6 +476,7 @@ class Engine:
                              f"— not marking tested, will retry next round")
                 continue
             self.eng.mark_tested(it)
+            self._feedback_surface(f)                 # endpoints the agent found mid-hunt -> back into the worklist
             if f and f.get("rate_limited"):
                 self.eng.log("hunt: ⚠ model usage limit hit — remaining results may be partial")
             if f and f.get("vulnerable"):
@@ -534,6 +548,8 @@ class Engine:
                 f'"request":"<the winning request>","hosts_contacted":["every host you sent a request to"],'
                 f'"attacker_holds":"nothing|own_session|link_issued_by_product|foreign_id_shown",'
                 f'"id_source":"not_required|enumerated|product_link|archive|in_scope_oracle|own_only|asserted_leak",'
+                f'"discovered":["<any NEW in-scope endpoint/URL you saw while testing — from JS, redirects, '
+                f'API responses or links; helps the next round go deeper>"],'
                 f'"proof_note":"<empty, or why proof was limited by scope/read-only>"}}.'
                 + self._capabilities_note())
         sess = getattr(self, "_auth_session", None)             # inject the logged-in session if it fits this host
@@ -552,6 +568,82 @@ class Engine:
         if isinstance(f, dict):
             f["_model"], f["_skills"] = r.get("model"), names
         return f
+
+    def _feedback_surface(self, f):
+        """Hunt->recon feedback: in-scope endpoints the agent discovered WHILE testing get added back to the
+        surface (untested -> hunted next round) instead of being lost. Discovery compounds across rounds."""
+        if not isinstance(f, dict):
+            return
+        import recon as _R
+        added = 0
+        for u in (f.get("discovered") or [])[:25]:
+            if not isinstance(u, str) or "://" not in u:
+                continue
+            if self.scope.in_scope_host(u) and _R.is_concrete_target(u):
+                for cls in _R.classify_all({"url": u}):
+                    added += self.eng.add_surface([{"url": u, "vuln_class": cls,
+                                                    "source": "agent-found", "priority": 50}])
+        if added:
+            self.eng.log(f"feedback: +{added} work unit(s) from endpoints the agent found mid-hunt")
+
+    # ---------------- chain ----------------
+    def chain(self):
+        """Chain composer (vuln-first): take confirmed + candidate PRIMITIVES and actively try to COMBINE them
+        into ONE higher-severity chain (open-redirect->OAuth token theft->ATO, IDOR->privesc, SSRF->cloud
+        metadata->cred, XSS->session/ATO, subdomain-takeover->cookie/OAuth). Spends an agent call ONLY when
+        chainable primitives exist -> free on targets that found nothing. In-scope, read-only, end-to-end."""
+        if self.mock:
+            return
+        CHAINABLE = {"open-redirect", "open_redirect", "ssrf", "idor", "xss", "oauth",
+                     "auth-bypass", "subdomain-takeover", "csrf", "host-header"}
+        pool = (self.eng.state.get("confirmed") or []) + (self.eng.state.get("candidates") or [])
+        seen, prims = set(), []
+        for c in pool:
+            k = (c.get("vuln_class"), c.get("url"))
+            if c.get("vuln_class") in CHAINABLE and k not in seen:
+                seen.add(k)
+                prims.append(c)
+        if not prims:
+            return                                   # nothing chainable -> no agent call, no cost
+        self.eng.set_phase("chain")
+        classes = ", ".join(sorted({p.get("vuln_class") for p in prims}))
+        plist = "\n".join(f"  - {p.get('vuln_class')} @ {p.get('url')} | {str(p.get('evidence', ''))[:150]}"
+                          for p in prims[:8])
+        self.eng.log(f"chain: composing from {len(prims)} primitive(s) — {classes}")
+        task = (self._roe() + "\n"
+                "TASK: You have these CONFIRMED/suspected primitives on this target. Actively try to COMPOSE "
+                "them (with each other, or with a documented pattern) into ONE higher-severity CHAIN — e.g. "
+                "open-redirect -> OAuth code/token theft -> account takeover; IDOR -> privilege escalation; "
+                "SSRF -> cloud metadata -> credential; XSS -> session/ATO; subdomain-takeover -> cookie/OAuth "
+                "theft. Prove the chain END-TO-END with real in-scope, read-only requests. If no real chain "
+                "composes, return chained:false — never speculate.\n"
+                f"PRIMITIVES:\n{plist}\n"
+                "End with a fenced ```json``` object: "
+                '{"chained":true|false,"severity":"low|medium|high|critical","chain":"<A -> B -> impact>",'
+                '"evidence":"<requests/responses proving the FULL chain>","request":"<key request(s)>",'
+                '"hosts_contacted":["every host contacted"],"proof_note":"<empty or why limited>"}.'
+                + self._capabilities_note())
+        sess = getattr(self, "_auth_session", None)
+        if sess:
+            _AS = _authmod()
+            if _AS:
+                task += _AS.auth_block(sess, prims[0].get("url", ""))
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)
+        if r.get("error"):
+            self.eng.log(f"chain: agent error ({r['error']}) — will retry next round")
+            return
+        f = A.extract_json(r["result"]) or {}
+        if isinstance(f, dict) and f.get("chained"):
+            oos = self._scope_audit(f)
+            self.eng.add_candidate({
+                "url": prims[0].get("url", ""), "vuln_class": "chain",
+                "severity": f.get("severity", "high"), "evidence": f.get("evidence", ""),
+                "request": f.get("request", ""), "proof_note": f.get("proof_note", ""),
+                "chain": f.get("chain", ""), "components": sorted({p.get("vuln_class") for p in prims[:8]}),
+                "scope_warning": oos or None})
+            self.eng.log(f"chain: ⚠ CHAINED {str(f.get('chain', ''))[:120]} (severity {f.get('severity')})")
+        else:
+            self.eng.log("chain: no end-to-end chain composed from current primitives")
 
     # ---------------- validate ----------------
     def validate(self):

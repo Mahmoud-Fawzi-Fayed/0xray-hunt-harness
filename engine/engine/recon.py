@@ -800,10 +800,11 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
             log("browser-recon: another capture is running box-wide — skipping (2-core safe)")
             return []
         seeds = [s for s in scope.seeds if scope.in_scope_host(s)][:max_seeds]
+        scope_hosts = sorted({urlparse(s).hostname for s in scope.seeds if urlparse(s).hostname})
         out, seen = [], set()
         for seed in seeds:
             try:
-                reqs = B.capture(seed, slug=slug, ident=ident, wait=wait)
+                reqs = B.capture(seed, slug=slug, ident=ident, scope_hosts=scope_hosts, wait=wait, pages=2)
             except Exception as e:  # noqa: BLE001
                 log(f"browser-recon: {seed} failed ({type(e).__name__}: {str(e)[:90]})")
                 continue

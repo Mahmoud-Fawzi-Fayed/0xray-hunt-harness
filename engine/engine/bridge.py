@@ -429,6 +429,20 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == "/auth/list":
                 import authsession as AS
                 return self._send(200, {"sessions": AS.status(self.base)})
+            if p.path == "/targets/rank":
+                import yieldrank as YR
+                running = []
+                try:
+                    jl = _pm2(["jlist"])
+                    procs = json.loads(jl.stdout or "[]") if jl and jl.returncode == 0 else []
+                    running = [x.get("name", "")[5:] for x in procs
+                              if x.get("name", "").startswith("hunt-")
+                              and x.get("name") not in ("hunt-bridge", "hunt-watchdog")
+                              and (x.get("pm2_env", {}) or {}).get("status") == "online"]
+                except Exception:  # noqa: BLE001
+                    pass
+                return self._send(200, {"running": running,
+                                        "targets": YR.rank_targets(self.base, running=running, include_running=True)})
             if p.path == "/auth/check":
                 import authsession as AS
                 import targets as T

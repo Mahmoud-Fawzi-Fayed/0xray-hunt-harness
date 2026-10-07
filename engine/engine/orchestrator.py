@@ -324,7 +324,7 @@ class Orchestrator:
                             pass
             except Exception as e:  # noqa: BLE001
                 self.eng.eng.log(f"auth: provisioning skipped ({type(e).__name__}: {e})")
-        phases = ["recon", "rank", "map"] + (["hunt", "validate"] if self.do_hunt else [])
+        phases = ["recon", "rank", "map"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
         self.eng.run(phases)
         drafted, held = self.draft_gate()
         if drafted:
