@@ -96,36 +96,6 @@
         900,
         300
       ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "__HUNT_BRIDGE_URL__/notify",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "X-Hunt-Token",
-              "value": "__HUNT_BRIDGE_TOKEN__"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ subject: '[hunt] new surface on ' + $json.target, body: 'Changes: ' + ($json.summary || []).join('; ') + '  |  Counts: ' + JSON.stringify($json.counts) }) }}",
-        "options": {
-          "timeout": 30000
-        }
-      },
-      "id": "a5555555-5555-4555-8555-555555555555",
-      "name": "Email alert (via bridge)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1140,
-        220
-      ],
-      "notes": "Sends via the host bridge /notify -> engine notify.py. Uses SMTP_TO/SMTP_CC from .env. No n8n credential needed."
     }
   ],
   "connections": {
@@ -164,13 +134,7 @@
     },
     "Changed?": {
       "main": [
-        [
-          {
-            "node": "Email alert (via bridge)",
-            "type": "main",
-            "index": 0
-          }
-        ],
+        [],
         []
       ]
     }

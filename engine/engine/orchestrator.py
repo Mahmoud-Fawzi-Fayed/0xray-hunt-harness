@@ -339,9 +339,10 @@ class Orchestrator:
         return summary
 
     def _status_email(self, msg):
+        # Email is reserved for findings — operational/crash status goes ON-SITE (panel bell), not mail.
         try:
             import notify
-            notify.send_safe(f"[hunt] {self.eng.scope.name} — status", msg)
+            notify.site_alert(self.eng.scope.name, [msg], base=self.base, kind="ops")
         except Exception:  # noqa: BLE001
             pass
 

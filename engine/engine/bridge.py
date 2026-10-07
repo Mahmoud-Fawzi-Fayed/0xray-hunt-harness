@@ -579,7 +579,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(code, r)
 
             if p.path == "/notify":
-                ok = NO.send_safe(b.get("subject", "(no subject)"), b.get("body", ""),
+                subj = b.get("subject", "(no subject)")
+                # Email is reserved for FINDINGS. Surface/novelty alerts (the novelty monitor's
+                # "new surface on X") are on-site only — /novelty/watch already wrote them to the
+                # alert feed (panel bell). Opt back in per-call with {"email": true} / {"kind":
+                # "finding"}, or globally with HUNT_EMAIL_SURFACE=1.
+                is_surface = ("new surface" in subj.lower()) or (b.get("kind") in ("surface", "novelty"))
+                opt_in = (bool(b.get("email")) or b.get("kind") == "finding"
+                          or os.environ.get("HUNT_EMAIL_SURFACE") == "1")
+                if is_surface and not opt_in:
+                    return self._send(200, {"sent": False, "suppressed": "surface",
+                                            "note": "surface alerts are on-site only; email is reserved for findings"})
+                ok = NO.send_safe(subj, b.get("body", ""),
                                   to=b.get("to"), cc=b.get("cc"), html=b.get("html"))
                 return self._send(200, {"sent": ok, "configured": NO.configured()})
 
