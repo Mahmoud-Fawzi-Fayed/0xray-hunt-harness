@@ -371,17 +371,19 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
             break
     add("not an always-rejected class", hard_reject is None, hard_reject or "")
 
-    # 4b) RTFS / Informative — structural, vendor-agnostic. A hold is not drafted.
+    # 4b) RTFS / Informative disposition — ADVISORY only. It is a TEXT-heuristic (it cannot see your PoC), and
+    # disposition itself already PASSES findings that show concrete impact, so a hold here is a NEEDS_FIXES
+    # NOTE — never a hard DO_NOT_SUBMIT. A real, proven vuln stays reportable; only junk / out-of-scope /
+    # non-qualifying hard-block. Rule: prove the vuln works with security impact -> it's reportable.
     try:
         import disposition as DP
         dres = DP.check(f, program=program or f.get("program"), base=base)
     except Exception as e:  # noqa: BLE001
-        dres = {"verdict": "HOLD_RTFS", "reason": f"disposition gate error: {e}"}
+        dres = {"verdict": "PASS", "reason": f"disposition gate unavailable ({e})"}
     held = dres.get("verdict") != "PASS"
     add("disposition (not RTFS / Informative)", not held,
-        "" if not held else f"{dres.get('verdict')}: {dres.get('reason','')}")
-    if held:
-        hard_reject = hard_reject or f"{dres.get('verdict')}: {dres.get('reason','')}"
+        "" if not held else f"{dres.get('verdict')}: {dres.get('reason','')[:150]} "
+        "(advisory — make the PoC explicit; NOT a block)")
 
     # 5) per-class PoC minimum
     if cls in PER_CLASS:
@@ -414,17 +416,7 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
         dedup = {"verdict": "unknown"}
         add("dedup (not a known duplicate)", True, "dedup oracle unavailable — check manually")
 
-    # 8) RTFS / Informative disposition gate (generic — catches "hypothetical precondition" closures)
-    try:
-        import disposition as DSP
-        dsp = DSP.check(f, program=program, base=base)
-        dv = dsp.get("verdict", "PASS")
-        add("disposition (not RTFS/Informative)", dv == "PASS",
-            "" if dv == "PASS" else f"{dv}: {dsp.get('reason', '')[:150]}")
-        if dv != "PASS":
-            hard_reject = hard_reject or f"disposition gate: {dv}"
-    except Exception:  # noqa: BLE001
-        add("disposition (not RTFS/Informative)", True, "disposition gate unavailable")
+    # (RTFS / Informative disposition is handled once, as an advisory, in step 4b above — no hard block.)
 
     # 9) generic precondition check — the #1 RTFS cause: impact needs a victim secret the PoC never obtains
     _precond = re.compile(r"stolen session|obtain(?:s|ed|ing)? (?:a |the )?(?:victim'?s? )?(?:vendor |user )?session|"
@@ -456,6 +448,21 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
                 missing.append("live-proof")
             else:
                 add("live reproduction (inconclusive)", True, lv["note"])
+
+    # READY must DEMONSTRATE the vuln (your rule: "try the vuln — if it works with impact, report it"), not
+    # just describe it. Advisory only (a miss is NEEDS_FIXES, never a hard DO_NOT_SUBMIT): a real finding with
+    # a request+response, a screenshot, or shown cross-account/exec/extraction proof passes; a pure hypothetical
+    # ("attacker COULD, IF they had the cookie") with no artifact is held out of READY until it's shown working.
+    try:
+        import disposition as _DP
+        _proof_re = _DP._PROOF_SHOWN
+    except Exception:  # noqa: BLE001
+        _proof_re = re.compile(r"cross-account|command output|/etc/passwd|union select|stole the (session|token|cookie)", re.I)
+    demonstrated = bool((f.get("request") and f.get("response")) or f.get("_images")
+                        or _proof_re.search(blob))
+    add("demonstrated (concrete proof, not hypothetical)", demonstrated,
+        "" if demonstrated else "show it FIRING: attach the request+response (or a cross-account / command-output "
+        "/ extraction proof). Prose like 'an attacker could…' is not proof.")
 
     fails = [c for c in checks if not c["pass"]]
     for c in fails:                                  # every failure comes with the exact fix

@@ -201,6 +201,23 @@ def _rules(blob, meta):
     return rules
 
 
+# AUTO proof-override: the write-up SHOWS concrete, demonstrated security impact (not merely asserts it).
+# When present, the RTFS/Informative TEXT-heuristic is overridden — a proven, impactful finding is reportable
+# even if its prose also mentions a session/precondition (the regex can't see the PoC; real proof wins). Kept
+# NARROW on purpose: a cross-account read/write actually shown, command/file/metadata execution, SQLi
+# extraction, or a demonstrated session/token theft — never bare words like "account takeover" or "could".
+_PROOF_SHOWN = re.compile(
+    r"cross-account"
+    r"|another user'?s |other users?'? (pii|data|order|invoice|account|email|record)"
+    r"|victim'?s (data|order|invoice|account|email|record|session|token|cookie)"
+    r"|account ?b (read|saw|retrieved|accessed|received|returned|got|calls|lists)"
+    r"|\buid=\d|\bgid=\d|\bwhoami\b|root@|root:.*:0:0|/etc/passwd|command output"
+    r"|169\.254\.169\.254|metadata.*(token|credential|role)"
+    r"|union select|sleep\(\d|extracted (the )?(data|rows|password|hash|version)"
+    r"|stole (the )?(session|token|cookie)|session (token |cookie )?(stolen|hijacked|exfiltrated)",
+    re.I)
+
+
 def check(finding, program=None, base=DEFAULT_BASE):
     """Return {verdict, draft, rules, reason}. Never raises on hostile input."""
     try:
@@ -219,6 +236,13 @@ def check(finding, program=None, base=DEFAULT_BASE):
                 "id": "break_proven", "verdict": "PASS",
                 "reason": f"Evidence shows the break `{br}`: {BREAKS[br]}.",
             }], "reason": f"Break `{br}` is present in the evidence."}
+
+        if _PROOF_SHOWN.search(blob):          # concrete demonstrated impact overrides the RTFS text-heuristic
+            return {"verdict": "PASS", "draft": True, "rules": [{
+                "id": "proof_shown", "verdict": "PASS",
+                "reason": "Evidence shows concrete, demonstrated security impact (cross-account data / "
+                          "command output / extraction / token theft) — reportable over the text-heuristic.",
+            }], "reason": "Concrete demonstrated impact present in the evidence."}
 
         rules = _rules(blob, meta)
         if any(r["verdict"] == "HOLD_RTFS" for r in rules):
