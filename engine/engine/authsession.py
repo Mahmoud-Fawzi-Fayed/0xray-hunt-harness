@@ -190,8 +190,21 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
     sess = {"success": True, "host": host, "program": slug, "cookies": cookies, "headers": hdrs,
             "user": user or "operator-provided", "source": "manual", "ts": time.time()}
     save(program, sess, base=base)
+    # make the login immediately productive: clear the tested-state so the hunt RE-COVERS its surface
+    # AUTHENTICATED now, instead of waiting out the 48h re-hunt window on already-tested (unauth) items.
+    requeued = 0
+    try:
+        sp = os.path.join(os.path.expanduser(base), slug, "state.json")
+        stt = json.load(open(sp))
+        requeued = len(stt.get("tested") or [])
+        stt["tested"] = {}
+        tmp = sp + ".tmp"
+        json.dump(stt, open(tmp, "w"), indent=2)
+        os.replace(tmp, sp)
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "program": slug, "host": host, "cookies": len(cookies),
-            "headers": list(hdrs.keys()), "user": sess["user"]}
+            "headers": list(hdrs.keys()), "user": sess["user"], "requeued": requeued}
 
 
 def clear_manual(program, base=DEFAULT_BASE):
