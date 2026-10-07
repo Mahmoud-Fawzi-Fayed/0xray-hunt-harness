@@ -217,7 +217,7 @@ def autolearn(kind, name, context="", base=DEFAULT_BASE, research=True, max_resu
     """One call: if there's no skill for `name`, research it and draft one. Idempotent."""
     record_gap(kind, name, context, base=base)
     existing = find_skill(name)
-    if existing and LEARNED_DIR not in existing:
+    if existing:                                    # already have a playbook (built-in OR already auto-drafted)
         return {"skipped": True, "reason": "skill already exists", "path": existing}
     found = []
     if research and WS is not None:

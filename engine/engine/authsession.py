@@ -389,10 +389,14 @@ def _provision_task(program, host, ident, alt_hosts=None):
 
 
 def recent_attempt(program, base=DEFAULT_BASE, cooldown=21600):
-    """True if we tried to provision recently (success OR fail) — so a doomed signup (e.g. a target with
-    no open self-service registration) isn't re-attempted every round, wasting minutes each time."""
+    """True if we tried to provision recently — so a DOOMED signup (no open self-service registration) isn't
+    re-attempted every round. But a TRANSIENT failure (agent timeout / rate-limit — the signup was still in
+    progress, NOT proven impossible) uses a SHORT cooldown so we retry soon instead of locking out for hours."""
     s = load(program, base)
-    return bool(s and (time.time() - s.get("ts", 0) < cooldown))
+    if not s:
+        return False
+    cd = int(os.environ.get("HUNT_PROVISION_RETRY", "1800")) if s.get("transient") else cooldown
+    return bool(time.time() - s.get("ts", 0) < cd)
 
 
 def provision(program, base=DEFAULT_BASE, scope=None, host=None, timeout=None):
@@ -424,9 +428,11 @@ def provision(program, base=DEFAULT_BASE, scope=None, host=None, timeout=None):
     alt_hosts = [h for h in alt_hosts if h and h != host and not _is_thirdparty(h)]
     r = A.run_agent(_provision_task(program, host, ident, alt_hosts=alt_hosts), timeout=timeout, attempts=1)
     if r.get("error"):
+        transient = r["error"] in ("timeout", "rate-limited")   # still-in-progress, not a proven dead-end
         save(program, {"success": False, "program": G._slug(program), "host": host,
-                       "error": "agent: " + r["error"], "ts": time.time()}, base=base)  # cooldown marker
-        return {"error": "agent: " + r["error"], "host": host}
+                       "error": "agent: " + r["error"], "transient": transient,
+                       "ts": time.time()}, base=base)            # cooldown marker (short if transient)
+        return {"error": "agent: " + r["error"], "host": host, "transient": transient}
     data = A.extract_json(r.get("result", "")) or {}
     if not isinstance(data, dict) or not data.get("success"):
         notes = (data.get("notes") if isinstance(data, dict) else "") or (r.get("result", "")[-300:])
