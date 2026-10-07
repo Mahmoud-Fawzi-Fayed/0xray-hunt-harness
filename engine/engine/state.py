@@ -109,16 +109,27 @@ class Engagement:
         tmap = self._tested_map()
         now = time.time()
         ttl = RETEST_HOURS * 3600
-        ranked = []                                # (group, -priority, last_tested): sorts untested first
+        ranked = []                                # (group, -eff_priority, last_tested): sorts untested first
         for s in self.state["surface"]:
             k = self._key(s)
+            ep = -self._eff_priority(s)
             if k not in tmap:
-                ranked.append((0, -s.get("priority", 0), 0.0, s))       # never tested -> cover it first
+                ranked.append((0, ep, 0.0, s))                          # never tested -> cover it first
             elif ttl > 0 and (now - tmap[k]) >= ttl:
-                ranked.append((1, -s.get("priority", 0), tmap[k], s))   # stale -> re-hunt, oldest first
+                ranked.append((1, ep, tmap[k], s))                      # stale -> re-hunt, oldest first
             # else: tested within the window -> not eligible this pass
         ranked.sort(key=lambda t: (t[0], t[1], t[2]))
         return [t[3] for t in ranked]
+
+    @staticmethod
+    def _eff_priority(s):
+        """Effective hunt priority. The agent-found FEEDBACK long-tail sinks below the core recon surface so
+        the hunt covers high-value, session-applicable hosts first instead of a feedback rabbit-hole (which
+        can be a 401-walled help-desk/Zendesk API that dead-ends without a session we don't hold)."""
+        p = s.get("priority", 0)
+        if s.get("source") == "agent-found":
+            p -= 25
+        return p
 
     @staticmethod
     def _key(s):

@@ -90,7 +90,7 @@ class Engine:
         self.parallel = max(1, parallel)
         self.eng.log(f"engine start | scope={self.scope.name} in={self.scope.in_scope} "
                      f"out={self.scope.out_of_scope} seeds={self.scope.seeds} mock={mock} "
-                     f"intrusive={'ALLOWED' if allow_intrusive else 'READ-ONLY (default)'}")
+                     f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}")
 
     # ---------------- rules of engagement (injected into every agent) ----------------
     def _roe(self):
@@ -577,20 +577,31 @@ class Engine:
 
     def _feedback_surface(self, f):
         """Hunt->recon feedback: in-scope endpoints the agent discovered WHILE testing get added back to the
-        surface (untested -> hunted next round) instead of being lost. Discovery compounds across rounds."""
+        surface. GUARDED so it can't rabbit-hole: a per-host CAP stops one subdomain (e.g. a 401-walled
+        help-desk / Zendesk API) from exploding the surface into hundreds of dead-ends, and agent-found items
+        get LOWER priority than the core recon surface so the high-value, session-applicable hosts hunt FIRST."""
         if not isinstance(f, dict):
             return
         import recon as _R
+        from urllib.parse import urlparse
+        from collections import Counter
+        cap = int(os.environ.get("HUNT_FEEDBACK_HOST_CAP", "40"))
+        per_host = Counter(urlparse(s.get("url", "")).hostname for s in self.eng.state.get("surface", []))
         added = 0
         for u in (f.get("discovered") or [])[:25]:
             if not isinstance(u, str) or "://" not in u:
                 continue
+            h = urlparse(u).hostname
+            if per_host.get(h, 0) >= cap:                 # host already well-covered -> don't amplify a dead-end
+                continue
             if self.scope.in_scope_host(u) and _R.is_concrete_target(u):
                 for cls in _R.classify_all({"url": u}):
-                    added += self.eng.add_surface([{"url": u, "vuln_class": cls,
-                                                    "source": "agent-found", "priority": 50}])
+                    if self.eng.add_surface([{"url": u, "vuln_class": cls,
+                                              "source": "agent-found", "priority": 30}]):
+                        added += 1
+                        per_host[h] += 1
         if added:
-            self.eng.log(f"feedback: +{added} work unit(s) from endpoints the agent found mid-hunt")
+            self.eng.log(f"feedback: +{added} work unit(s) from endpoints the agent found mid-hunt (host cap {cap})")
 
     # ---------------- chain ----------------
     def chain(self):
