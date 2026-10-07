@@ -322,8 +322,8 @@
         <div class="b" style="padding:0"><table><thead><tr><th>Program</th><th>In-scope</th><th>Monitored apexes</th><th>Hunt</th><th></th></tr></thead><tbody id="tg"><tr><td colspan="5" class="empty" style="padding:14px">loading…</td></tr></tbody></table></div></div>
       <div class="box"><div class="h"><span class="t">Authenticated access — provide a ready test login</span><span class="dim" style="font-size:11px">for programs that block self-registration · in-scope only · the hunt reuses it read-only</span></div><div class="b">
         <div class="row2"><div class="fld"><label>Program</label><select id="auProg"></select></div>
-          <div class="fld"><label>Host this login is for</label><input id="auHost" placeholder="www.vinted.com"></div></div>
-        <div class="fld"><label>Cookies — paste the <b>Cookie</b> header (DevTools → Network → a request → Request Headers → Cookie), or <span class="mono">name=value; name2=value2</span></label><textarea id="auCookie" placeholder="sessionid=abc123; csrftoken=xyz; ..."></textarea></div>
+          <div class="fld"><label>Host <span class="dim" style="text-transform:none;letter-spacing:0">(optional — auto-detected from the cookies)</span></label><input id="auHost" placeholder="auto (e.g. www.vinted.com)"></div></div>
+        <div class="fld"><label>Cookies — paste any of: a cookie-extension <b>JSON export</b> (Cookie-Editor / EditThisCookie), a pasted <b>curl</b> command, or the raw <b>Cookie</b> header (<span class="mono">name=value; name2=value2</span>)</label><textarea id="auCookie" placeholder='Paste a cookie JSON export, a curl command, or:  sessionid=abc123; csrftoken=xyz' style="min-height:120px"></textarea></div>
         <div class="fld"><label>…or an API token / Bearer (optional — used as Authorization header)</label><input id="auToken" placeholder="eyJ…"></div>
         <button class="pri" onclick="authSet()">Save login &amp; hunt authenticated</button>
         <span class="dim" style="margin-left:10px;font-size:11px">Use a <b>disposable test account</b>. On save, the hunt restarts so it tests behind login immediately.</span>
@@ -585,7 +585,7 @@ async function authList(){try{const j=await api("/auth/list");const s=j.sessions
   const el=document.getElementById("auList");if(!el)return;
   el.innerHTML=keys.length?`<div class="dim" style="font-size:11px;margin-bottom:6px">SAVED LOGINS</div>`+keys.map(k=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #141a25"><span>🔑 <b>${esc(k)}</b> <span class="dim" style="font-size:11px">· ${esc(s[k].host||"")} · ${s[k].cookies||0} cookie(s)${(s[k].headers&&s[k].headers.length)?" + "+esc(s[k].headers.join(",")):""} · ${esc(s[k].source||"")}</span></span><button class="danger sm" onclick="authClear('${esc(k)}')">Remove</button></div>`).join(""):`<div class="empty" style="padding:6px">No logins saved — these hunts run unauthenticated.</div>`;}catch(e){}}
 async function authSet(){const program=(document.getElementById("auProg").value||"").trim();const host=document.getElementById("auHost").value.trim();const cookie=document.getElementById("auCookie").value.trim();const token=document.getElementById("auToken").value.trim();
-  if(!program||!host||(!cookie&&!token)){msg("auMsg","Pick a program, the host, and paste cookies or a token.",false);return;}
+  if(!program||(!cookie&&!token)){msg("auMsg","Pick a program and paste cookies (JSON export / curl / Cookie header) or a token. Host is auto-detected.",false);return;}
   msg("auMsg","Saving…",true);
   try{const r=await api("/auth/set","POST",{program,host,cookie,token});
     document.getElementById("auCookie").value="";document.getElementById("auToken").value="";

@@ -116,17 +116,38 @@ def valid(session):
 
 
 def _parse_cookie(s):
-    """Parse a raw 'Cookie:' header (or a 'k=v; k2=v2' string) into {name: value}."""
-    out = {}
-    for part in re.split(r"[;\n]", str(s or "")):
+    """Parse cookies from ANY common paste format and return (cookies {name:value}, domains set):
+      - a browser-extension JSON export (Cookie-Editor / EditThisCookie: a list of {name,value,domain,…})
+      - a pasted `curl` command (uses its -b / --cookie value)
+      - a raw 'Cookie:' header, or 'name=value; name2=value2'."""
+    s = str(s or "").strip()
+    out, domains = {}, set()
+    if s[:1] in "[{":                                    # JSON export from a cookie extension
+        try:
+            data = json.loads(s)
+            items = data if isinstance(data, list) else (data.get("cookies") if isinstance(data, dict) else [])
+            for it in (items or []):
+                if isinstance(it, dict) and it.get("name"):
+                    out[str(it["name"])] = str(it.get("value", ""))
+                    if it.get("domain"):
+                        domains.add(str(it["domain"]).lstrip("."))
+            if out:
+                return out, domains
+        except Exception:  # noqa: BLE001
+            pass
+    m = re.search(r"(?:-b|--cookie)\s+(['\"])(.*?)\1", s, re.S)   # a pasted curl command
+    if m:
+        s = m.group(2)
+    for part in re.split(r";|\n", s):                    # raw Cookie header / k=v; k2=v2
         part = part.strip()
         if part.lower().startswith("cookie:"):
             part = part[7:].strip()
         if "=" in part:
             k, v = part.split("=", 1)
-            if k.strip():
-                out[k.strip()] = v.strip()
-    return out
+            k = k.strip()
+            if k and " " not in k and '"' not in k and ":" not in k:   # skip JSON-ish / header junk
+                out[k] = v.strip()
+    return out, domains
 
 
 def set_manual(program, host, cookie=None, headers=None, token=None, user=None, base=DEFAULT_BASE):
@@ -135,25 +156,37 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
     `token` becomes an `Authorization: Bearer` header. The host must be in the program's scope. Returns a
     dict (ok / error)."""
     slug = G._slug(program)
-    host = G._host_of(host) if host else ""
-    if not host:
-        return {"error": "provide the host this login is for (e.g. www.vinted.com)"}
+    cookies, domains = _parse_cookie(cookie) if isinstance(cookie, str) else (dict(cookie or {}), set())
+    hdrs = dict(headers or {})
+    tok = str(token or "").strip()
+    if tok and tok not in ("eyJ…", "eyJ...", "..."):        # ignore the UI placeholder
+        hdrs["Authorization"] = tok if tok.lower().startswith("bearer ") else ("Bearer " + tok)
+    if not cookies and not hdrs:
+        return {"error": "no cookies found — paste the Cookie header, a cookie-extension JSON export, "
+                         "a curl command, or a token"}
     try:
-        import scope as _sc
         sd = json.load(open(os.path.join(os.path.expanduser(base), "_targets", slug + ".json")))
-        if not _sc.Scope(sd.get("in_scope", []), sd.get("out_of_scope", [])).in_scope_host(host):
-            return {"error": f"{host} is not in-scope for {program!r} — not saved"}
     except (OSError, json.JSONDecodeError):
         return {"error": f"unknown program {program!r} (add it first)"}
+    try:
+        import scope as _sc
+        sc = _sc.Scope(sd.get("in_scope", []), sd.get("out_of_scope", []))
     except Exception:  # noqa: BLE001
-        pass
-    cookies = _parse_cookie(cookie) if isinstance(cookie, str) else dict(cookie or {})
-    hdrs = dict(headers or {})
-    if token:
-        t = str(token).strip()
-        hdrs["Authorization"] = t if t.lower().startswith("bearer ") else ("Bearer " + t)
-    if not cookies and not hdrs:
-        return {"error": "provide cookies (paste the Cookie header) or a token / Authorization header"}
+        sc = None
+    host = G._host_of(host) if host else ""
+    if sc and (not host or not sc.in_scope_host(host)):     # derive an in-scope host from cookies/seeds
+        cand = []
+        for d in sorted(domains):
+            cand += [d, "www." + d]
+        cand += [G._host_of(x) for x in (sd.get("seeds") or [])]
+        host = next((c for c in cand if c and sc.in_scope_host(c)), host)
+    if sc and (not host or not sc.in_scope_host(host)):
+        ins = sd.get("in_scope") or []
+        ex = [p for p in ins if "*" not in p and "/" not in p][:3] \
+            or ["www." + p.lstrip("*.") for p in ins if p.startswith("*.")][:3] \
+            or ["a host in scope"]
+        return {"error": f"couldn't pick an in-scope host for {program!r} (tried cookies + scope) — "
+                         f"set Host to one of: {', '.join(ex)}"}
     sess = {"success": True, "host": host, "program": slug, "cookies": cookies, "headers": hdrs,
             "user": user or "operator-provided", "source": "manual", "ts": time.time()}
     save(program, sess, base=base)
