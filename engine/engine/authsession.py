@@ -105,7 +105,29 @@ def save(program, session, base=DEFAULT_BASE):
         os.chmod(path, 0o600)
     except OSError:
         pass
+    _mirror_to_authn(program, session, base)   # keep the authn A/B store (browser/netget/authz) in sync
     return path
+
+
+def _mirror_to_authn(program, session, base, ident="A"):
+    """Mirror the operator/provisioned session into the authn A/B store (<base>/_auth/<slug>.json) as
+    identity `ident` (default A) — so the authn-based tools all carry the SAME logged-in session the agent
+    uses: headless browser recon (authed SPA capture), netget --as A, and the authz.py IDOR/BOLA sweep.
+    Without this, authed recon runs UNauthenticated even when a session exists. Best-effort; never raises."""
+    try:
+        if not valid(session):
+            return
+        import authn
+        cookies = session.get("cookies") or {}
+        cstr = ("; ".join(f"{k}={v}" for k, v in cookies.items())
+                if isinstance(cookies, dict) else str(cookies))
+        hdrs = {k: v for k, v in (session.get("headers") or {}).items() if k.lower() != "cookie"}
+        bearer = hdrs.pop("Authorization", "") or hdrs.pop("authorization", "")
+        bearer = re.sub(r"(?i)^bearer\s+", "", str(bearer)).strip()
+        authn.save(program, ident, cookie=cstr or None, bearer=bearer or None,
+                   headers=hdrs or None, base=base)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def valid(session):
@@ -150,7 +172,7 @@ def _parse_cookie(s):
     return out, domains
 
 
-def set_manual(program, host, cookie=None, headers=None, token=None, user=None, base=DEFAULT_BASE):
+def set_manual(program, host, cookie=None, headers=None, token=None, user=None, base=DEFAULT_BASE, ident="A"):
     """Store an OPERATOR-PROVIDED session (a ready test account) so the hunt tests AUTHENTICATED — the easy
     path when a program forbids self-registration. `cookie` may be a raw Cookie-header string or a dict;
     `token` becomes an `Authorization: Bearer` header. The host must be in the program's scope. Returns a
@@ -187,8 +209,17 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
             or ["a host in scope"]
         return {"error": f"couldn't pick an in-scope host for {program!r} (tried cookies + scope) — "
                          f"set Host to one of: {', '.join(ex)}"}
+    ident = "B" if str(ident).strip().upper() == "B" else "A"
     sess = {"success": True, "host": host, "program": slug, "cookies": cookies, "headers": hdrs,
-            "user": user or "operator-provided", "source": "manual", "ts": time.time()}
+            "user": user or ("victim-B" if ident == "B" else "operator-provided"),
+            "source": "manual", "ts": time.time()}
+    if ident == "B":
+        # a SECOND account for cross-account IDOR/BOLA (the victim). Store ONLY as authn 'B' — don't
+        # replace the agent's primary session (A) or requeue the surface; the agent reaches B via
+        # `netget --as B` / `authz.py diff` to prove A-reads-B's-data.
+        _mirror_to_authn(program, sess, base, ident="B")
+        return {"ok": True, "program": slug, "host": host, "ident": "B", "cookies": len(cookies),
+                "headers": list(hdrs.keys()), "user": sess["user"], "requeued": 0}
     save(program, sess, base=base)
     # make the login immediately productive: clear the tested-state so the hunt RE-COVERS its surface
     # AUTHENTICATED now, instead of waiting out the 48h re-hunt window on already-tested (unauth) items.
@@ -203,7 +234,7 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
         os.replace(tmp, sp)
     except Exception:  # noqa: BLE001
         pass
-    return {"ok": True, "program": slug, "host": host, "cookies": len(cookies),
+    return {"ok": True, "program": slug, "host": host, "ident": "A", "cookies": len(cookies),
             "headers": list(hdrs.keys()), "user": sess["user"], "requeued": requeued}
 
 
@@ -228,6 +259,18 @@ def status(base=DEFAULT_BASE):
         if valid(s):
             out[slug] = {"host": s.get("host"), "user": s.get("user"), "source": s.get("source", "auto"),
                          "cookies": len(s.get("cookies") or {}), "headers": list((s.get("headers") or {}).keys())}
+    # annotate each program with the authn A/B identities present (B = a second, cross-account IDOR victim)
+    try:
+        import authn
+        for f in glob.glob(os.path.join(os.path.expanduser(base), "_auth", "*.json")):
+            slug = os.path.basename(f)[:-len(".json")]
+            ids = authn.identities(slug, base)
+            if ids:
+                out.setdefault(slug, {"host": "", "user": "", "source": "authn",
+                                      "cookies": 0, "headers": []})
+                out[slug]["idents"] = ids
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 

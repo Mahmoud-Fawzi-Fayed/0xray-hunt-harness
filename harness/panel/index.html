@@ -323,6 +323,7 @@
       <div class="box"><div class="h"><span class="t">Authenticated access — provide a ready test login</span><span class="dim" style="font-size:11px">for programs that block self-registration · in-scope only · the hunt reuses it read-only</span></div><div class="b">
         <div class="row2"><div class="fld"><label>Program</label><select id="auProg"></select></div>
           <div class="fld"><label>Host <span class="dim" style="text-transform:none;letter-spacing:0">(optional — auto-detected from the cookies)</span></label><input id="auHost" placeholder="auto (e.g. www.vinted.com)"></div></div>
+        <div class="fld"><label>Account <span class="dim" style="text-transform:none;letter-spacing:0">(B = a second login on the SAME program — unlocks cross-account IDOR/BOLA, the best-paying class)</span></label><select id="auIdent"><option value="A">A — primary (the hunt logs in as this account)</option><option value="B">B — second account (victim, for cross-account IDOR)</option></select></div>
         <div class="fld"><label>Cookies — paste any of: a cookie-extension <b>JSON export</b> (Cookie-Editor / EditThisCookie), a pasted <b>curl</b> command, or the raw <b>Cookie</b> header (<span class="mono">name=value; name2=value2</span>)</label><textarea id="auCookie" placeholder='Paste a cookie JSON export, a curl command, or:  sessionid=abc123; csrftoken=xyz' style="min-height:120px"></textarea></div>
         <div class="fld"><label>…or an API token / Bearer (optional — used as Authorization header)</label><input id="auToken" placeholder="eyJ…"></div>
         <button class="pri" onclick="authSet()">Save login &amp; hunt authenticated</button>
@@ -583,7 +584,7 @@ async function sessDoctor(confirm){try{
 async function loadAlerts(){try{const j=await api("/novelty/feed?n=25");document.getElementById("alerts").innerHTML=(j.entries||[]).reverse().map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><b>${esc(x.target)}</b> <span class="dim">${esc((x.summary||[]).join(" · ").slice(0,140))}</span></div>`).join("")||`<div class="empty">No alerts yet.</div>`;}catch(e){}}
 async function authList(){try{const j=await api("/auth/list");const s=j.sessions||{};const keys=Object.keys(s);
   const el=document.getElementById("auList");if(!el)return;
-  el.innerHTML=keys.length?`<div class="dim" style="font-size:11px;margin-bottom:6px">SAVED LOGINS</div>`+keys.map(k=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #141a25"><span>🔑 <b>${esc(k)}</b> <span class="dim" style="font-size:11px">· ${esc(s[k].host||"")} · ${s[k].cookies||0} cookie(s)${(s[k].headers&&s[k].headers.length)?" + "+esc(s[k].headers.join(",")):""} · ${esc(s[k].source||"")}</span></span><span style="display:flex;gap:6px;flex:0 0 auto"><button class="ghost sm" onclick="authCheck('${esc(k)}')">Test</button><button class="danger sm" onclick="authClear('${esc(k)}')">Remove</button></span></div>`).join(""):`<div class="empty" style="padding:6px">No logins saved — these hunts run unauthenticated.</div>`;}catch(e){}}
+  el.innerHTML=keys.length?`<div class="dim" style="font-size:11px;margin-bottom:6px">SAVED LOGINS</div>`+keys.map(k=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #141a25"><span>🔑 <b>${esc(k)}</b> <span class="dim" style="font-size:11px">· ${esc(s[k].host||"")} · ${s[k].cookies||0} cookie(s)${(s[k].headers&&s[k].headers.length)?" + "+esc(s[k].headers.join(",")):""} · ${esc(s[k].source||"")}${(s[k].idents&&s[k].idents.length>1)?' · <b style="color:#7fe0a0">A+B</b> two-account IDOR':''}</span></span><span style="display:flex;gap:6px;flex:0 0 auto"><button class="ghost sm" onclick="authCheck('${esc(k)}')">Test</button><button class="danger sm" onclick="authClear('${esc(k)}')">Remove</button></span></div>`).join(""):`<div class="empty" style="padding:6px">No logins saved — these hunts run unauthenticated.</div>`;}catch(e){}}
 async function authCheck(p){toast("Testing the "+p+" login (live + hunt status)…","info");
   try{const d=await api("/auth/check?program="+encodeURIComponent(p));
     if(!d.ok){toast(p+": "+(d.error||"check failed"),"err");return;}
@@ -592,14 +593,15 @@ async function authCheck(p){toast("Testing the "+p+" login (live + hunt status)�
     toast(`${p}: ${label} — ${d.note}`,type);
     toast(`${p} hunt: ${d.hunt_status}`, d.hunt_status.includes("USING")?"ok":"warn");
   }catch(e){toast(e.message,"err");}}
-async function authSet(){const program=(document.getElementById("auProg").value||"").trim();const host=document.getElementById("auHost").value.trim();const cookie=document.getElementById("auCookie").value.trim();const token=document.getElementById("auToken").value.trim();
+async function authSet(){const program=(document.getElementById("auProg").value||"").trim();const host=document.getElementById("auHost").value.trim();const cookie=document.getElementById("auCookie").value.trim();const token=document.getElementById("auToken").value.trim();const ident=((document.getElementById("auIdent")||{}).value||"A");
   if(!program||(!cookie&&!token)){msg("auMsg","Pick a program and paste cookies (JSON export / curl / Cookie header) or a token. Host is auto-detected.",false);return;}
   msg("auMsg","Saving…",true);
-  try{const r=await api("/auth/set","POST",{program,host,cookie,token});
+  try{const r=await api("/auth/set","POST",{program,host,cookie,token,ident});
     document.getElementById("auCookie").value="";document.getElementById("auToken").value="";
-    msg("auMsg",`Saved for ${esc(r.program)} on ${esc(r.host)} — ${r.cookies} cookie(s)${(r.headers&&r.headers.length)?" + "+esc(r.headers.join(",")):""}. Restarting the hunt to use it…`,true);
-    toast("Login saved for "+r.program+" — hunting authenticated","ok");
-    try{await api("/hunt","POST",{program});}catch(e){}         // restart so the hunt picks up the session now
+    if(ident==="B"){msg("auMsg",`Saved account B for ${esc(r.program)} — ${r.cookies} cookie(s). The hunt can now prove cross-account IDOR (A reads B's data).`,true);toast("Account B saved for "+r.program+" — two-account IDOR enabled","ok");}
+    else{msg("auMsg",`Saved for ${esc(r.program)} on ${esc(r.host)} — ${r.cookies} cookie(s)${(r.headers&&r.headers.length)?" + "+esc(r.headers.join(",")):""}. Restarting the hunt to use it…`,true);
+      toast("Login saved for "+r.program+" — hunting authenticated","ok");
+      try{await api("/hunt","POST",{program});}catch(e){}}       // restart so the hunt picks up the primary session now
     authList();refresh();
   }catch(e){msg("auMsg",e.message,false);toast(e.message,"err");}}
 async function authClear(p){if(!(await confirmModal("Remove the saved login for "+p+"? The hunt goes back to unauthenticated.","Remove login")))return;

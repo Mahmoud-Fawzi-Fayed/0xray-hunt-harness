@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE_DIR)
@@ -214,6 +215,16 @@ class Engine:
             self._expand_scope()
         import recon as R, osint as O  # deterministic recon: service/tech + endpoints + secrets + params
         from urllib.parse import urlparse
+        # AUTHENTICATED recon: when a session exists for this target, run the WHOLE recon as the logged-in
+        # user (recon routes _get through netget when HUNT_RECON_IDENT is set) so JS mining + endpoint
+        # discovery see the BEHIND-LOGIN app — where the paid bugs live. The session is mirrored into
+        # authn 'A' by authsession.save(); here we just flip recon into authed mode for this target.
+        if self._authn_ready():
+            os.environ["HUNT_RECON_IDENT"] = "A"
+            os.environ["HUNT_TARGET_SLUG"] = self.scope.name
+            self.eng.log("recon: AUTHENTICATED (identity A) — mining the behind-login surface")
+        else:
+            os.environ.pop("HUNT_RECON_IDENT", None)
         # service / tech fingerprint of the seed target(s) — per-target (NOT subdomain enum)
         seed_hosts = sorted({urlparse(s).hostname for s in self.scope.seeds if urlparse(s).hostname})
         tech, _ = O.probe_hosts(seed_hosts, log=self.eng.log)
@@ -253,6 +264,55 @@ class Engine:
             self.eng.log(f"recon: {len(oos)} out-of-scope host(s) seen, NOT tested: {', '.join(oos[:8])}")
         self.eng.log(f"recon: {len(api)} api + {len(plat)} platform + {len(endpoints)} endpoint + "
                      f"{len(params)} param -> {added} categorized (target,class) work unit(s)")
+        self._deep_recon(R)                    # authed GraphQL introspection + headless SPA API capture
+
+    def _authn_ready(self):
+        """True iff an authn A/B session exists for this target (operator-provided or provisioned, mirrored
+        by authsession.save()). Gates authenticated recon, headless browser capture, and the IDOR sweep."""
+        try:
+            import authn
+            return bool(authn.configured(self.scope.name, self.base))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _deep_recon(self, R):
+        """Expand the surface with the DEEP authed API that curl recon misses: GraphQL introspection
+        (cheap -> every round) + headless-browser XHR/fetch capture (expensive -> only on first recon,
+        when the worklist is idle, or stale). This is what turns shallow public surface + 'testing 0
+        items' into real authed endpoints to hunt. Never raises into the round."""
+        if self.mock:
+            return
+        ident = "A" if self._authn_ready() else None
+        try:
+            gql = R.graphql_recon(self.scope, slug=self.scope.name, ident=ident, log=self.eng.log)
+            if gql:
+                self.eng.add_surface(gql)
+        except Exception as e:  # noqa: BLE001
+            self.eng.log(f"deep-recon: graphql skipped ({type(e).__name__}: {e})")
+        if os.environ.get("HUNT_BROWSER_RECON", "1") != "1":
+            return
+        last = self.eng.state.get("browser_recon_ts") or 0
+        hrs = float(os.environ.get("HUNT_BROWSER_RECON_HOURS", "24") or 24)
+        trigger = ("first" if not last
+                   else "idle" if not self.eng.worklist()
+                   else "refresh" if (time.time() - last) > hrs * 3600 else None)
+        if not trigger:
+            return
+        try:
+            caps = R.browser_recon(self.scope, base=self.base, slug=self.scope.name,
+                                   ident=ident, log=self.eng.log)
+            exp = []
+            for it in (caps or []):
+                for cls in R.classify_all(it):
+                    e = dict(it); e["vuln_class"] = cls; e.setdefault("priority", 55)
+                    exp.append(e)
+            exp = [e for e in exp if R.is_concrete_target(e.get("url", ""))]
+            added = self.eng.add_surface(exp) if exp else 0
+            self.eng.state["browser_recon_ts"] = time.time()
+            self.eng.save()
+            self.eng.log(f"deep-recon: browser capture ({trigger}) -> {added} new authed work unit(s)")
+        except Exception as e:  # noqa: BLE001
+            self.eng.log(f"deep-recon: browser skipped ({type(e).__name__}: {e})")
 
     # ---------------- rank ----------------
     def rank(self):
@@ -410,6 +470,9 @@ class Engine:
                 cand = {"url": it["url"], "param": it.get("param", ""), "vuln_class": it.get("vuln_class"),
                         "severity": f.get("severity", "unknown"), "evidence": f.get("evidence", ""),
                         "request": f.get("request", ""), "proof_note": f.get("proof_note", ""),
+                        "attacker_holds": f.get("attacker_holds", ""),
+                        "id_source": f.get("id_source", ""),
+                        "disposition": f.get("disposition") or {},
                         "scope_warning": oos or None}
                 self.eng.add_candidate(cand)
                 self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
@@ -469,6 +532,8 @@ class Engine:
                 f"End with a fenced ```json``` object: "
                 f'{{"vulnerable":true|false,"severity":"low|medium|high|critical","evidence":"<what proves it>",'
                 f'"request":"<the winning request>","hosts_contacted":["every host you sent a request to"],'
+                f'"attacker_holds":"nothing|own_session|link_issued_by_product|foreign_id_shown",'
+                f'"id_source":"not_required|enumerated|product_link|archive|in_scope_oracle|own_only|asserted_leak",'
                 f'"proof_note":"<empty, or why proof was limited by scope/read-only>"}}.'
                 + self._capabilities_note())
         sess = getattr(self, "_auth_session", None)             # inject the logged-in session if it fits this host
@@ -491,11 +556,26 @@ class Engine:
     # ---------------- validate ----------------
     def validate(self):
         self.eng.set_phase("validate")
+        held_keys = {(h.get("url"), h.get("vuln_class"))
+                     for h in (self.eng.state.get("disposition_held") or [])}
         pending = [c for c in self.eng.state["candidates"]
-                   if not any(cf.get("url") == c["url"] and cf.get("vuln_class") == c["vuln_class"]
-                              for cf in self.eng.state["confirmed"])]
+                   if (c.get("url"), c.get("vuln_class")) not in held_keys
+                   and not any(cf.get("url") == c["url"] and cf.get("vuln_class") == c["vuln_class"]
+                               for cf in self.eng.state["confirmed"])]
         self.eng.log(f"validate: {len(pending)} candidate(s) to adversarially verify, {self.parallel} at a time")
         for c, v in self._run_parallel(self._validate_agent, pending):
+            disp = self._disposition(c, v)
+            if v and v.get("real") and disp["verdict"] != "PASS":
+                self.eng.state.setdefault("disposition_held", []).append({
+                    "url": c.get("url"), "vuln_class": c.get("vuln_class"),
+                    "verdict": disp["verdict"], "reason": disp.get("reason", ""),
+                })
+                self.eng.save()
+                _lrn("record_outcome", self.scope.name, c["vuln_class"],
+                     "held-" + disp["verdict"].lower().replace("_", "-"),
+                     disp.get("reason", ""), base=self.base)
+                self.eng.log(f"validate: HELD {disp['verdict']} {c['vuln_class']} @ {c['url']} — {disp.get('reason','')}")
+                continue
             if v and v.get("real"):
                 if v.get("severity"):
                     c["severity"] = v["severity"]  # use the validator's CALIBRATED severity, not the hunt's
@@ -510,14 +590,33 @@ class Engine:
                 self.eng.log(f"validate: rejected (false positive) {c['vuln_class']} @ {c['url']} — "
                              f"{(v or {}).get('reason', 'no verdict')}")
 
+    def _disposition(self, c, v):
+        """Score the candidate the way a program triager scores RTFS / Informative. Never raises."""
+        import disposition as DP
+        reason = (v or {}).get("reason") or ""
+        finding = {
+            "vuln_class": c.get("vuln_class"), "url": c.get("url"),
+            "title": c.get("note") or "",
+            "evidence": c.get("evidence") or "",
+            "request": c.get("request") or "",
+            "impact": reason, "steps": reason,
+            "proof_note": c.get("proof_note") or "",
+            "attacker_holds": (v or {}).get("attacker_holds") or c.get("attacker_holds") or "",
+            "id_source": (v or {}).get("id_source") or c.get("id_source") or "",
+            "disposition": (v or {}).get("disposition") or c.get("disposition") or {},
+        }
+        return DP.check(finding)
+
     def _validate_agent(self, c):
         if self.mock:
             return MOCK_VALIDATE.get((c["url"], c["vuln_class"]), {"real": False, "reason": "mock-default"})
         import skill_map as SM
         paths = SM.skill_paths(c.get("vuln_class", ""))
         tv = os.path.join(SM.SKILLS_DIR, "triage-validation", "SKILL.md")
-        if os.path.isfile(tv):
-            paths = [tv] + [p for p in paths if p != tv]
+        dg = os.path.join(SM.SKILLS_DIR, "disposition-gate", "SKILL.md")
+        front = [p for p in (dg, tv) if os.path.isfile(p)]
+        if front:
+            paths = front + [p for p in paths if p not in front]
         task = (self._roe() + "\n"
                 f"Adversarially verify a claimed finding (be skeptical — default to false positive if unproven). "
                 f"Claim: {c['vuln_class']} at {c['url']} (param `{c.get('param','')}`). "
@@ -526,8 +625,12 @@ class Engine:
                 f"Independently re-test it WITHIN the rules of engagement above (in-scope + read-only only). If the only "
                 f"proof would require an out-of-scope host or an intrusive action, treat the impact as UNPROVEN and lower "
                 f"the severity. Is it a REAL, exploitable vulnerability or a false positive? "
+                f"Run `python3 {os.path.dirname(os.path.abspath(__file__))}/disposition.py check` on the evidence "
+                f"before you confirm. HOLD_RTFS and HOLD_INFORMATIVE are not real bounty findings.\n"
                 f"End with a fenced ```json``` object: "
-                f'{{"real":true|false,"severity":"low|medium|high|critical","reason":"<why, incl. any scope/intrusive caveat>"}}.')
+                f'{{"real":true|false,"severity":"low|medium|high|critical","reason":"<why, incl. any scope/intrusive caveat>",'
+                f'"attacker_holds":"nothing|own_session|link_issued_by_product|foreign_id_shown",'
+                f'"id_source":"not_required|enumerated|product_link|archive|in_scope_oracle|own_only|asserted_leak"}}.')
         r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # same pool as hunt
         self.eng.log(f"validate: {c['vuln_class']}@{c['url']} model={r.get('model', '?')}"
                      + (f" ERR={r['error']}" if r.get("error") else ""))

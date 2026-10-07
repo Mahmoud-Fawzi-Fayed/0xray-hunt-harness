@@ -651,7 +651,8 @@ class Handler(BaseHTTPRequestHandler):
                 import authsession as AS
                 r = AS.set_manual(b.get("program", ""), b.get("host", ""),
                                   cookie=b.get("cookie"), headers=b.get("headers"),
-                                  token=b.get("token"), user=b.get("user"), base=self.base)
+                                  token=b.get("token"), user=b.get("user"),
+                                  ident=b.get("ident", "A"), base=self.base)
                 return self._send(200 if r.get("ok") else 400, r)
 
             if p.path == "/auth/clear":

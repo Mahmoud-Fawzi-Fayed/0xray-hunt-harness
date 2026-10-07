@@ -702,6 +702,127 @@ def gather_params(scope, log=print, max_items=80):
     return prune_inert_params(items[:max_items], log)
 
 
+# ---------------- deep / authenticated recon (the authed API surface curl recon misses) --------------
+_GQL_INTROSPECT = ('{"query":"query IntrospectionQuery{__schema{queryType{name} mutationType{name} '
+                   'types{name kind fields{name}}}}"}')
+_GQL_PATHS = ("/graphql", "/api/graphql", "/gql", "/v1/graphql", "/query", "/graphql/v1", "/api/gql")
+
+
+def graphql_recon(scope, slug=None, ident=None, log=print, timeout=20, max_probes=12):
+    """Find in-scope GraphQL endpoints and introspect them (AUTHENTICATED if a session exists). Open
+    introspection is itself report-worthy AND yields per-operation surface (query/mutation names ->
+    authz/IDOR targets). A reachable-but-closed endpoint is still graphql surface. Returns surface
+    items [{url, param?, vuln_class, source, priority, note}]. Never raises into recon."""
+    try:
+        import netget
+    except Exception:  # noqa: BLE001
+        return []
+    cand = []
+    for s in scope.seeds:
+        u = urlparse(s)
+        base = f"{u.scheme or 'https'}://{u.hostname}"
+        first = (u.hostname or "").split(".")[0]
+        if first in ("gql", "graphql"):
+            cand += [base, base + "/graphql"]
+        for p in _GQL_PATHS:
+            cand.append(base + p)
+    cand = [u for u in dict.fromkeys(cand) if scope.in_scope_host(u)][:max_probes]
+    out = []
+    for u in cand:
+        try:
+            code, text, _h = netget.get(u, method="POST", data=_GQL_INTROSPECT,
+                                        headers={"Content-Type": "application/json"},
+                                        ident=ident, slug=slug, timeout=timeout)
+        except Exception:  # noqa: BLE001
+            continue
+        if not text:
+            continue
+        gql_shaped = ('"__schema"' in text or '"errors"' in text or '"data"' in text
+                      or "Must provide query" in text or "GraphQL" in text)
+        if not gql_shaped:
+            continue
+        schema = None
+        try:
+            import json as _json
+            schema = ((_json.loads(text).get("data") or {}).get("__schema"))
+        except Exception:  # noqa: BLE001
+            schema = None
+        if schema:
+            out.append({"url": u, "vuln_class": "graphql", "source": "graphql-introspect",
+                        "priority": 72, "note": "introspection OPEN"})
+            qn = (schema.get("queryType") or {}).get("name")
+            mn = (schema.get("mutationType") or {}).get("name")
+            ops = [f.get("name") for t in (schema.get("types") or [])
+                   if t.get("name") in (qn, mn) for f in (t.get("fields") or []) if f.get("name")]
+            for op in ops[:60]:
+                out.append({"url": u, "param": op, "vuln_class": "idor",
+                            "source": "graphql-op", "priority": 66, "note": f"gql op {op}"})
+            log(f"graphql: introspection OPEN at {u} -> {len(ops)} operation(s) mapped")
+            break
+        else:                                   # live graphql, introspection closed -> still surface
+            out.append({"url": u, "vuln_class": "graphql", "source": "graphql-endpoint",
+                        "priority": 52, "note": "live graphql (introspection closed)"})
+            log(f"graphql: live endpoint (introspection closed) at {u}")
+            break
+    if not out:
+        log("graphql: no reachable GraphQL endpoint on probed paths")
+    return out
+
+
+def _browser_lock_path(base):
+    d = os.path.join(os.path.expanduser(base or "~/.bughunter-engagements"), "_sessions")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, "_browser.lock")
+
+
+def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=3, wait=5):
+    """Headless-browser capture of the authed SPA's REAL API (XHR/fetch/GraphQL) — the single biggest
+    discovery win, and the surface curl recon cannot see (a thick client makes its data calls at
+    runtime). Carries identity A (the operator/provisioned session). Resource-safe for a small box: at
+    most ONE Chromium box-wide (non-blocking global lock -> skip if busy), capped seeds + short waits.
+    Returns endpoint items [{url, method, source}]. Never raises into recon."""
+    if os.environ.get("HUNT_BROWSER_RECON", "1") != "1":
+        return []
+    try:
+        import browser as B
+        import fcntl
+    except Exception as e:  # noqa: BLE001
+        log(f"browser-recon: unavailable ({type(e).__name__}: {e})")
+        return []
+    fd = os.open(_browser_lock_path(base), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log("browser-recon: another capture is running box-wide — skipping (2-core safe)")
+            return []
+        seeds = [s for s in scope.seeds if scope.in_scope_host(s)][:max_seeds]
+        out, seen = [], set()
+        for seed in seeds:
+            try:
+                reqs = B.capture(seed, slug=slug, ident=ident, wait=wait)
+            except Exception as e:  # noqa: BLE001
+                log(f"browser-recon: {seed} failed ({type(e).__name__}: {str(e)[:90]})")
+                continue
+            for r in (reqs or []):
+                u = (r.get("url") or "").split("#")[0]
+                if u and u not in seen and scope.in_scope_host(u) and is_concrete_target(u):
+                    seen.add(u)
+                    out.append({"url": u, "method": r.get("method", "GET"), "source": "browser"})
+        log(f"browser-recon: {len(out)} in-scope API endpoint(s) from {len(seeds)} seed(s)"
+            + (f" (authenticated as {ident})" if ident else " (unauthenticated)"))
+        return out
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:  # noqa: BLE001
+            pass
+        os.close(fd)
+
+
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, __file__.rsplit("/", 1)[0])

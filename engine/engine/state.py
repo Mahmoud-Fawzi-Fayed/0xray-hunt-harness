@@ -102,21 +102,23 @@ class Engagement:
         return {}
 
     def worklist(self):
-        """Ranked surface items that are untested OR whose last test is older than the re-hunt window.
-        (Re-queuing stale items keeps the fleet hunting instead of idling after the first sweep.)"""
+        """Ranked surface items to hunt. UNTESTED items come FIRST — so coverage advances through the
+        WHOLE surface before anything is re-hunted — then stale items (last test older than the re-hunt
+        window), oldest-tested first. Without untested-first ordering a deep target re-hunts its
+        top-priority slice forever and never reaches the long tail (e.g. paysafe stuck at 181/4606)."""
         tmap = self._tested_map()
         now = time.time()
         ttl = RETEST_HOURS * 3600
-
-        def eligible(s):
+        ranked = []                                # (group, -priority, last_tested): sorts untested first
+        for s in self.state["surface"]:
             k = self._key(s)
             if k not in tmap:
-                return True
-            if ttl <= 0:
-                return False                       # re-hunt disabled -> legacy "test once"
-            return (now - tmap[k]) >= ttl
-        items = [s for s in self.state["surface"] if eligible(s)]
-        return sorted(items, key=lambda s: -s.get("priority", 0))
+                ranked.append((0, -s.get("priority", 0), 0.0, s))       # never tested -> cover it first
+            elif ttl > 0 and (now - tmap[k]) >= ttl:
+                ranked.append((1, -s.get("priority", 0), tmap[k], s))   # stale -> re-hunt, oldest first
+            # else: tested within the window -> not eligible this pass
+        ranked.sort(key=lambda t: (t[0], t[1], t[2]))
+        return [t[3] for t in ranked]
 
     @staticmethod
     def _key(s):
@@ -169,6 +171,8 @@ def _selftest():
         e.state["tested"]["http://t/b|q|xss"] = time.time() - 3600   # tested an hour ago
         e.save()
         assert any(s.get("url") == "http://t/b" for s in e.worklist()), "stale item must re-queue"
+        # coverage-first: the UNTESTED item (t/a, pri 5) must out-rank the STALE re-test (t/b, pri 9)
+        assert e.worklist()[0]["url"] == "http://t/a", "untested must come before a stale re-test"
         globals()["RETEST_HOURS"] = 48.0
         # and with the window disabled, it stays excluded (legacy test-once)
         globals()["RETEST_HOURS"] = 0
