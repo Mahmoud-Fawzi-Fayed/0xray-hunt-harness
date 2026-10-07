@@ -574,6 +574,24 @@ class Handler(BaseHTTPRequestHandler):
                 slug = T._slug(prog)
                 scope_path = os.path.join(os.path.expanduser(self.base), "_targets", slug + ".json")
                 interval = str(int(b.get("interval", 1800)))
+                # admission control: size the running suite to THIS box (cores+1). Reject a NEW program
+                # that would exceed capacity, so >N is blocked AT START, not accepted-then-shed 15 min later.
+                try:
+                    cap = int(os.environ.get("WATCHDOG_MAX_HUNTS_BOX", str((os.cpu_count() or 2) + 1)))
+                    jl = _pm2(["jlist"])
+                    procs = json.loads(jl.stdout or "[]") if jl and jl.returncode == 0 else []
+                    online = [x.get("name", "") for x in procs
+                              if x.get("name", "").startswith("hunt-")
+                              and x.get("name") not in ("hunt-bridge", "hunt-watchdog")
+                              and (x.get("pm2_env", {}) or {}).get("status") == "online"]
+                    if ("hunt-" + slug) not in online and len(online) >= cap:
+                        return self._send(429, {
+                            "error": f"box at capacity: {len(online)}/{cap} hunts already running on "
+                                     f"{os.cpu_count()} core(s). Stop one first, or raise WATCHDOG_MAX_HUNTS_BOX "
+                                     f"(a bigger box auto-allows more).",
+                            "running": online, "cap": cap})
+                except Exception:  # noqa: BLE001
+                    pass
                 if b.get("mock"):
                     log = os.path.join(os.path.expanduser(self.base), f"hunt-{slug}.log")
                     subprocess.Popen(["python3", os.path.join(ENGINE, "orchestrator.py"),
