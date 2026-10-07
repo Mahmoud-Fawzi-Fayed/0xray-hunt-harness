@@ -313,6 +313,15 @@ class Orchestrator:
                     else:
                         self.eng.eng.log(f"auth: could not provision a session ({r.get('error')}: "
                                          f"{str(r.get('notes',''))[:140]}) — hunting unauthenticated (won't retry for 6h)")
+                        try:                                # ON-SITE notification (panel feed), not email
+                            import notify
+                            notify.site_alert(self.eng.scope.name,
+                                ["Can't register a test account \u2014 hunting UNAUTHENTICATED. Most paying bugs "
+                                 "(IDOR/BOLA/auth) need login. Provide a test login (cookies/token) to go deeper.",
+                                 f"reason: {r.get('error')}"],
+                                base=self.base, kind="needs-auth")
+                        except Exception:  # noqa: BLE001
+                            pass
             except Exception as e:  # noqa: BLE001
                 self.eng.eng.log(f"auth: provisioning skipped ({type(e).__name__}: {e})")
         phases = ["recon", "rank", "map"] + (["hunt", "validate"] if self.do_hunt else [])

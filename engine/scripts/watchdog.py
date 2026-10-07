@@ -29,6 +29,12 @@ BASE = os.path.expanduser(os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagem
 STATE = os.path.join(BASE, "_watchdog.json")
 STUCK_MIN = int(os.environ.get("WATCHDOG_STUCK_MIN", "45"))      # mid-round no-progress minutes => restart
 CHAT_MAX = int(os.environ.get("WATCHDOG_CHAT_MAX", "60"))        # prune chats above this
+# --- dynamic capacity governor: size the running hunt suite to THIS box (no thrash) ---
+CORES = os.cpu_count() or 2
+MAX_HUNTS_BOX = int(os.environ.get("WATCHDOG_MAX_HUNTS_BOX", str(max(1, CORES + 1))))  # suite size for this box
+LOAD_CEIL = float(os.environ.get("WATCHDOG_LOAD_CEIL", str(CORES * 4)))                # 15m-load overload line
+HUNT_PRIORITY = [p.strip() for p in os.environ.get(
+    "WATCHDOG_HUNT_PRIORITY", "reddit,paysafe,vinted,dransay,wyylde").split(",") if p.strip()]
 BRIDGE = "http://127.0.0.1:8899"
 PM2 = __import__("shutil").which("pm2") or "/usr/bin/pm2"
 # a last log line starting with one of these means the hunt is BETWEEN rounds (sleeping), not stuck
@@ -142,6 +148,20 @@ def run_once(quiet=False):
         actions.append("restarted hunt-bridge (was down)")
         alerts.append("bridge was DOWN")
 
+    # 1b. GOVERNOR — size the running hunt suite to THIS box (dynamic). Shed the lowest-priority excess
+    # (by WATCHDOG_HUNT_PRIORITY) so a small box never thrashes; the operator is told on-site. Runs BEFORE
+    # the restart loop so a shed hunt is not immediately revived. Raise WATCHDOG_MAX_HUNTS_BOX for a bigger box.
+    online = [p.get("name", "")[5:] for p in _pm2_jlist()
+              if p.get("name", "").startswith("hunt-") and p.get("name") not in ("hunt-bridge", "hunt-watchdog")
+              and (p.get("pm2_env", {}) or {}).get("status") == "online"]
+    if len(online) > MAX_HUNTS_BOX:
+        ranked = [s for s in HUNT_PRIORITY if s in online] + [s for s in online if s not in HUNT_PRIORITY]
+        for slug in ranked[MAX_HUNTS_BOX:]:
+            _pm2("delete", "hunt-" + slug)          # delete (not stop) so the restart loop won't revive it
+            actions.append(f"governor: suite capped at {MAX_HUNTS_BOX} for {CORES}-core box — stopped hunt-{slug}")
+            alerts.append(f"suite over capacity on {CORES} cores — stopped hunt-{slug} "
+                          f"(box max {MAX_HUNTS_BOX}; raise WATCHDOG_MAX_HUNTS_BOX or use a bigger box)")
+
     # 2/3. per-hunt health
     revived = dict(prev.get("revived", {}))     # hunts THE WATCHDOG itself restarted (not manual/pm2 restarts)
     for p in _pm2_jlist():
@@ -181,21 +201,41 @@ def run_once(quiet=False):
         alerts.append(f"chat store at {chats} (> {CHAT_MAX}) but only operator sessions are prunable-exempt; "
                       f"run `python3 engine/sessions.py clear --all` to review husks/orphans")
 
-    _save_state({"ts": time.time(), "restarts": restarts_now, "revived": revived})
+    # overload notice (dynamic, box-aware) — if the 15-min load is above the ceiling, agents are likely
+    # timing out; tell the operator on-site to run fewer programs or move to a bigger box.
+    try:
+        load15 = os.getloadavg()[2]
+    except Exception:  # noqa: BLE001
+        load15 = 0.0
+    if load15 > LOAD_CEIL:
+        alerts.append(f"overloaded: 15-min load {load15:.1f} > {LOAD_CEIL:.0f} on {CORES} cores — "
+                      f"fewer programs or a bigger box (hunts may be timing out)")
 
-    # 5. report / alert (email only when there ARE alerts, to avoid spam)
-    summary = f"watchdog: {len(actions)} action(s), {len(alerts)} alert(s); chats={chats}"
+    # de-dupe alerts vs last tick (by category, ignoring the changing numbers) so the panel + email are
+    # NOT spammed with the same notice every 15 minutes — a condition re-alerts only after it clears.
+    import re as _re
+    def _akey(a):
+        return _re.sub(r"[0-9].*$", "", str(a)).strip()[:48]
+    prev_keys = set(prev.get("alert_keys", []))
+    cur_keys = sorted({_akey(a) for a in alerts})
+    new_alerts = [a for a in alerts if _akey(a) not in prev_keys]
+    _save_state({"ts": time.time(), "restarts": restarts_now, "revived": revived, "alert_keys": cur_keys})
+
+    # 5. report / alert — the ON-SITE feed (panel) is the primary surface; only NEW alerts are pushed.
+    summary = f"watchdog: {len(actions)} action(s), {len(alerts)} alert(s) ({len(new_alerts)} new); chats={chats}"
     if actions:
         summary += " | " + "; ".join(actions)
     if not quiet:
         print(summary)
         for a in actions:
             print("  -", a)
-    if alerts:
+    if new_alerts:
         try:
             import notify
-            notify.send_safe(f"[watchdog] {len(alerts)} issue(s) — {', '.join(a[:1] for a in [alerts[0]])}…",
-                             summary + "\n\nAlerts:\n- " + "\n- ".join(alerts))
+            for a in new_alerts:                   # ON-SITE (panel feed) — the operator's primary surface
+                notify.site_alert("watchdog", [a], base=BASE, kind="watchdog")
+            notify.send_safe(f"[watchdog] {len(new_alerts)} issue(s) — {new_alerts[0][:60]}…",
+                             summary + "\n\nNew alerts:\n- " + "\n- ".join(new_alerts))
         except Exception:  # noqa: BLE001
             pass
     # append to a small watchdog log

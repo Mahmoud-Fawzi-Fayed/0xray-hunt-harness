@@ -24,11 +24,33 @@ CLI:
   python3 engine/notify.py selftest                            # offline: message build + dry-run
 """
 import argparse
+import datetime
+import json
 import os
 import smtplib
 import ssl
 import sys
 from email.message import EmailMessage
+
+
+def site_alert(target, summary, base=None, kind=None):
+    """Append an ON-SITE alert to the panel's feed (<base>/_alerts/feed.jsonl) — rendered in the
+    dashboard's 'New-surface alerts' box via the bridge /novelty/feed. Used for stuck hunts,
+    can't-register/needs-auth, and overload notices (site-only, no email). Best-effort; never raises."""
+    base = base or os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
+    try:
+        d = os.path.join(os.path.expanduser(base), "_alerts")
+        os.makedirs(d, exist_ok=True)
+        entry = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                 "target": str(target),
+                 "summary": summary if isinstance(summary, list) else [str(summary)]}
+        if kind:
+            entry["kind"] = kind
+        with open(os.path.join(d, "feed.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 _ENV_LOADED = False
