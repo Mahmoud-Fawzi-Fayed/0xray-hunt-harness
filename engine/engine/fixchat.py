@@ -30,7 +30,7 @@ DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
-MSG_TIMEOUT = int(os.environ.get("HUNT_FIXCHAT_TIMEOUT", "420"))
+MSG_TIMEOUT = int(os.environ.get("HUNT_FIXCHAT_TIMEOUT", "900"))   # active repro (accounts + re-test) needs time
 
 
 def _slug(s):
@@ -125,19 +125,49 @@ def _task_start(root, finding, verify_res):
     fails = [c for c in (verify_res or {}).get("checks", []) if not c.get("pass")]
     fixes = "\n".join(f"- {c['check']}: {c.get('fix') or c.get('note', '')}" for c in fails) \
         or "- (no failed checks — polish the report for clarity and triager-readiness)"
+    eng = os.path.dirname(os.path.abspath(__file__))
+    program = (finding or {}).get("program") or ""
+    intrusive = os.environ.get("HUNT_INTRUSIVE") == "1"
+    repro = ""
+    if program and intrusive:
+        try:
+            import targets as _T
+            sc = _T.load(program) or {}
+        except Exception:  # noqa: BLE001
+            sc = {}
+        in_scope = sc.get("in_scope", []) if isinstance(sc, dict) else []
+        ua = sc.get("user_agent") if isinstance(sc, dict) else None
+        scope_line = (f"IN-SCOPE hosts ONLY: {', '.join(in_scope[:30])}." if in_scope else
+                      f"Scope not pre-loaded — web-search this program's official bug-bounty scope ('{program}') and "
+                      "only hit hosts you confirm in-scope.")
+        repro = (
+            "\n\nACTIVELY REPRODUCE + CAPTURE REAL EVIDENCE (authorized active testing): don't just add "
+            "'TODO(operator)' lines — actually PROVE the bug and paste the captured proof into the report. "
+            + scope_line + (f" Send every request with User-Agent: '{ua}'." if ua else "") +
+            " You MAY create test accounts and perform state-changing actions to demonstrate impact. HARD "
+            "LIMITS: in-scope only, NO brute-force, NO destructive/DoS/mass-exploitation (prove it ONCE then STOP). "
+            "Tools:\n"
+            f"  - mint a test account: `python3 {eng}/identity.py new --program {program}` "
+            f"(read its mail: `python3 {eng}/identity.py poll --program {program} --email <addr>`).\n"
+            f"  - fetch with the stored login (bypasses edge gating): `python3 {eng}/netget.py GET \"<url>\" --as A` "
+            f"(POST: `... POST \"<url>\" '<body>' --as A`; second account: `--as B`).\n"
+            f"  - cross-account IDOR/BOLA sweep: `python3 {eng}/authz.py diff --slug {program} --url \"<A-owned url>\"`.\n"
+            "If you reproduce it, paste the REAL request+response into the report's PoC section (redact secrets) and "
+            "set an honest severity. If you CANNOT reproduce, say so plainly and keep a TODO(operator) line — never fabricate.")
     return (
-        "You are a bug-bounty REPORT FIXER. The operator's draft report failed the verification gate. "
-        f"The uploaded report + evidence files are in: {root} — you may READ and EDIT files in THIS "
-        "directory ONLY (never touch anything outside it). Your job: fix the report so it passes — "
-        "rewrite/add sections IN the report file(s): clear numbered repro steps, a PoC section with the "
-        "raw request/response, a concrete impact statement, honest severity. Never invent evidence the "
-        "operator didn't provide — if proof is missing, add a clearly-marked 'TODO(operator):' line "
-        "saying exactly what to capture, instead of fabricating it. Redact any real PII/secrets.\n\n"
-        f"VERIFY VERDICT: {(verify_res or {}).get('verdict', '?')}\n"
+        "You are a bug-bounty REPORT FIXER" + (" + REPRODUCER" if repro else "") + ". The operator's draft report "
+        f"failed the verification gate. The uploaded report + evidence files are in: {root} — READ and EDIT files "
+        "in THIS directory (write files here only). Your job: fix the report so it passes — rewrite/add sections "
+        "IN the report file(s): clear numbered repro steps, a PoC section with the raw request/response, a concrete "
+        "impact statement, honest severity. Never invent evidence — if proof is missing and you can't reproduce it, "
+        "add a clearly-marked 'TODO(operator):' line saying exactly what to capture. Redact any real PII/secrets."
+        + repro +
+        f"\n\nVERIFY VERDICT: {(verify_res or {}).get('verdict', '?')}\n"
         f"FAILED CHECKS + WHAT TO ADD:\n{fixes}\n\n"
         f"FINDING CONTEXT:\n{json.dumps({k: v for k, v in (finding or {}).items() if not k.startswith('_')}, indent=2)[:4000]}\n\n"
-        "Start by reading the report file(s), then make the fixes. Reply with a short summary of what "
-        "you changed and what the operator still needs to capture.")
+        "Start by reading the report file(s), then make the fixes (reproduce first if authorized). Reply with a "
+        "short summary of what you changed, whether you REPRODUCED it (real_bug: yes/no/inconclusive), and what the "
+        "operator still needs.")
 
 
 def _find_root(cid, base=DEFAULT_BASE):
@@ -161,7 +191,8 @@ def status(cid, base=DEFAULT_BASE):
     except Exception:  # noqa: BLE001
         log = []
     return {"chat_id": cid, "program": meta.get("program"), "created": meta.get("created"),
-            "verdict": meta.get("verdict"), "files": _listing(root), "log": log, "open": True}
+            "verdict": meta.get("verdict"), "files": _listing(root), "log": log, "open": True,
+            "busy": os.path.exists(_busy_path(root))}
 
 
 def list_chats(base=DEFAULT_BASE):
@@ -235,6 +266,60 @@ def message(cid, text, base=DEFAULT_BASE, program=None):
     _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
     return {"reply": r.get("result") or r.get("error") or "(no reply)", "error": r.get("error"),
             "files": _listing(root)}
+
+
+def _busy_path(root):
+    return os.path.join(root, ".busy")
+
+
+def message_async(cid, text, base=DEFAULT_BASE):
+    """Queue a follow-up and run the agent in the BACKGROUND. Agent edits (esp. active reproduction — making
+    accounts, re-running the PoC) take minutes, so we must NOT hold the HTTP request open past a proxy/client
+    timeout (the cause of 'error: timeout'). The panel polls status() until 'busy' clears. Returns at once."""
+    import threading
+    root = _find_root(cid, base)
+    if not root:
+        return {"error": "chat not found (closed or expired)"}
+    bp = _busy_path(root)
+    if os.path.exists(bp):                               # already running? (ignore a stale marker from a dead run)
+        try:
+            age = time.time() - float(open(bp).read() or 0)
+        except Exception:  # noqa: BLE001
+            age = 0
+        if age < MSG_TIMEOUT + 120:
+            return {"queued": False, "busy": True, "note": "agent is still working on the previous message"}
+    _append_log(root, "you", str(text or "")[:8000])
+    try:
+        open(bp, "w").write(str(time.time()))
+    except OSError:
+        pass
+
+    def _run():
+        import agent as A
+        meta = _load_meta(root) or {}
+        task = (str(text or "")[:8000] +
+                f"\n\n(Reminder: the files are in {root} — edit them in place, this directory only. "
+                "Reply with a short summary of changes.)")
+        try:
+            r = A.run_agent(task, context=None, resume_id=meta.get("session_id"),
+                            model=meta.get("model"), timeout=MSG_TIMEOUT, attempts=1)
+        except Exception as e:  # noqa: BLE001
+            r = {"error": str(e)[:200]}
+        if os.path.isdir(root):
+            if r.get("session_id"):
+                meta["session_id"] = r["session_id"]
+                try:
+                    json.dump(meta, open(_meta_path(root), "w"))
+                except OSError:
+                    pass
+            _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
+        try:
+            os.remove(bp)
+        except OSError:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"queued": True, "busy": True, "chat_id": cid}
 
 
 def read_file(cid, name, base=DEFAULT_BASE):

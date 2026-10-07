@@ -579,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if p.path == "/verify/fixchat/message":
                 import fixchat as FC
-                r = FC.message(b.get("chat_id", ""), b.get("message", ""), base=self.base)
+                r = FC.message_async(b.get("chat_id", ""), b.get("message", ""), base=self.base)
                 return self._send(200 if not r.get("error") else 404, r)
 
             if p.path == "/verify/fixchat/close":

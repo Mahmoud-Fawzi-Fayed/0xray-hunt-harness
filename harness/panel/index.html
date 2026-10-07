@@ -718,14 +718,30 @@ async function fcSend(){const inp=document.getElementById("fc-input");const t=in
 async function fcSend2(t){if(!FC_ID||FC_BUSY)return;
   FC_BUSY=true;fcSetReady(true);
   fcLog("you",t);fcLog("system","agent is working (may edit files)…","color:var(--mut)");
-  try{const d=await api("/verify/fixchat/message","POST",{chat_id:FC_ID,message:t});
+  const t0=Date.now();const cid=FC_ID;
+  const tickSys=()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("agent is working"))l.textContent=`agent is working (may edit files)… (${Math.round((Date.now()-t0)/1000)}s)`;};
+  try{
+    const q=await api("/verify/fixchat/message","POST",{chat_id:cid,message:t});   // returns immediately (async)
+    if(q.error)throw new Error(q.error);
+    if(q.queued===false&&q.busy){throw new Error(q.note||"agent still busy");}
+    let base=0;try{const s0=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));base=(s0.log||[]).filter(m=>m.role==="agent").length;}catch(e){}
+    const reply=await new Promise((resolve,reject)=>{                              // POLL until the run finishes
+      const iv=setInterval(async()=>{
+        if(FC_ID!==cid){clearInterval(iv);return reject(new Error("chat closed"));}
+        tickSys();
+        try{const s=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
+          if(!s.busy){clearInterval(iv);
+            (s.files||[]).forEach(x=>{if(FC_MTIMES[x.name]!==undefined&&FC_MTIMES[x.name]!==x.mtime)x._edited=true;});
+            fcRenderFiles(s.files);
+            const ag=(s.log||[]).filter(m=>m.role==="agent");
+            resolve(ag.length?ag[ag.length-1].text:"(no reply)");}
+        }catch(e){clearInterval(iv);reject(e);}
+      },3000);
+    });
     const sys=document.getElementById("fc-log").lastElementChild;if(sys&&sys.textContent.includes("agent is working"))sys.remove();
-    if(d.error){fcLog("system","error: "+d.error,"color:var(--red)");}
-    else{
-      (d.files||[]).forEach(x=>{if(FC_MTIMES[x.name]===undefined||FC_MTIMES[x.name]!==x.mtime)x._edited=true;});
-      fcRenderFiles(d.files);fcLog("agent",d.reply);
-    }
-  }catch(e){fcLog("system","error: "+e.message+" — your message may not have been sent; try again.","color:var(--red)");}
+    fcLog("agent",reply);
+  }catch(e){const sys=document.getElementById("fc-log").lastElementChild;if(sys&&sys.textContent.includes("agent is working"))sys.remove();
+    fcLog("system","error: "+e.message+" — try again.","color:var(--red)");}
   finally{FC_BUSY=false;document.getElementById("fc-input").focus();}}
 async function fcClose(){                            // works ALWAYS — even while opening
   const cid=FC_ID||(location.hash.startsWith("#fc=")?location.hash.slice(4):null);

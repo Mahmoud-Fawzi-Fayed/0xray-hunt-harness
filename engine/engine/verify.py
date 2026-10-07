@@ -528,21 +528,33 @@ def _triager_task(f, det, scope, base=DEFAULT_BASE):
     program = f.get("program") or (scope.get("name") if isinstance(scope, dict) else "") or ""
     in_scope = scope.get("in_scope", []) if isinstance(scope, dict) else []
     ua = scope.get("user_agent") if isinstance(scope, dict) else None
+    intrusive = os.environ.get("HUNT_INTRUSIVE") == "1"
     # ACTIVE reproduction (generic, any class/target): TRY the vuln, don't judge the prose alone.
-    repro = ""
+    action = ("You MAY create test accounts, log in, and perform STATE-CHANGING actions on your OWN test "
+              "accounts (the write / email-change / etc. that proves impact) — do what it takes to confirm it. "
+              "HARD LIMITS: in-scope only, NO brute-force, NO destructive/DoS/mass-exploitation (prove it ONCE, "
+              "then STOP)." if intrusive else
+              "Read-only, no writes/destructive actions, no brute force.")
     if in_scope:
-        repro = (
-            "\nACTIVELY REPRODUCE — do NOT decide from the write-up alone. This is an AUTHORIZED program; "
-            f"IN-SCOPE hosts ONLY: {', '.join(in_scope[:30])}. Read-only, no writes/destructive actions, no "
-            "brute force, no out-of-scope requests."
-            + (f" Send EVERY request with User-Agent: '{ua}'." if ua else "")
-            + " RE-RUN the PoC with REAL requests and judge from the LIVE response you observe:\n"
-            f"  - curl, or the harness fetch that carries the stored test login + bypasses edge gating:\n"
-            f"    `python3 {eng}/netget.py GET \"<url>\" --as A`  (POST: `... POST \"<url>\" '<body>' --as A`; victim acct: `--as B`).\n"
-            f"  - cross-account IDOR/BOLA: `python3 {eng}/authz.py diff --slug {program} --url \"<A-owned url>\"`.\n"
-            "If you REPRODUCE the vuln with real, exploitable security impact -> it is a REAL BUG "
-            "(real_bug:true, reproduced:true). If you can't reach/obtain what the impact needs, "
-            "reproduced:\"inconclusive\". If the live response disproves the claim, real_bug:false.\n")
+        scope_line = f"IN-SCOPE hosts ONLY: {', '.join(in_scope[:30])}."
+    else:
+        scope_line = (f"SCOPE NOT pre-loaded — LOOK IT UP FIRST: web-search / fetch this program's official "
+                      f"bug-bounty scope ('{program}' on HackerOne / Bugcrowd / Intigriti, or the vendor's "
+                      "security.txt / responsible-disclosure page), CONFIRM the finding's target host is in that "
+                      "scope, and note the source. If the target is OUT of scope or the program runs no bounty "
+                      "-> DO_NOT_SUBMIT. Only send requests to hosts you've confirmed in-scope.")
+    repro = (
+        "\nACTIVELY REPRODUCE — do NOT decide from the write-up alone. This is an AUTHORIZED engagement. "
+        + scope_line + " " + action
+        + (f" Send EVERY request with User-Agent: '{ua}'." if ua else "")
+        + " RE-RUN the PoC with REAL requests and judge from the LIVE response you observe:\n"
+        f"  - curl, or the harness fetch that carries the stored login + bypasses edge gating:\n"
+        f"    `python3 {eng}/netget.py GET \"<url>\" --as A`  (POST: `... POST \"<url>\" '<body>' --as A`; victim: `--as B`).\n"
+        f"  - cross-account IDOR/BOLA: `python3 {eng}/authz.py diff --slug {program} --url \"<A-owned url>\"`.\n"
+        f"  - need an account (or a second one): `python3 {eng}/identity.py new --program {program}`.\n"
+        "If you REPRODUCE the vuln with real, exploitable security impact -> REAL BUG (real_bug:true, "
+        "reproduced:true). If you can't reach/obtain what the impact needs -> reproduced:\"inconclusive\". "
+        "If the live response disproves the claim -> real_bug:false.\n")
     auth = ""                                      # inject the stored login so behind-login findings reproduce
     try:
         import authsession as _AS

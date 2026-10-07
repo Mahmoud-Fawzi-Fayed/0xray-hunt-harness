@@ -84,7 +84,8 @@ class Engine:
             pass
         self.model, self.max_hunts = model, max_hunts
         self.max_turns, self.timeout, self.mock = max_turns, timeout, mock
-        self.allow_intrusive = allow_intrusive
+        # HUNT_INTRUSIVE=1 unlocks ACTIVE testing (account creation + state-changing PoC to PROVE impact).
+        self.allow_intrusive = bool(allow_intrusive) or os.environ.get("HUNT_INTRUSIVE") == "1"
         self.expand = expand
         self.parallel = max(1, parallel)
         self.eng.log(f"engine start | scope={self.scope.name} in={self.scope.in_scope} "
@@ -131,7 +132,12 @@ class Engine:
                     "read-only evidence (SHOW that something is exposed; do NOT use it). A finding you cannot demonstrate "
                     "safely read-only -> report it with proof_note='requires intrusive validation (NOT performed)'.\n")
         else:
-            roe += "- Intrusive actions are AUTHORIZED for this run; still prefer the least-impactful PoC and log what you did.\n"
+            roe += ("- ACTIVE / INTRUSIVE TESTING AUTHORIZED: to PROVE a bug you MAY create test accounts, log in, "
+                    "and perform STATE-CHANGING actions (writes/updates, email/password change on your OWN test "
+                    "accounts, exercise an exposed credential just enough to show access) — do what it takes to "
+                    "DEMONSTRATE real impact, don't stop at read-only. HARD LIMITS still apply: IN-SCOPE hosts only; "
+                    "NO brute-force/cracking; NO destructive, DoS, or mass-exploitation (prove the primitive on ONE "
+                    "object/account, then STOP); minimise touching real victims' data; and STOP at draft. Log what you did.\n")
         return roe
 
     def _scope_audit(self, f):
