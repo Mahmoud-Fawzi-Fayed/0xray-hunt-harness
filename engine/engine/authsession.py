@@ -22,8 +22,10 @@ CLI:
   python3 engine/authsession.py selftest        # hermetic (mock agent, no network)
 """
 import argparse
+import glob
 import json
 import os
+import re
 import sys
 import time
 
@@ -111,6 +113,76 @@ def valid(session):
     if not isinstance(session, dict) or not session.get("success"):
         return False
     return bool(session.get("cookies")) or bool(session.get("headers"))
+
+
+def _parse_cookie(s):
+    """Parse a raw 'Cookie:' header (or a 'k=v; k2=v2' string) into {name: value}."""
+    out = {}
+    for part in re.split(r"[;\n]", str(s or "")):
+        part = part.strip()
+        if part.lower().startswith("cookie:"):
+            part = part[7:].strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            if k.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
+def set_manual(program, host, cookie=None, headers=None, token=None, user=None, base=DEFAULT_BASE):
+    """Store an OPERATOR-PROVIDED session (a ready test account) so the hunt tests AUTHENTICATED — the easy
+    path when a program forbids self-registration. `cookie` may be a raw Cookie-header string or a dict;
+    `token` becomes an `Authorization: Bearer` header. The host must be in the program's scope. Returns a
+    dict (ok / error)."""
+    slug = G._slug(program)
+    host = G._host_of(host) if host else ""
+    if not host:
+        return {"error": "provide the host this login is for (e.g. www.vinted.com)"}
+    try:
+        import scope as _sc
+        sd = json.load(open(os.path.join(os.path.expanduser(base), "_targets", slug + ".json")))
+        if not _sc.Scope(sd.get("in_scope", []), sd.get("out_of_scope", [])).in_scope_host(host):
+            return {"error": f"{host} is not in-scope for {program!r} — not saved"}
+    except (OSError, json.JSONDecodeError):
+        return {"error": f"unknown program {program!r} (add it first)"}
+    except Exception:  # noqa: BLE001
+        pass
+    cookies = _parse_cookie(cookie) if isinstance(cookie, str) else dict(cookie or {})
+    hdrs = dict(headers or {})
+    if token:
+        t = str(token).strip()
+        hdrs["Authorization"] = t if t.lower().startswith("bearer ") else ("Bearer " + t)
+    if not cookies and not hdrs:
+        return {"error": "provide cookies (paste the Cookie header) or a token / Authorization header"}
+    sess = {"success": True, "host": host, "program": slug, "cookies": cookies, "headers": hdrs,
+            "user": user or "operator-provided", "source": "manual", "ts": time.time()}
+    save(program, sess, base=base)
+    return {"ok": True, "program": slug, "host": host, "cookies": len(cookies),
+            "headers": list(hdrs.keys()), "user": sess["user"]}
+
+
+def clear_manual(program, base=DEFAULT_BASE):
+    """Remove the stored session for a program."""
+    try:
+        os.remove(_vault(program, base))
+        return {"ok": True, "program": G._slug(program)}
+    except OSError:
+        return {"ok": False, "error": "no stored session"}
+
+
+def status(base=DEFAULT_BASE):
+    """Which programs currently have a usable stored session — for the panel's auth indicators."""
+    out = {}
+    for f in glob.glob(os.path.join(os.path.expanduser(base), "_identity", "*-session.json")):
+        slug = os.path.basename(f)[:-len("-session.json")]
+        try:
+            s = json.load(open(f))
+        except Exception:  # noqa: BLE001
+            continue
+        if valid(s):
+            out[slug] = {"host": s.get("host"), "user": s.get("user"), "source": s.get("source", "auto"),
+                         "cookies": len(s.get("cookies") or {}), "headers": list((s.get("headers") or {}).keys())}
+    return out
 
 
 def _host_apex(h):

@@ -426,6 +426,9 @@ class Handler(BaseHTTPRequestHandler):
                           for t in T.all_targets(self.base)}
                 return self._send(200, {"audit": audit, "accounts_per_program": counts,
                                         "cap": _G.max_accounts()})
+            if p.path == "/auth/list":
+                import authsession as AS
+                return self._send(200, {"sessions": AS.status(self.base)})
             return self._send(404, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return  # client (n8n/panel poller) hung up mid-response — benign, don't double-fault
@@ -614,6 +617,17 @@ class Handler(BaseHTTPRequestHandler):
                 killed = _stop_target_sessions(slug)        # stop orchestrator + its agent sessions
                 # session STATE is kept on stop -> a rerun RESUMES the same sessions (no new ones)
                 return self._send(200, {"stopped": slug, "sessions_killed": killed, "state_kept": True})
+
+            if p.path == "/auth/set":
+                import authsession as AS
+                r = AS.set_manual(b.get("program", ""), b.get("host", ""),
+                                  cookie=b.get("cookie"), headers=b.get("headers"),
+                                  token=b.get("token"), user=b.get("user"), base=self.base)
+                return self._send(200 if r.get("ok") else 400, r)
+
+            if p.path == "/auth/clear":
+                import authsession as AS
+                return self._send(200, AS.clear_manual(b.get("program", ""), base=self.base))
 
             if p.path == "/targets/ingest":
                 text = b.get("text", "")

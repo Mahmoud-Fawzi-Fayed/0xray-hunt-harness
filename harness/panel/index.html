@@ -320,6 +320,16 @@
     <section class="page" id="p-targets">
       <div class="box"><div class="h"><span class="t">Targets</span><button class="ghost" onclick="refresh()">Refresh</button></div>
         <div class="b" style="padding:0"><table><thead><tr><th>Program</th><th>In-scope</th><th>Monitored apexes</th><th>Hunt</th><th></th></tr></thead><tbody id="tg"><tr><td colspan="5" class="empty" style="padding:14px">loading…</td></tr></tbody></table></div></div>
+      <div class="box"><div class="h"><span class="t">Authenticated access — provide a ready test login</span><span class="dim" style="font-size:11px">for programs that block self-registration · in-scope only · the hunt reuses it read-only</span></div><div class="b">
+        <div class="row2"><div class="fld"><label>Program</label><select id="auProg"></select></div>
+          <div class="fld"><label>Host this login is for</label><input id="auHost" placeholder="www.vinted.com"></div></div>
+        <div class="fld"><label>Cookies — paste the <b>Cookie</b> header (DevTools → Network → a request → Request Headers → Cookie), or <span class="mono">name=value; name2=value2</span></label><textarea id="auCookie" placeholder="sessionid=abc123; csrftoken=xyz; ..."></textarea></div>
+        <div class="fld"><label>…or an API token / Bearer (optional — used as Authorization header)</label><input id="auToken" placeholder="eyJ…"></div>
+        <button class="pri" onclick="authSet()">Save login &amp; hunt authenticated</button>
+        <span class="dim" style="margin-left:10px;font-size:11px">Use a <b>disposable test account</b>. On save, the hunt restarts so it tests behind login immediately.</span>
+        <div id="auMsg" class="msg"></div>
+        <div id="auList" style="margin-top:14px"></div>
+      </div></div>
       <div class="box"><div class="h"><span class="t">Add / update target</span></div><div class="b">
         <div class="row2"><div class="fld"><label>Program</label><input id="prog" placeholder="acme"></div><div class="fld"><label>Platform</label><input id="plat" placeholder="yeswehack / hackerone / bugcrowd"></div></div>
         <div class="fld"><label>In-scope hosts — one per line, wildcards ok</label><textarea id="hosts" placeholder="*.acme.com&#10;api.acme.com&#10;login.acme.com"></textarea></div>
@@ -468,7 +478,7 @@ document.addEventListener("click",e=>{const d=document.getElementById("ndrop");i
 function nav(el){document.querySelectorAll("nav a, .mnav a").forEach(a=>a.classList.remove("on"));el.classList.add("on");go(el.dataset.v);}
 function go(v){VIEW=v;document.querySelectorAll(".page").forEach(p=>p.classList.remove("on"));document.getElementById("p-"+v).classList.add("on");
   document.getElementById("title").textContent={overview:"Overview",targets:"Targets",activity:"Activity",findings:"Findings",verify:"Verify finding",capabilities:"Capabilities",logs:"Live logs"}[v];
-  document.querySelectorAll("nav a, .mnav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();if(v==="verify")fcLoadList();}
+  document.querySelectorAll("nav a, .mnav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));tick();if(v==="logs")loadLog();if(v==="verify")fcLoadList();if(v==="targets")authList();}
 function live(ok){document.getElementById("st").style.background=ok?"var(--grn)":"var(--red)";document.getElementById("stTxt").textContent=ok?"bridge online":"bridge offline";}
 function slug(n){return n.toLowerCase().replace(/[^a-z0-9._-]+/g,"-");}
 function fmtTs(t){try{return new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch(e){return t;}}
@@ -508,6 +518,7 @@ async function loadCore(){try{
   // targets table
   const sel=document.getElementById("logSel");
   sel.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");
+  const au=document.getElementById("auProg");if(au){const cur=au.value;au.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");if(cur)au.value=cur;}
   const runh=(st.hunts||[]).find(h=>h.running);
   if(!LOGPICKED){CURLOG=runh?runh.program:((t.targets||[])[0]||{}).name||"";}
   if(CURLOG)sel.value=CURLOG;
@@ -570,6 +581,21 @@ async function sessDoctor(confirm){try{
   loadCaps();
 }catch(e){msg("sessMsg",e.message,false);}}
 async function loadAlerts(){try{const j=await api("/novelty/feed?n=25");document.getElementById("alerts").innerHTML=(j.entries||[]).reverse().map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><b>${esc(x.target)}</b> <span class="dim">${esc((x.summary||[]).join(" · ").slice(0,140))}</span></div>`).join("")||`<div class="empty">No alerts yet.</div>`;}catch(e){}}
+async function authList(){try{const j=await api("/auth/list");const s=j.sessions||{};const keys=Object.keys(s);
+  const el=document.getElementById("auList");if(!el)return;
+  el.innerHTML=keys.length?`<div class="dim" style="font-size:11px;margin-bottom:6px">SAVED LOGINS</div>`+keys.map(k=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #141a25"><span>🔑 <b>${esc(k)}</b> <span class="dim" style="font-size:11px">· ${esc(s[k].host||"")} · ${s[k].cookies||0} cookie(s)${(s[k].headers&&s[k].headers.length)?" + "+esc(s[k].headers.join(",")):""} · ${esc(s[k].source||"")}</span></span><button class="danger sm" onclick="authClear('${esc(k)}')">Remove</button></div>`).join(""):`<div class="empty" style="padding:6px">No logins saved — these hunts run unauthenticated.</div>`;}catch(e){}}
+async function authSet(){const program=(document.getElementById("auProg").value||"").trim();const host=document.getElementById("auHost").value.trim();const cookie=document.getElementById("auCookie").value.trim();const token=document.getElementById("auToken").value.trim();
+  if(!program||!host||(!cookie&&!token)){msg("auMsg","Pick a program, the host, and paste cookies or a token.",false);return;}
+  msg("auMsg","Saving…",true);
+  try{const r=await api("/auth/set","POST",{program,host,cookie,token});
+    document.getElementById("auCookie").value="";document.getElementById("auToken").value="";
+    msg("auMsg",`Saved for ${esc(r.program)} on ${esc(r.host)} — ${r.cookies} cookie(s)${(r.headers&&r.headers.length)?" + "+esc(r.headers.join(",")):""}. Restarting the hunt to use it…`,true);
+    toast("Login saved for "+r.program+" — hunting authenticated","ok");
+    try{await api("/hunt","POST",{program});}catch(e){}         // restart so the hunt picks up the session now
+    authList();refresh();
+  }catch(e){msg("auMsg",e.message,false);toast(e.message,"err");}}
+async function authClear(p){if(!(await confirmModal("Remove the saved login for "+p+"? The hunt goes back to unauthenticated.","Remove login")))return;
+  try{await api("/auth/clear","POST",{program:p});toast("Removed login for "+p,"ok");authList();}catch(e){toast(e.message,"err");}}
 async function loadLog(){if(!CURLOG){const r=Object.values(RUN).find(h=>h&&h.running);if(r)CURLOG=r.program;}if(!CURLOG)return;try{const j=await api("/hunt/log?n=500&program="+encodeURIComponent(CURLOG));const t=document.getElementById("term");const b=t.scrollTop+t.clientHeight>=t.scrollHeight-40;
   t.textContent=(j.lines||[]).join("\n")||"(no log yet — the hunt writes here as it runs)";if(TAIL||b)t.scrollTop=t.scrollHeight;}catch(e){document.getElementById("term").textContent="log error: "+e.message;}}
 async function addTarget(){const program=prog.value.trim(),hosts=document.getElementById("hosts").value.trim();if(!program||!hosts){msg("addMsg","Enter a program and hosts.",false);return;}
