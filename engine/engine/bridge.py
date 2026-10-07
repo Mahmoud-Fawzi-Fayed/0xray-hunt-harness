@@ -550,6 +550,12 @@ class Handler(BaseHTTPRequestHandler):
                         res["verdict"] = V.combine_verdict(res, op)  # strictest across ALL models + the gate
                         res["accept"] = res["verdict"] == "READY"
                 res["summary"] = V._summarize(res, op)               # brief reflects the FINAL verdict
+                # REAL BUG = reproduced with impact (a model actively re-ran it, or the deterministic live
+                # re-test confirmed it) AND it isn't rejected. This is the dynamic real-vs-not signal.
+                _live_ok = (res.get("live") or {}).get("confirmed") is True
+                res["reproduced"] = bool((op or {}).get("real_bug") or _live_ok)
+                res["real_bug"] = bool(res.get("verdict") == "READY"
+                                       and ((op or {}).get("real_bug") or _live_ok))
                 # verify-only hygiene: remove the uploaded files + the ephemeral triager chat sessions
                 try:
                     V._cleanup(paths=[intake["dir"]] if intake and intake.get("dir") else [],

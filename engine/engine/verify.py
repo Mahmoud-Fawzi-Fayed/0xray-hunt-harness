@@ -505,7 +505,7 @@ def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
     try:
         import agent as A
         scope = _load_scope(program or f.get("program"), base) or {}
-        task = _triager_task(f, det, scope)
+        task = _triager_task(f, det, scope, base)
         r = A.run_agent(task, context=None, timeout=timeout, attempts=1)
         js = A.extract_json(r.get("result", "")) if hasattr(A, "extract_json") else None
         if isinstance(js, dict) and js.get("verdict"):
@@ -516,7 +516,7 @@ def deep_opinion(f, det, program=None, base=DEFAULT_BASE, timeout=180):
     return None
 
 
-def _triager_task(f, det, scope):
+def _triager_task(f, det, scope, base=DEFAULT_BASE):
     # everything the operator uploaded reaches the triager: full finding JSON (text + scripts already
     # merged into evidence) AND the on-disk dir so the agent can READ the images/scripts itself.
     files_dir = f.get("_files_dir")
@@ -524,16 +524,46 @@ def _triager_task(f, det, scope):
     files_note = (f"\nUPLOADED EVIDENCE FILES are saved at: {files_dir} ({names}). "
                   "READ them with your file tools — images show the PoC, scripts are the exploit — "
                   "and factor what you see into the verdict.\n" if files_dir else "")
+    eng = os.path.dirname(os.path.abspath(__file__))
+    program = f.get("program") or (scope.get("name") if isinstance(scope, dict) else "") or ""
+    in_scope = scope.get("in_scope", []) if isinstance(scope, dict) else []
+    ua = scope.get("user_agent") if isinstance(scope, dict) else None
+    # ACTIVE reproduction (generic, any class/target): TRY the vuln, don't judge the prose alone.
+    repro = ""
+    if in_scope:
+        repro = (
+            "\nACTIVELY REPRODUCE — do NOT decide from the write-up alone. This is an AUTHORIZED program; "
+            f"IN-SCOPE hosts ONLY: {', '.join(in_scope[:30])}. Read-only, no writes/destructive actions, no "
+            "brute force, no out-of-scope requests."
+            + (f" Send EVERY request with User-Agent: '{ua}'." if ua else "")
+            + " RE-RUN the PoC with REAL requests and judge from the LIVE response you observe:\n"
+            f"  - curl, or the harness fetch that carries the stored test login + bypasses edge gating:\n"
+            f"    `python3 {eng}/netget.py GET \"<url>\" --as A`  (POST: `... POST \"<url>\" '<body>' --as A`; victim acct: `--as B`).\n"
+            f"  - cross-account IDOR/BOLA: `python3 {eng}/authz.py diff --slug {program} --url \"<A-owned url>\"`.\n"
+            "If you REPRODUCE the vuln with real, exploitable security impact -> it is a REAL BUG "
+            "(real_bug:true, reproduced:true). If you can't reach/obtain what the impact needs, "
+            "reproduced:\"inconclusive\". If the live response disproves the claim, real_bug:false.\n")
+    auth = ""                                      # inject the stored login so behind-login findings reproduce
+    try:
+        import authsession as _AS
+        sess = _AS.load(program, base=base)
+        if _AS.valid(sess) and f.get("url"):
+            auth = _AS.auth_block(sess, f.get("url"))
+    except Exception:  # noqa: BLE001
+        pass
     return (
-        "You are a STRICT bug-bounty triager. Decide if this draft finding is submittable. "
-        "Be harsh: reflection-only, error-only, no-impact, theoretical, out-of-scope, non-qualifying, "
-        "or an impact that depends on a victim secret the PoC never obtains (a session/id/token) = REJECT.\n\n"
-        f"FINDING:\n{json.dumps(f, indent=2)[:24000]}\n{files_note}\n"
+        "You are a STRICT bug-bounty triager who REPRODUCES findings, not just reads them. Decide if this "
+        "draft finding is a REAL, submittable bug. Be harsh: reflection-only, error-only, no-impact, "
+        "theoretical, out-of-scope, non-qualifying, or an impact that depends on a victim secret the PoC "
+        "never obtains (a session/id/token) = REJECT."
+        + repro + auth +
+        f"\n\nFINDING:\n{json.dumps(f, indent=2)[:24000]}\n{files_note}\n"
         f"PROGRAM non-qualifying: {scope.get('non_qualifying', [])[:20]}\n"
         f"PROGRAM qualifying classes: {scope.get('qualifying_classes', [])}\n"
         f"Deterministic pre-check: verdict={det['verdict']}, failed={det['failed']}\n\n"
-        "Reply ONLY JSON: {\"verdict\":\"READY|NEEDS_FIXES|DO_NOT_SUBMIT\",\"reasons\":[...],"
-        "\"missing\":[...],\"severity_opinion\":\"...\"}")
+        "Reply ONLY JSON: {\"verdict\":\"READY|NEEDS_FIXES|DO_NOT_SUBMIT\","
+        "\"real_bug\":true|false,\"reproduced\":true|false|\"inconclusive\","
+        "\"reasons\":[...],\"missing\":[...],\"severity_opinion\":\"...\"}")
 
 
 def _cleanup(paths=(), session_ids=()):
@@ -570,7 +600,13 @@ def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_
     import agent as A
     from concurrent.futures import ThreadPoolExecutor
     scope = _load_scope(program or f.get("program"), base) or {}
-    task = _triager_task(f, det, scope)
+    task = _triager_task(f, det, scope, base)
+    # so the models' ACTIVE reproduction (netget --as A / curl) carries the stored login + program UA
+    _prog = program or f.get("program") or (scope.get("name") if isinstance(scope, dict) else None)
+    if _prog:
+        os.environ["HUNT_TARGET_SLUG"] = str(_prog)
+    if isinstance(scope, dict) and scope.get("user_agent"):
+        os.environ["HUNT_USER_AGENT"] = scope["user_agent"]
     models = _pool_models()[:max_models] or [None]
     per_model_timeout = timeout or int(os.environ.get("HUNT_VERIFY_MODEL_TIMEOUT", "300"))
 
@@ -595,7 +631,11 @@ def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_
         opinions = list(ex.map(_one, models))
     verdicts = [o["verdict"] for o in opinions if o.get("verdict") in _VERDICT_ORDER]
     final = max(verdicts, key=lambda v: _VERDICT_ORDER[v]) if verdicts else None
-    return {"verdict": final, "opinions": opinions,
+    # REAL BUG = a model actually REPRODUCED it with impact AND no model rejected it (strictest != reject).
+    real_bug = bool(final and final != "DO_NOT_SUBMIT"
+                    and any(o.get("real_bug") is True for o in opinions))
+    reproduced = [o.get("reproduced") for o in opinions if o.get("reproduced") not in (None, "")]
+    return {"verdict": final, "real_bug": real_bug, "reproduced": reproduced, "opinions": opinions,
             "models_run": [o.get("model") for o in opinions],
             "session_ids": [o["session_id"] for o in opinions if o.get("session_id")],
             "agreement": (len(set(verdicts)) == 1) if verdicts else None}
