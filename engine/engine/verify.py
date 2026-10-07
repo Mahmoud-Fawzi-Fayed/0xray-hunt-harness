@@ -426,11 +426,19 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
                          r"cross-site form|csrf reproduced|in-scope (?:api|response|endpoint).{0,60}(?:uuid|id)|"
                          r"response (?:lists|returned) (?:another|other|victim)|enumerable|sequential id|"
                          r"demonstrated (?:a |the )?(?:way|method) to obtain|obtained from an in-scope")
-    if _precond.search(blob) and not _proven.search(blob):
+    # Concrete proof (incl. a data/secret disclosure actually returned) OVERRIDES this heuristic, and a miss
+    # is ADVISORY (NEEDS_FIXES) — never a hard DO_NOT_SUBMIT. A secondary/downstream mention of "session
+    # hijacking" must not kill a finding whose PRIMARY impact is proven (e.g. an authed config dump).
+    try:
+        import disposition as _DPp
+        _has_proof = bool(_DPp._PROOF_SHOWN.search(blob))
+    except Exception:  # noqa: BLE001
+        _has_proof = False
+    if _precond.search(blob) and not _proven.search(blob) and not _has_proof:
         add("impact precondition is demonstrated (not hypothetical)", False,
-            "impact assumes obtaining a victim session/secret the PoC never obtains — show how an attacker "
-            "gets it (XSS/CSRF/enumerable id/in-scope oracle), or it's RTFS 'hypothetical'")
-        hard_reject = hard_reject or "hypothetical precondition (victim secret not obtained)"
+            "impact leans on a precondition the PoC may not obtain — show how an attacker gets it "
+            "(XSS/CSRF/enumerable id/in-scope oracle), or lead with the primary impact you DID prove "
+            "(advisory — not a hard block)")
 
     # 10) LIVE reproduction — actually probe the vuln (read-only, in-scope only). A negative signal
     # (payload encoded / no redirect) fails the check with guidance; inconclusive (auth needed) never does.
@@ -683,7 +691,12 @@ CLASS_HINTS = [
     (r"cross.?site script|\bxss\b", "xss"), (r"remote code|\brce\b", "rce"),
     (r"\bidor\b|insecure direct object|broken object level|\bbola\b|broken access", "idor"),
     (r"privilege escalation", "idor"), (r"authentication bypass|auth bypass|broken auth", "auth-bypass"),
-    (r"business logic", "business-logic"), (r"\bssrf\b|server.?side request|xspa", "ssrf"),
+    (r"business logic", "business-logic"),
+    (r"information disclosure|info(?:rmation)? ?leak|sensitive (?:data|config\w*|information)\s+"
+     r"(?:is |are |was |were )?(?:expos|disclos|leak|accessible)|internal (?:config\w*|infrastructure)"
+     r".{0,30}(?:expos|disclos|accessible|dump|leak)|exposes? .{0,40}(?:internal|infrastructure|"
+     r"credential|secret|employee|service account)", "info-leak"),
+    (r"\bssrf\b|server.?side request|xspa", "ssrf"),
     (r"\blfi\b|local file|path traversal", "lfi"), (r"\bxxe\b", "xxe"), (r"\bcors\b", "cors"),
     (r"\bcsrf\b|cross.?site request", "csrf"), (r"open redirect", "open-redirect"),
     (r"exposed secret|leaked (key|credential|token)|hardcoded secret", "secret"),
@@ -701,20 +714,40 @@ def _first(text, pats, group=1):
 
 
 def _section_md(text, keys):
-    """Grab the body under a heading like 'Steps to reproduce' until the next heading."""
+    """Grab the body under a heading like 'Steps to reproduce' until the next heading of the SAME or
+    SHALLOWER level. Deeper sub-headings (e.g. '### 1.', '### 2.' under a '## Steps to Reproduce') are PART
+    of the section — stopping at them was dropping numbered repro steps and failing 'has repro steps'."""
     kset = [k.lower() for k in keys]
-    out, cap = [], False
+    out, cap, cap_level = [], False, 0
     for ln in (text or "").splitlines():
-        head = bool(re.match(r"^\s*#{1,6}\s", ln)) or (0 < len(ln.strip()) < 42 and ln.strip().endswith(":"))
+        m = re.match(r"^\s*(#{1,6})\s", ln)
+        colon = (0 < len(ln.strip()) < 42 and ln.strip().endswith(":"))
+        head = bool(m) or colon
+        level = len(m.group(1)) if m else (99 if colon else 0)   # deeper # => bigger level; colon = deepest
         label = ln.strip().lstrip("#").strip().rstrip(":").strip().lower()
-        if cap and head and label not in kset:
+        if cap and head and level <= cap_level and label not in kset:
             break
         if not cap and head and any(label == k or label.startswith(k) for k in kset):
             cap = True
+            cap_level = level
             continue
         if cap:
             out.append(ln)
     return "\n".join(out).strip()[:4000]
+
+
+def _url_from_http_block(text):
+    """Build the target URL from an HTTP request block (a 'Host:' header + the request line's path). The
+    PoC's real target is usually written as a raw request, NOT a bare https:// URL — so the naive URL grab
+    picks an evidence/docs link instead (e.g. a docs.google.com URL quoted in the findings). Returns ''
+    when there is no request block."""
+    host = _first(text, [r"^\s*Host:\s*([A-Za-z0-9.\-]+)"])
+    if not host:
+        return ""
+    path = _first(text, [r"^\s*(?:GET|POST|PUT|PATCH|DELETE|OPTIONS)\s+(/\S*)\s+HTTP"]) or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"https://{host}{path}"
 
 
 def extract_finding(text):
@@ -723,8 +756,12 @@ def extract_finding(text):
     low = t.lower()
     f = {}
     f["title"] = _first(t, [r"^\s*#\s*(.+)$", r"^\s*title\s*[:\-]\s*(.+)$", r'"title"\s*:\s*"([^"]+)"'])[:160]
-    f["url"] = _first(t, [r"^\s*(?:url|affected|endpoint|target)\s*[:\-]\s*(\S+)",
-                          r'"url"\s*:\s*"([^"]+)"', r"(https?://[^\s\"')<>]+)"])
+    # prefer an explicit URL/Target line, THEN the PoC request block's Host (the real target), and only
+    # fall back to the first bare https:// link (which is often an evidence/docs URL, not the target).
+    f["url"] = (_first(t, [r"^\s*(?:url|affected|endpoint|target)\s*[:\-]\s*(https?://\S+)",
+                           r'"url"\s*:\s*"([^"]+)"'])
+                or _url_from_http_block(t)
+                or _first(t, [r"(https?://[^\s\"')<>]+)"]))
     sev = _first(t, [r"^\s*severity\s*[:\-]\s*(critical|high|medium|low)",
                      r'"severity"\s*:\s*"(critical|high|medium|low)', r"\b(critical|high|medium|low)\b"])
     if sev:

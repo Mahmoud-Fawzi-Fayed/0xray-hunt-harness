@@ -214,7 +214,12 @@ _PROOF_SHOWN = re.compile(
     r"|\buid=\d|\bgid=\d|\bwhoami\b|root@|root:.*:0:0|/etc/passwd|command output"
     r"|169\.254\.169\.254|metadata.*(token|credential|role)"
     r"|union select|sleep\(\d|extracted (the )?(data|rows|password|hash|version)"
-    r"|stole (the )?(session|token|cookie)|session (token |cookie )?(stolen|hijacked|exfiltrated)",
+    r"|stole (the )?(session|token|cookie)|session (token |cookie )?(stolen|hijacked|exfiltrated)"
+    # info-disclosure proof: sensitive internal data actually RETURNED in the response (a config/secret dump)
+    r"|response (?:contains?|returned|included?|exposes?|lists?) [^\n]{0,50}"
+    r"(?:config|secret|credential|token|api[_ ]?key|internal|employee|service account|system prompt|private key)"
+    r"|\d[\d,]{2,}[^\n]{0,30}(?:config(?:uration)?|secret|credential|record|entr(?:y|ies))"
+    r"|(?:gcp|aws|azure) (?:project|account) (?:number|id)|service account id|dynamic ?config",
     re.I)
 
 
