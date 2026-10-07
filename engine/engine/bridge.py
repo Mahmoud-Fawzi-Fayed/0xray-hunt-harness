@@ -429,6 +429,24 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == "/auth/list":
                 import authsession as AS
                 return self._send(200, {"sessions": AS.status(self.base)})
+            if p.path == "/auth/check":
+                import authsession as AS
+                import targets as T
+                prog = parse_qs(p.query).get("program", [""])[0]
+                res = AS.check_live(prog, self.base)
+                slug = T._slug(prog)
+                logp = os.path.expanduser("~/.pm2/logs/hunt-" + slug + "-out.log")
+                res["hunt_status"] = "no running hunt for this program"
+                try:
+                    tail = open(logp, encoding="utf-8", errors="ignore").readlines()[-5000:]
+                    for line in reversed(tail):
+                        if "AUTHENTICATED — using test session" in line:
+                            res["hunt_status"] = "hunt is USING the session (log shows 'AUTHENTICATED')"; break
+                        if "hunting unauthenticated" in line:
+                            res["hunt_status"] = "hunt ran UNAUTHENTICATED last round — restart it or wait one round to apply"; break
+                except OSError:
+                    pass
+                return self._send(200, res)
             return self._send(404, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return  # client (n8n/panel poller) hung up mid-response — benign, don't double-fault

@@ -218,6 +218,63 @@ def status(base=DEFAULT_BASE):
     return out
 
 
+def check_live(program, base=DEFAULT_BASE, timeout=12):
+    """Live probe: fetch the session's host WITH and WITHOUT the stored cookies and compare, to tell whether
+    the target actually ACCEPTS the login (vs expired/rejected). Best-effort heuristic; returns a verdict."""
+    import urllib.request
+    import urllib.error
+    s = load(program, base)
+    if not valid(s):
+        return {"ok": False, "error": "no valid session stored for this program"}
+    host = G._host_of(s.get("host", ""))
+    if not host:
+        return {"ok": False, "error": "stored session has no host"}
+    url = "https://" + host + "/"
+    cstr = "; ".join(f"{k}={v}" for k, v in (s.get("cookies") or {}).items())
+    extra = dict(s.get("headers") or {})
+    ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"
+
+    def fetch(auth):
+        h = {"User-Agent": ua, "Accept": "text/html,application/json"}
+        if auth:
+            if cstr:
+                h["Cookie"] = cstr
+            h.update(extra)
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout)
+            body = r.read(300000)
+            return {"status": getattr(r, "status", r.getcode()), "final": r.geturl(),
+                    "len": len(body), "body": body.decode("utf-8", "ignore")}
+        except urllib.error.HTTPError as e:
+            return {"status": e.code, "final": url, "len": 0, "body": ""}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)[:120]}
+
+    a = fetch(True)
+    if a.get("error"):
+        return {"ok": False, "error": "could not reach " + host + ": " + a["error"]}
+    n = fetch(False)
+    af = (a.get("final") or "").lower()
+    body = a.get("body", "").lower()
+    markers = ["logout", "log out", "my profile", "account-manager", '"isloggedin":true',
+               'data-logged-in="true"', "karma", "/settings", "loggedin\":true"]
+    authed, note = None, ""
+    if any(k in af for k in ("login", "signin", "sign-in")):
+        authed, note = False, "the session request was redirected to a login page — session rejected/expired"
+    elif n.get("status") in (401, 403) and a.get("status") == 200:
+        authed, note = True, "authenticated request returns 200 while anonymous is blocked (401/403)"
+    elif any(m in body for m in markers):
+        authed, note = True, "logged-in markers present in the response (logout / profile / settings / karma)"
+    elif a.get("len") and n.get("len") and abs(a["len"] - n["len"]) > 3000:
+        authed, note = True, "authenticated response is materially different from anonymous (personalized)"
+    else:
+        authed, note = None, ("couldn't confirm from the homepage — the hunt still tries the session; "
+                              "check the hunt log for the 'AUTHENTICATED' line")
+    return {"ok": True, "program": G._slug(program), "host": host, "authed": authed, "note": note,
+            "with_session": {k: a.get(k) for k in ("status", "final", "len")},
+            "anonymous": {k: n.get(k) for k in ("status", "final", "len")}}
+
+
 def _host_apex(h):
     parts = [p for p in G._host_of(h).split(".") if p]
     return ".".join(parts[-2:]) if len(parts) >= 2 else G._host_of(h)

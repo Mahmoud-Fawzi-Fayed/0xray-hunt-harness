@@ -583,7 +583,15 @@ async function sessDoctor(confirm){try{
 async function loadAlerts(){try{const j=await api("/novelty/feed?n=25");document.getElementById("alerts").innerHTML=(j.entries||[]).reverse().map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><b>${esc(x.target)}</b> <span class="dim">${esc((x.summary||[]).join(" · ").slice(0,140))}</span></div>`).join("")||`<div class="empty">No alerts yet.</div>`;}catch(e){}}
 async function authList(){try{const j=await api("/auth/list");const s=j.sessions||{};const keys=Object.keys(s);
   const el=document.getElementById("auList");if(!el)return;
-  el.innerHTML=keys.length?`<div class="dim" style="font-size:11px;margin-bottom:6px">SAVED LOGINS</div>`+keys.map(k=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #141a25"><span>🔑 <b>${esc(k)}</b> <span class="dim" style="font-size:11px">· ${esc(s[k].host||"")} · ${s[k].cookies||0} cookie(s)${(s[k].headers&&s[k].headers.length)?" + "+esc(s[k].headers.join(",")):""} · ${esc(s[k].source||"")}</span></span><button class="danger sm" onclick="authClear('${esc(k)}')">Remove</button></div>`).join(""):`<div class="empty" style="padding:6px">No logins saved — these hunts run unauthenticated.</div>`;}catch(e){}}
+  el.innerHTML=keys.length?`<div class="dim" style="font-size:11px;margin-bottom:6px">SAVED LOGINS</div>`+keys.map(k=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #141a25"><span>🔑 <b>${esc(k)}</b> <span class="dim" style="font-size:11px">· ${esc(s[k].host||"")} · ${s[k].cookies||0} cookie(s)${(s[k].headers&&s[k].headers.length)?" + "+esc(s[k].headers.join(",")):""} · ${esc(s[k].source||"")}</span></span><span style="display:flex;gap:6px;flex:0 0 auto"><button class="ghost sm" onclick="authCheck('${esc(k)}')">Test</button><button class="danger sm" onclick="authClear('${esc(k)}')">Remove</button></span></div>`).join(""):`<div class="empty" style="padding:6px">No logins saved — these hunts run unauthenticated.</div>`;}catch(e){}}
+async function authCheck(p){toast("Testing the "+p+" login (live + hunt status)…","info");
+  try{const d=await api("/auth/check?program="+encodeURIComponent(p));
+    if(!d.ok){toast(p+": "+(d.error||"check failed"),"err");return;}
+    const type=d.authed===true?"ok":(d.authed===false?"err":"warn");
+    const label=d.authed===true?"✓ WORKING":(d.authed===false?"✗ REJECTED / EXPIRED":"? inconclusive");
+    toast(`${p}: ${label} — ${d.note}`,type);
+    toast(`${p} hunt: ${d.hunt_status}`, d.hunt_status.includes("USING")?"ok":"warn");
+  }catch(e){toast(e.message,"err");}}
 async function authSet(){const program=(document.getElementById("auProg").value||"").trim();const host=document.getElementById("auHost").value.trim();const cookie=document.getElementById("auCookie").value.trim();const token=document.getElementById("auToken").value.trim();
   if(!program||(!cookie&&!token)){msg("auMsg","Pick a program and paste cookies (JSON export / curl / Cookie header) or a token. Host is auto-detected.",false);return;}
   msg("auMsg","Saving…",true);
