@@ -656,31 +656,44 @@ class Engine:
                                for cf in self.eng.state["confirmed"])]
         self.eng.log(f"validate: {len(pending)} candidate(s) to adversarially verify, {self.parallel} at a time")
         for c, v in self._run_parallel(self._validate_agent, pending):
-            disp = self._disposition(c, v)
-            if v and v.get("real") and disp["verdict"] != "PASS":
-                self.eng.state.setdefault("disposition_held", []).append({
-                    "url": c.get("url"), "vuln_class": c.get("vuln_class"),
-                    "verdict": disp["verdict"], "reason": disp.get("reason", ""),
-                })
-                self.eng.save()
-                _lrn("record_outcome", self.scope.name, c["vuln_class"],
-                     "held-" + disp["verdict"].lower().replace("_", "-"),
-                     disp.get("reason", ""), base=self.base)
-                self.eng.log(f"validate: HELD {disp['verdict']} {c['vuln_class']} @ {c['url']} — {disp.get('reason','')}")
+            cls, url = c.get("vuln_class"), c.get("url")
+            repro = self._reproduce(c, v)              # INDEPENDENT, deterministic real-vs-not separator
+            c["reproduction"] = repro
+            llm_real = bool(v and v.get("real"))
+            # 1) deterministic DISPROOF overrides an LLM 'real' -> NOT a real bug (kills false positives)
+            if repro["status"] == "disproved":
+                _lrn("record_outcome", self.scope.name, cls, "false-positive",
+                     f"disproved by {repro['method']}: {repro['signal']}", base=self.base)
+                self.eng.log(f"validate: ✗ NOT REAL (disproved via {repro['method']}) {cls} @ {url} — {repro['signal']}")
                 continue
-            if v and v.get("real"):
-                if v.get("severity"):
-                    c["severity"] = v["severity"]  # use the validator's CALIBRATED severity, not the hunt's
-                self.eng.confirm(c, v)
-                _lrn("record_outcome", self.scope.name, c["vuln_class"], "confirmed",
-                     v.get("reason", ""), base=self.base)
-                self.eng.log(f"validate: CONFIRMED {c['vuln_class']} @ {c['url']} ({v.get('severity','')})"
-                             + (f" ⚠ scope-flagged: {', '.join(c['scope_warning'])}" if c.get('scope_warning') else ''))
-            else:
-                _lrn("record_outcome", self.scope.name, c["vuln_class"], "false-positive",
+            # 2) the skeptical validator says it's not real -> drop it
+            if not llm_real:
+                _lrn("record_outcome", self.scope.name, cls, "false-positive",
                      (v or {}).get("reason", ""), base=self.base)
-                self.eng.log(f"validate: rejected (false positive) {c['vuln_class']} @ {c['url']} — "
+                self.eng.log(f"validate: ✗ rejected (false positive) {cls} @ {url} — "
                              f"{(v or {}).get('reason', 'no verdict')}")
+                continue
+            # 3) RTFS / Informative disposition hold (advisory text-gate) -> held, not reported
+            disp = self._disposition(c, v)
+            if disp["verdict"] != "PASS":
+                self.eng.state.setdefault("disposition_held", []).append({
+                    "url": url, "vuln_class": cls, "verdict": disp["verdict"], "reason": disp.get("reason", "")})
+                self.eng.save()
+                _lrn("record_outcome", self.scope.name, cls,
+                     "held-" + disp["verdict"].lower().replace("_", "-"), disp.get("reason", ""), base=self.base)
+                self.eng.log(f"validate: HELD {disp['verdict']} {cls} @ {url} — {disp.get('reason','')}")
+                continue
+            # 4) REAL -> confirm, LABELLED by how we know it's real (reproduced vs LLM-only-needs-manual-check)
+            if v.get("severity"):
+                c["severity"] = v["severity"]     # use the validator's CALIBRATED severity, not the hunt's
+            self.eng.confirm(c, v)
+            reproduced = repro["status"] == "reproduced"
+            tag = ("✅ CONFIRMED REAL (reproduced)" if reproduced
+                   else "⚠ CONFIRMED — LLM-validated but NOT independently reproduced; verify before submit")
+            _lrn("record_outcome", self.scope.name, cls,
+                 "confirmed" if reproduced else "confirmed-unreproduced", repro["signal"], base=self.base)
+            self.eng.log(f"validate: {tag} [{repro['method']}] {cls} @ {url} ({v.get('severity','')})"
+                         + (f" ⚠ scope-flagged: {', '.join(c['scope_warning'])}" if c.get('scope_warning') else ''))
 
     def _disposition(self, c, v):
         """Score the candidate the way a program triager scores RTFS / Informative. Never raises."""
@@ -698,6 +711,51 @@ class Engine:
             "disposition": (v or {}).get("disposition") or c.get("disposition") or {},
         }
         return DP.check(finding)
+
+    def _reproduce(self, c, v):
+        """INDEPENDENT, deterministic real-vs-not separator — grounds 'real' in actual re-execution, not an
+        LLM's word. (1) replays the proof read-only (verify.live_check: scope-guarded, GET-only, few probes),
+        (2) for IDOR/BOLA with a second identity, runs an authz cross-account diff, (3) else detects concrete
+        demonstrated impact already present in the write-up. Returns {status: reproduced|disproved|inconclusive,
+        method, signal}. Never raises into the round."""
+        cls = (c.get("vuln_class") or "").lower()
+        finding = {"vuln_class": cls, "url": c.get("url"), "param": c.get("param"),
+                   "program": self.scope.name, "evidence": c.get("evidence", ""),
+                   "request": c.get("request", "")}
+        note = ""
+        try:                                           # 1) deterministic live re-test (read-only, in-scope)
+            import verify as _V
+            lv = _V.live_check(finding, program=self.scope.name, base=self.base)
+            note = lv.get("note", "")
+            if lv.get("confirmed") is True:
+                return {"status": "reproduced", "method": "live-retest", "signal": note}
+            if lv.get("confirmed") is False:
+                return {"status": "disproved", "method": "live-retest", "signal": note}
+        except Exception as e:  # noqa: BLE001
+            note = f"live unavailable: {e}"
+        if cls in ("idor", "bola") and str(c.get("url") or "").startswith("http"):
+            try:                                       # 2) two-account cross-account diff (needs identity B)
+                import authz as _AZ
+                import authn as _AN
+                if "B" in _AN.identities(self.scope.name, self.base):
+                    d = _AZ.diff_one("GET", c["url"], None, self.scope.name)
+                    if d.get("bola_suspect"):
+                        return {"status": "reproduced", "method": "two-account-diff",
+                                "signal": f"B's request to A's object returned matching data (sim={d.get('similarity')})"}
+                    return {"status": "disproved", "method": "two-account-diff",
+                            "signal": "two-account diff shows proper isolation — B cannot read A's object"}
+            except Exception:  # noqa: BLE001
+                pass
+        try:                                           # 3) concrete demonstrated impact already in the evidence
+            import disposition as _DP
+            blob = (str(c.get("evidence", "")) + " " + str((v or {}).get("reason", ""))).lower()
+            if _DP._PROOF_SHOWN.search(blob):
+                return {"status": "reproduced", "method": "proof-in-evidence",
+                        "signal": "concrete demonstrated impact shown in the evidence"}
+        except Exception:  # noqa: BLE001
+            pass
+        return {"status": "inconclusive", "method": "none",
+                "signal": note or "could not auto-reproduce read-only — needs manual verification"}
 
     def _validate_agent(self, c):
         if self.mock:
@@ -753,6 +811,12 @@ class Engine:
         for i, f in enumerate(c, 1):
             block = [f"## {i}. {f.get('vuln_class','?').upper()} — {f.get('severity','?')}",
                      f"- **URL:** `{f['url']}`" + (f" (param `{f['param']}`)" if f.get("param") else "")]
+            rp = f.get("reproduction") or {}
+            if rp.get("status"):                        # REAL-vs-not: how we know it's a real bug
+                label = {"reproduced": "✅ independently reproduced",
+                         "inconclusive": "⚠ NOT independently reproduced — verify manually before submit"
+                         }.get(rp["status"], rp["status"])
+                block.append(f"- **Real-vs-not:** {label} ({rp.get('method','')}) — {rp.get('signal','')}")
             dd = f.get("dedup")
             if dd and dd.get("corpus_size"):
                 line = f"- **Dedup:** {dd['verdict']} (score {dd['score']}, corpus {dd['corpus_size']})"
