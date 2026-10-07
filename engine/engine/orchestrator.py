@@ -311,8 +311,10 @@ class Orchestrator:
                         self.eng.eng.log(f"auth: session captured on {r.get('host')} as {r.get('user')} "
                                          f"— hunting AUTHENTICATED")
                     else:
+                        _retry = "~30 min (transient timeout — will keep trying)" if r.get("transient") else \
+                                 "6h (no open self-service signup — provide creds to go deeper)"
                         self.eng.eng.log(f"auth: could not provision a session ({r.get('error')}: "
-                                         f"{str(r.get('notes',''))[:140]}) — hunting unauthenticated (won't retry for 6h)")
+                                         f"{str(r.get('notes',''))[:140]}) — hunting unauthenticated; retry in {_retry}")
                         try:                                # ON-SITE notification (panel feed), not email
                             import notify
                             notify.site_alert(self.eng.scope.name,
