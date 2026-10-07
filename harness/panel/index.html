@@ -192,6 +192,42 @@
     .box>.b{padding:12px}
     td,th{padding:8px}
   }
+
+  /* ——— in-page toasts (replace browser alert) ——— */
+  #toasts{position:fixed;top:14px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:370px}
+  .toast{display:flex;gap:10px;align-items:flex-start;background:linear-gradient(180deg,#141a26,#111622);border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:10px;padding:11px 13px;box-shadow:0 10px 30px rgba(0,0,0,.5);animation:tin .22s ease;font-size:12.5px}
+  .toast.err{border-left-color:var(--red)} .toast.ok{border-left-color:var(--grn)} .toast.warn{border-left-color:var(--amb)} .toast.info{border-left-color:var(--acc)}
+  .toast .ti{flex:0 0 18px;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;margin-top:1px;color:#fff}
+  .toast.err .ti{background:var(--red)} .toast.ok .ti{background:var(--grn)} .toast.warn .ti{background:var(--amb);color:#1a1300} .toast.info .ti{background:var(--acc)}
+  .toast .tx{flex:1;min-width:0;overflow-wrap:anywhere;color:var(--ink);line-height:1.45} .toast .tc{color:var(--mut);cursor:pointer;font-weight:700;flex:0 0 auto}.toast .tc:hover{color:var(--ink)}
+  @keyframes tin{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
+  .toast.out{opacity:0;transform:translateX(16px);transition:.25s}
+  /* ——— in-page confirm modal (replace browser confirm) ——— */
+  #modal{position:fixed;inset:0;z-index:9998;background:rgba(5,7,11,.66);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center}
+  #modal.on{display:flex}
+  .mcard{background:linear-gradient(180deg,#141a26,#0f1420);border:1px solid var(--line);border-radius:14px;max-width:430px;width:92%;padding:20px 22px;box-shadow:0 24px 70px rgba(0,0,0,.6)}
+  .mcard h3{margin:0 0 9px;font-size:15px;font-weight:650} .mcard p{margin:0 0 18px;color:var(--mut);font-size:13px;line-height:1.55}
+  .mcard .mbtns{display:flex;gap:10px;justify-content:flex-end}
+  /* ——— notifications bell + dropdown ——— */
+  .bellwrap{position:relative}
+  .bell{position:relative;background:transparent;border:1px solid var(--line);border-radius:9px;padding:6px 9px;cursor:pointer;color:var(--mut);display:inline-flex}
+  .bell:hover{color:var(--ink);border-color:#2c3850;background:#141a25}
+  .bell .badge{position:absolute;top:-7px;right:-7px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--red);color:#fff;font-size:10px;font-weight:800;align-items:center;justify-content:center;box-shadow:0 0 0 2px var(--bg);display:none}
+  .bell .badge.on{display:flex}
+  .ndrop{position:absolute;right:0;top:calc(100% + 9px);width:390px;max-width:92vw;max-height:72vh;overflow:auto;background:linear-gradient(180deg,#121722,#0e131d);border:1px solid var(--line);border-radius:12px;box-shadow:0 20px 55px rgba(0,0,0,.6);display:none;z-index:50}
+  .ndrop.on{display:block}
+  .ndrop .nh{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#121722;z-index:1}
+  .ndrop .nh .t{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--mut)}
+  .nitem{display:flex;gap:11px;padding:11px 14px;border-bottom:1px solid #141a25;align-items:flex-start}
+  .nitem:hover{background:rgba(91,150,247,.045)}
+  .nic{flex:0 0 28px;width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px}
+  .nic.auth{background:rgba(215,162,26,.16);color:#f0d79a} .nic.ops{background:rgba(240,90,79,.14);color:#ff9b91} .nic.surf{background:rgba(75,139,244,.14);color:#9cc3ff}
+  .nbody{flex:1;min-width:0}
+  .ntitle{font-size:12.5px;font-weight:600;color:var(--ink)} .ndesc{font-size:11.5px;color:var(--mut);margin-top:2px;overflow-wrap:anywhere;line-height:1.45} .nt{font-size:10.5px;color:var(--dim);margin-top:4px}
+  .nitem.unseen{background:rgba(215,162,26,.055)} .nitem.unseen .ntitle::after{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--amb);margin-left:7px;vertical-align:middle}
+  /* persistent auth banner */
+  #authban{display:none;margin:0 0 16px;padding:11px 15px;border:1px solid rgba(215,162,26,.4);border-left:3px solid var(--amb);border-radius:10px;background:rgba(215,162,26,.08);font-size:12.5px;color:#f0d79a;line-height:1.5}
+  #authban.on{display:flex;align-items:center;gap:11px}
 </style>
 </head>
 <body>
@@ -239,10 +275,25 @@
       <a data-v="capabilities" onclick="nav(this)">Capabilities</a>
       <a data-v="logs" onclick="nav(this)">Live logs</a>
     </div>
-    <div class="bar"><h1 id="title">Overview</h1><div class="meta">read-only · stop-at-draft · cursor-agent · <span id="pool" class="tag"></span></div></div>
+    <div class="bar"><h1 id="title">Overview</h1>
+      <div style="display:flex;align-items:center;gap:14px">
+        <div class="meta">read-only · stop-at-draft · cursor-agent · <span id="pool" class="tag"></span></div>
+        <div class="bellwrap">
+          <button class="bell" id="bell" onclick="toggleNotifs(event)" title="Notifications" aria-label="Notifications">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            <span class="badge" id="bellBadge">0</span>
+          </button>
+          <div class="ndrop" id="ndrop">
+            <div class="nh"><span class="t">Notifications</span><button class="ghost sm" onclick="markNotifsSeen()">Mark all read</button></div>
+            <div id="nlist"><div class="empty" style="padding:16px">No notifications.</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- OVERVIEW -->
     <section class="page on" id="p-overview">
+      <div id="authban"></div>
       <div class="kpis">
         <div class="kpi"><div class="v" id="k-t">–</div><div class="k">Targets</div></div>
         <div class="kpi"><div class="v" id="k-r" style="color:var(--grn)">–</div><div class="k">Hunts running</div></div>
@@ -367,12 +418,53 @@
     </section>
   </main>
 
+  <div id="toasts"></div>
+  <div id="modal"><div class="mcard"><h3 id="mTitle">Confirm</h3><p id="mBody"></p><div class="mbtns"><button class="ghost" id="mCancel">Cancel</button><button class="pri" id="mOk">Confirm</button></div></div></div>
+
 <script>
 const API="/panel/api"; let TAIL=true, CURLOG="", VIEW="overview", LOGPICKED=false;
 const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function api(path,method="GET",body=null){const o={method,headers:{}};if(body){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body);}
   const r=await fetch(API+path,o);let j={};try{j=await r.json();}catch(e){}if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
 function msg(id,t,ok){const e=document.getElementById(id);if(e){e.textContent=t;e.className="msg "+(ok?"ok":"err");}}
+// ——— in-page toasts + confirm (no browser alert/confirm popups) ———
+function toast(text,type){const c=document.getElementById("toasts");if(!c){return;}
+  const ic={err:"✕",ok:"✓",warn:"!",info:"i"}[type]||"i";
+  const d=document.createElement("div");d.className="toast "+(type||"info");
+  d.innerHTML=`<span class="ti">${ic}</span><span class="tx"></span><span class="tc">✕</span>`;
+  d.querySelector(".tx").textContent=text;d.querySelector(".tc").onclick=()=>rmToast(d);
+  c.appendChild(d);setTimeout(()=>rmToast(d),type==="err"?9000:5000);}
+function rmToast(d){if(!d)return;d.classList.add("out");setTimeout(()=>d.remove(),250);}
+function confirmModal(body,title){return new Promise(res=>{
+  const m=document.getElementById("modal");document.getElementById("mTitle").textContent=title||"Confirm";
+  document.getElementById("mBody").textContent=body;m.classList.add("on");
+  const ok=document.getElementById("mOk"),ca=document.getElementById("mCancel");
+  const done=v=>{m.classList.remove("on");ok.onclick=null;ca.onclick=null;res(v);};
+  ok.onclick=()=>done(true);ca.onclick=()=>done(false);});}
+// ——— notifications (bell + dropdown + auth banner), fed by the on-site alerts feed ———
+let NOTIFS=[];
+function notifKind(x){const k=(x.kind||"").toLowerCase();
+  if(k==="needs-auth")return {cls:"auth",ic:"🔑",label:"Needs login"};
+  if(k==="watchdog")return {cls:"ops",ic:"⚙",label:"Ops / health"};
+  return {cls:"surf",ic:"📡",label:"New surface"};}
+function notifSeenTs(){try{return +localStorage.getItem("notif-seen")||0;}catch(e){return 0;}}
+async function loadNotifs(){try{const j=await api("/novelty/feed?n=40");
+  NOTIFS=(j.entries||[]).slice().reverse();                 // newest first
+  const seen=notifSeenTs();let unseen=0;
+  const html=NOTIFS.map(x=>{const t=Date.parse(x.ts)||0;const k=notifKind(x);const isNew=t>seen;if(isNew)unseen++;
+    return `<div class="nitem ${isNew?'unseen':''}"><div class="nic ${k.cls}">${k.ic}</div><div class="nbody">`+
+      `<div class="ntitle">${esc(x.target||"")} <span class="dim" style="font-weight:400;font-size:11px">· ${k.label}</span></div>`+
+      `<div class="ndesc">${esc((x.summary||[]).join(" · ").slice(0,180))}</div>`+
+      `<div class="nt">${fmtTs(x.ts)}</div></div></div>`;}).join("");
+  document.getElementById("nlist").innerHTML=html||`<div class="empty" style="padding:16px">No notifications.</div>`;
+  const b=document.getElementById("bellBadge");if(b){b.textContent=unseen>9?"9+":String(unseen);b.classList.toggle("on",unseen>0);}
+  const ab=document.getElementById("authban");const auth=NOTIFS.filter(x=>(x.kind||"")==="needs-auth");
+  if(ab){if(auth.length){ab.className="on";ab.innerHTML=`<span style="font-size:16px">🔑</span><span><b>${auth.length} program(s) can't register a test account</b> — hunting unauthenticated limits findings (IDOR/auth need login). Latest: <b>${esc(auth[0].target)}</b>. Provide a test login (cookies/token) to go deeper.</span>`;}else{ab.className="";ab.innerHTML="";}}
+}catch(e){}}
+function toggleNotifs(ev){ev.stopPropagation();const d=document.getElementById("ndrop");const on=d.classList.toggle("on");if(on)markNotifsSeen();}
+function markNotifsSeen(){const newest=NOTIFS.reduce((m,x)=>Math.max(m,Date.parse(x.ts)||0),0);try{localStorage.setItem("notif-seen",String(newest));}catch(e){}
+  const b=document.getElementById("bellBadge");if(b)b.classList.remove("on");document.querySelectorAll(".nitem.unseen").forEach(n=>n.classList.remove("unseen"));}
+document.addEventListener("click",e=>{const d=document.getElementById("ndrop");if(d&&d.classList.contains("on")&&!e.target.closest(".bellwrap"))d.classList.remove("on");});
 function nav(el){document.querySelectorAll("nav a, .mnav a").forEach(a=>a.classList.remove("on"));el.classList.add("on");go(el.dataset.v);}
 function go(v){VIEW=v;document.querySelectorAll(".page").forEach(p=>p.classList.remove("on"));document.getElementById("p-"+v).classList.add("on");
   document.getElementById("title").textContent={overview:"Overview",targets:"Targets",activity:"Activity",findings:"Findings",verify:"Verify finding",capabilities:"Capabilities",logs:"Live logs"}[v];
@@ -466,7 +558,7 @@ async function loadCaps(){try{
 }catch(e){}}
 async function loadFindings(){try{const j=await api("/findings");document.getElementById("find").innerHTML=(j.findings||[]).map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><a href="${esc(x.url)}" target="_blank">${esc(x.file)}</a><div class="tag">${new Date(x.mtime*1000).toLocaleString()}</div></div>`).join("")||`<div class="empty">No findings yet.</div>`;}catch(e){}}
 async function sessClear(confirm){try{
-  if(confirm && !window.confirm("Permanently clear the ORPHANED Cursor sessions (dead hunt transcripts + empty chat husks)? Pooled + running hunts' sessions are protected and kept.")){return;}
+  if(confirm && !(await confirmModal("Permanently clear the ORPHANED Cursor sessions (dead hunt transcripts + empty chat husks)? Pooled and running hunts' sessions are protected and kept.","Clear sessions"))){return;}
   const j=await api("/sessions/clear","POST",{confirm});
   msg("sessMsg",confirm?`Cleared ${j.removed} orphaned session(s) (skipped ${j.skipped_pooled} pooled).`:`Dry-run: ${j.orphans_found} orphaned session(s) would be removed — click "Clear orphaned sessions" to confirm.`,true);
   loadCaps();
@@ -518,7 +610,7 @@ function renderVerdict(d){
     `<div style="margin:9px 0 12px" class="dim">dedup: ${esc((d.dedup||{}).verdict||"—")}${(d.missing&&d.missing.length)?` · missing: ${esc(d.missing.join(", "))}`:""}</div>`+
     exd+up+checks+op+
     `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><button class="pri" onclick="fcOpen()">Open fix chat — let the agent edit your files to fix this</button> <span class="dim" style="font-size:11px">it rewrites the report in place (adds steps/PoC sections, fixes severity, redacts PII) · you download the fixed files · closing removes the session + files</span></div>`;}
-async function removeTarget(p){if(!confirm("Remove "+p+"?"))return;try{await api("/targets/remove","POST",{program:p});refresh();}catch(e){alert(e.message);}}
+async function removeTarget(p){if(!(await confirmModal("Remove target "+p+"? This stops monitoring and hunting it.","Remove target")))return;try{await api("/targets/remove","POST",{program:p});toast("Removed target: "+p,"ok");refresh();}catch(e){toast(e.message,"err");}}
 let VF_LAST=null,FC_ID=null,FC_MTIMES={},FC_OPENING=false,FC_BUSY=false,FC_ABORT=null,FC_TICK=null,FC_PENDING=null;
 function fcUuid(){return (crypto.randomUUID?crypto.randomUUID():"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c==="x"?r:(r&3|8)).toString(16);}));}
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
@@ -545,10 +637,10 @@ function fcPick(id){if(id===FC_ID)return;location.hash="fc="+id;}   // the hashc
 function fcSide(on){document.getElementById("fc-wrap").classList.toggle("sideoff",!on);
   document.getElementById("fc-showside").style.display=on?"none":"inline-flex";
   try{localStorage.setItem("fc-side",on?"1":"0");}catch(e){}}
-async function fcCloseId(id){if(!confirm("Remove this chat? Its files + agent session are deleted."))return;
+async function fcCloseId(id){if(!(await confirmModal("Remove this chat? Its files and agent session are deleted.","Remove chat")))return;
   try{await api("/verify/fixchat/close","POST",{chat_id:id});
     if(id===FC_ID){FC_ID=null;fcHash(null);document.getElementById("fc-box").style.display="none";}
-    fcLoadList();}catch(e){alert(e.message);}}
+    fcLoadList();}catch(e){toast(e.message,"err");}}
 async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);return;}
   if(FC_OPENING||FC_ID)return;                       // already opening/open — don't double-open
   FC_ID=fcUuid();fcHash(FC_ID);                      // id up front: URL works + Close works immediately
@@ -602,17 +694,17 @@ async function fcSend2(t){if(!FC_ID||FC_BUSY)return;
 async function fcClose(){                            // works ALWAYS — even while opening
   const cid=FC_ID||(location.hash.startsWith("#fc=")?location.hash.slice(4):null);
   if(!cid){msg("vf-msg","No open chat.",false);return;}
-  if(!confirm("Close the chat? The agent session AND the uploaded/edited files are removed (download anything you need first)."))return;
+  if(!(await confirmModal("Close the chat? The agent session AND the uploaded/edited files are removed — download anything you need first.","Close chat")))return;
   if(FC_ABORT)FC_ABORT.abort();                      // stop waiting on a slow open
   FC_ID=null;FC_PENDING=null;fcHash(null);
   try{const d=await api("/verify/fixchat/close","POST",{chat_id:cid});
     document.getElementById("fc-box").style.display="none";FC_MTIMES={};
     msg("vf-msg",d.closed?"Chat closed — session + files removed.":"Close failed: "+(d.error||"?"),!!d.closed);fcLoadList();
   }catch(e){msg("vf-msg",e.message,false);}}
-async function startHunt(p){try{const j=await api("/hunt","POST",{program:p});CURLOG=p;setTimeout(refresh,1500);}catch(e){alert(e.message);}}
-async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});setTimeout(refresh,1000);}catch(e){alert(e.message);}}
-function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();if(CURLOG&&TAIL)loadLog();}
-function tick(){loadCore();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
+async function startHunt(p){try{await api("/hunt","POST",{program:p});CURLOG=p;toast("Started hunt: "+p,"ok");setTimeout(refresh,1500);}catch(e){toast(e.message,"warn");loadNotifs();}}
+async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});toast("Stopped hunt: "+p,"ok");setTimeout(refresh,1000);}catch(e){toast(e.message,"err");}}
+function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();loadNotifs();if(CURLOG&&TAIL)loadLog();}
+function tick(){loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
 try{if(localStorage.getItem("fc-side")==="0")fcSide(false);}catch(e){}
