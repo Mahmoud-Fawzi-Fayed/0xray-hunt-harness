@@ -284,8 +284,11 @@ class Corpus:
             scored.append((s, r))
         scored.sort(key=lambda x: -x[0])
         top_score = scored[0][0] if scored else 0.0
-        verdict = ("LIKELY_DUP" if top_score >= T_LIKELY_DUP
-                   else "REVIEW" if top_score >= T_REVIEW else "NOVEL")
+        if not self.records:
+            verdict = "UNKNOWN"          # empty corpus => we CANNOT assert novelty (not a false NOVEL)
+        else:
+            verdict = ("LIKELY_DUP" if top_score >= T_LIKELY_DUP
+                       else "REVIEW" if top_score >= T_REVIEW else "NOVEL")
         matches = [{
             "score": round(s, 3), "title": r.get("title", ""), "link": r.get("link", ""),
             "source": r.get("source", ""), "vuln_class": norm_class(r.get("vuln_class", "")),
@@ -346,8 +349,11 @@ def _cmd_check(args):
     if args.json:
         print(json.dumps(res, indent=2))
         return 0
-    icon = {"LIKELY_DUP": "⛔", "REVIEW": "⚠", "NOVEL": "✅"}[res["verdict"]]
+    icon = {"LIKELY_DUP": "⛔", "REVIEW": "⚠", "NOVEL": "✅", "UNKNOWN": "❔"}.get(res["verdict"], "❔")
     print(f"{icon} {res['verdict']}  score={res['score']}  (corpus={res['corpus_size']})")
+    if res["verdict"] == "UNKNOWN":
+        print("   -> corpus is EMPTY — dedup NOT performed. Ingest known reports (own via MCP + public "
+              "H1/Bugcrowd) and re-check before you trust this as novel.")
     for m in res["matches"]:
         print(f"   {m['score']:.3f}  [{m['source']}/{m['vuln_class']}] {m['title'][:70]}")
         if m["link"]:
@@ -384,6 +390,8 @@ def _cmd_selftest(_):
     import tempfile
     base = tempfile.mkdtemp()
     cp = Corpus("acme", base=base)
+    assert cp.check({"vuln_class": "idor", "url": "https://x/y", "title": "z"})["verdict"] == "UNKNOWN", \
+        "empty corpus must be UNKNOWN (never a false NOVEL)"
     seed = [
         {"source": "ywh-own", "title": "IDOR on /api/v2/users/{id}/orders leaks other users' orders",
          "vuln_class": "idor", "url": "https://acme.test/api/v2/users/5/orders",
@@ -414,9 +422,9 @@ def _cmd_selftest(_):
                    "title": "Blind SSRF in webhook validator reaches cloud metadata"})
     assert r3["verdict"] == "NOVEL", r3
 
-    # 4) empty corpus is NOVEL-for-everything (no-op safety for engine integration)
+    # 4) empty corpus => UNKNOWN (we cannot assert novelty with nothing to compare — not a false NOVEL)
     empty = Corpus("nobody", base=base)
-    assert empty.check({"vuln_class": "idor", "url": "x", "title": "y"})["verdict"] == "NOVEL"
+    assert empty.check({"vuln_class": "idor", "url": "x", "title": "y"})["verdict"] == "UNKNOWN"
 
     # 5) annotate attaches a dedup block without mutating other fields
     finds = [{"vuln_class": "xss", "url": "https://acme.test/search?q=1", "title": "XSS in q param"}]

@@ -139,6 +139,41 @@ def _pool_file(context):
     return os.path.join(_sess_dir(context), "state.json")
 
 
+def _created_file():
+    """Registry of session ids the HARNESS itself created. Cleanup (watchdog) consults this so it can
+    remove ONLY harness sessions and never the operator's interactive/IDE sessions (which never land
+    here). Lives next to the pools: <base>/_sessions/_created.json."""
+    return os.path.join(
+        os.path.expanduser(os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")),
+        "_sessions", "_created.json")
+
+
+def _register_created(sid):
+    """Best-effort, idempotent, atomic record of a harness-created session id. Never raises into the
+    hunt loop — a failure here only means a session leaks (safe), never that one is wrongly deleted."""
+    if not sid:
+        return
+    try:
+        p = _created_file()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with _POOL_LOCK:
+            try:
+                reg = json.load(open(p))
+                if not isinstance(reg, dict):
+                    reg = {}
+            except Exception:  # noqa: BLE001
+                reg = {}
+            if str(sid) in reg:
+                return
+            reg[str(sid)] = time.time()
+            tmp = p + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(reg, fh)
+            os.replace(tmp, p)              # atomic: a concurrent reader never sees a torn file
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _load_pool_ids(context):
     try:
         return json.load(open(_pool_file(context))).get("ids", [])
@@ -229,6 +264,7 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
         r = _run_once(_cmd(task, m, resume_id=resume_id), m, timeout)
         r.setdefault("model", m)
         r["reused"] = True
+        _register_created(r.get("session_id") or resume_id)   # harness-owned: safe to auto-prune later
         return r
 
     sl = _acquire(context) if context is not None else {"id": None, "model": None, "uses": 0}
@@ -250,6 +286,7 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
             r = _run_once(cmd, m, timeout)
             if r.get("session_id"):
                 sl["id"] = r["session_id"]  # remember so the next call --resume's it (across rounds too)
+                _register_created(r["session_id"])   # harness-owned id -> eligible for safe auto-prune
             if r.get("error") not in _RETRYABLE or attempt >= attempts:
                 break
             time.sleep(2 * attempt)

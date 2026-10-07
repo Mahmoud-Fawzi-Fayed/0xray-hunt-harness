@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
@@ -189,12 +190,20 @@ def doctor(base=DEFAULT_BASE, confirm=False):
 
 
 def clear_orphans(base=DEFAULT_BASE, confirm=False):
-    """Remove sessions no pool references: orphaned transcripts in MANAGED workspaces + empty chat
-    dirs + empty workspace husks. Non-empty unmanaged/IDE chats are never touched."""
+    """Remove sessions no pool references: HARNESS-CREATED orphan transcripts + empty chat dirs + empty
+    workspace husks. Transcript removal is gated on the created-id registry, so the operator's
+    interactive/IDE transcripts (never registered) are NEVER removed — even though their workspace may
+    match the managed pattern. With no registry yet, only empty husks/dirs are cleaned (fail-safe).
+    Non-empty unmanaged/IDE chats are never touched."""
     inv = inventory(base)
-    targets = list(inv["transcript_orphans"].values()) + inv["empty_chats"] + inv["husks"]
+    reg = created_ids(base)
+    if reg:
+        t_orphans = [d for sid, d in inv["transcript_orphans"].items() if sid in reg]
+    else:
+        t_orphans = []                 # no registry -> don't risk operator transcripts; husks/empty only
+    targets = t_orphans + inv["empty_chats"] + inv["husks"]
     out = {"orphans_found": len(targets), "removed": 0, "skipped_pooled": 0, "dry_run": not confirm,
-           "by_kind": {"transcripts": len(inv["transcript_orphans"]),
+           "by_kind": {"transcripts": len(t_orphans),
                        "empty_chat_dirs": len(inv["empty_chats"]), "husks": len(inv["husks"])}}
     for d in targets:
         if os.path.basename(d) in inv["pooled_ids"]:
@@ -229,6 +238,52 @@ def drop_ids(ids, base=DEFAULT_BASE):
             except OSError:
                 pass
     return {"removed": removed, "skipped_pooled": skipped}
+
+
+def created_ids(base=DEFAULT_BASE):
+    """Session ids the HUNTING HARNESS created (recorded by agent.py as it mints them in
+    <base>/_sessions/_created.json). The operator's interactive/IDE sessions are NEVER recorded here
+    — which is exactly what lets automated cleanup target harness sessions only. Empty set until the
+    hunts have run under the registry-aware agent (safe: an empty registry prunes nothing)."""
+    p = os.path.join(os.path.expanduser(base), "_sessions", "_created.json")
+    try:
+        reg = json.load(open(p))
+        return {str(k) for k in reg} if isinstance(reg, dict) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def clear_harness(base=DEFAULT_BASE, stale_min=30, confirm=False):
+    """Remove ONLY harness-created sessions (per the created-id registry) that are BOTH (a) not in any
+    target's active pool and (b) stale — no on-disk session dir modified within the last `stale_min`
+    minutes. Spans both stores via drop_ids (which re-checks the pool as a second guard).
+
+    The operator's own sessions are never in the registry, so this can never delete them — even when
+    they live in the harness workspace. Dry-run unless confirm=True."""
+    inv = inventory(base)
+    reg = created_ids(base)
+    pooled = inv["pooled_ids"]
+    cutoff = time.time() - max(0, stale_min) * 60
+    victims = []
+    for sid in reg:
+        if sid in pooled:
+            continue                               # active hunt session — never touch
+        dirs = session_dirs(sid)
+        if not dirs:
+            continue                               # already gone (stale registry entry)
+        try:
+            if max(os.path.getmtime(d) for d in dirs) >= cutoff:
+                continue                           # recently active — keep (avoids racing a fresh one)
+        except OSError:
+            continue
+        victims.append(sid)
+    out = {"registry": len(reg), "candidates": len(victims), "removed": 0, "skipped_pooled": 0,
+           "dry_run": not confirm}
+    if confirm and victims:
+        r = drop_ids(victims, base=base)           # removes both stores; skips any pooled id
+        out["removed"] = r["removed"]
+        out["skipped_pooled"] = r["skipped_pooled"]
+    return out
 
 
 def reset_target(slug, base=DEFAULT_BASE, confirm=False):
@@ -346,8 +401,13 @@ def _selftest():
         assert d["healed"] == [{"slug": "acme", "dropped": ["dead1"]}], d
         assert d["quarantined"] == ["broken"], d
         assert json.load(open(os.path.join(base, "_sessions", "acme", "state.json")))["ids"] == ["s1", "s2"]
+        # clear_orphans: transcript removal is gated on the created-id registry (operator transcripts safe)
+        json.dump({"orphan1": 0}, open(os.path.join(base, "_sessions", "_created.json"), "w"))  # harness-made
+        os.makedirs(os.path.join(tstore, "orphan2"))     # NOT registered (operator) -> must survive
         r = clear_orphans(base, confirm=True)
-        assert r["removed"] >= 3, r                      # orphan1 + emptychat + emptyws husk
+        assert r["removed"] >= 3, r                       # orphan1 (registered) + emptychat + emptyws husk
+        assert not session_dirs("orphan1"), "registered harness orphan must be removed"
+        assert is_alive("orphan2"), "unregistered (operator) transcript orphan must survive"
         assert is_alive("s1"), "pooled session must survive"
         assert os.path.isdir(os.path.join(projects, "root", "agent-transcripts", "ide-chat")), "unmanaged untouched"
         # drop_ids removes from BOTH stores but never a pooled id
@@ -356,6 +416,19 @@ def _selftest():
         r = drop_ids(["tmp1", "s1"], base=base)
         assert r["removed"] == 2 and r["skipped_pooled"] == 1, r
         assert not session_dirs("tmp1") and is_alive("s1")
+        # clear_harness: removes ONLY registry (harness-created) sessions — never user/IDE sessions
+        os.makedirs(os.path.join(chats, "wshash", "hx"))         # harness-created, NOT pooled
+        os.makedirs(os.path.join(chats, "wshash", "ux"))         # operator session, NOT in registry
+        old = time.time() - 9999
+        os.utime(os.path.join(chats, "wshash", "hx"), (old, old))
+        os.utime(os.path.join(chats, "wshash", "ux"), (old, old))
+        json.dump({"hx": old, "s1": old}, open(os.path.join(base, "_sessions", "_created.json"), "w"))
+        assert created_ids(base) == {"hx", "s1"}, created_ids(base)
+        rh = clear_harness(base, stale_min=0, confirm=True)
+        assert rh["removed"] == 1, rh                            # only hx
+        assert not session_dirs("hx"), "harness orphan must be removed"
+        assert is_alive("ux"), "operator session (not in registry) must survive"
+        assert is_alive("s1"), "pooled harness session must survive"
     finally:
         for e in ("HUNT_CHATS_DIR", "HUNT_PROJECTS_DIR", "HUNT_SESSION_STORES"):
             os.environ.pop(e, None)

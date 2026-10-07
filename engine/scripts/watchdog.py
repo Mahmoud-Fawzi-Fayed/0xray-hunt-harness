@@ -96,26 +96,23 @@ def _chat_count():
 
 
 def _prune_chats(keep_min=30):
-    base = os.path.expanduser("~/.cursor/chats")
-    removed = 0
+    """Prune ONLY harness-created sessions (recorded by the engine in the created-id registry), and
+    only when they are no longer in any active hunt pool AND are stale. The operator's interactive /
+    IDE sessions are never in the registry, so they are NEVER deleted here — even in the harness
+    workspace. Delegates to the guarded sessions.clear_harness (the one sanctioned deletion path)."""
     try:
-        import shutil
-        cutoff = time.time() - keep_min * 60
-        for ws in os.listdir(base):
-            wsp = os.path.join(base, ws)
-            if not os.path.isdir(wsp):
-                continue
-            for c in os.listdir(wsp):
-                cp = os.path.join(wsp, c)
-                try:
-                    if os.path.isdir(cp) and os.path.getmtime(cp) < cutoff:
-                        shutil.rmtree(cp)
-                        removed += 1
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return removed
+        import sessions as SESS
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        r = SESS.clear_harness(
+            base=BASE,
+            stale_min=int(os.environ.get("WATCHDOG_STALE_MIN", str(keep_min))),
+            confirm=True,
+        )
+        return r.get("removed", 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _load_state():
@@ -173,11 +170,16 @@ def run_once(quiet=False):
             actions.append(f"restarted {name} (stuck mid-round, no log for {int(age)}m)")
             alerts.append(f"{name} stuck {int(age)}m mid-round")
 
-    # 4. chat bloat
+    # 4. chat bloat — prune ONLY harness-created sessions (never the operator's own sessions).
+    # Safe to run every pass now (registry + pool guarded), so the store stays tidy without ever
+    # waiting for a CHAT_MAX threshold that would otherwise tempt a blunt age-based delete.
     chats = _chat_count()
-    if chats > CHAT_MAX:
-        rm = _prune_chats()
-        actions.append(f"pruned {rm} stale chats ({chats} -> {_chat_count()})")
+    rm = _prune_chats()
+    if rm:
+        actions.append(f"pruned {rm} harness session(s) ({chats} -> {_chat_count()})")
+    elif chats > CHAT_MAX:
+        alerts.append(f"chat store at {chats} (> {CHAT_MAX}) but only operator sessions are prunable-exempt; "
+                      f"run `python3 engine/sessions.py clear --all` to review husks/orphans")
 
     _save_state({"ts": time.time(), "restarts": restarts_now, "revived": revived})
 

@@ -55,7 +55,10 @@ def _draft_md(f, verdict):
         f"**Severity:** {sev}  ·  **CVSS (starting point):** {SEV_CVSS.get(sev, '5.0')}",
         f"**Dedup verdict:** {verdict['verdict']} (score {verdict['score']}, corpus {verdict['corpus_size']})",
     ]
-    if verdict["verdict"] != "NOVEL" and verdict.get("matches"):
+    if verdict["verdict"] == "UNKNOWN":
+        lines.append("> ⚠ Dedup NOT performed — the corpus for this program is EMPTY. Refresh it (own reports "
+                     "via the bb-platforms MCP + public H1/Bugcrowd) and re-check before submitting.")
+    if verdict["verdict"] not in ("NOVEL", "UNKNOWN") and verdict.get("matches"):
         m = verdict["matches"][0]
         lines.append(f"> ⚠ Overlaps a known issue: {m.get('title','')} {m.get('link','')}")
         lines.append("> State the differentiator below (different endpoint/param/impact, or fix-bypass) or HOLD.")

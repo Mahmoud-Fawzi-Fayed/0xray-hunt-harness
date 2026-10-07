@@ -30,6 +30,8 @@ import re
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # import the canonical scope matcher
+
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
 # actions that are never allowed, regardless of scope — the harness does not brute-force (workspace rule)
@@ -68,19 +70,39 @@ def _host_matches(host, pattern):
     return host == p
 
 
+def _norm_scope_pattern(p):
+    """Reduce a URL-form pattern to its host; leave host / *.host / CIDR / re: patterns intact so the
+    canonical scope.Scope matcher gets exactly the forms it understands."""
+    p = str(p or "").strip()
+    if not p or p.startswith("re:"):
+        return p
+    if "://" in p:
+        return _host_of(p)
+    return p
+
+
 def in_scope(url, scope):
-    """True iff url's host is covered by scope.in_scope and not excluded by scope.out_of_scope."""
+    """True iff url's host is in scope. Delegates to the engine's canonical scope.Scope matcher so the
+    write-gate (register/login/SMS) and the hunt-gate agree EXACTLY — same CIDR / re: / wildcard /
+    suffix-confusion semantics, one source of truth. Falls back to a local deny-wins matcher only if
+    the import fails (never crashes the gate)."""
     host = _host_of(url)
     if not host:
         return False
-    scope = scope or {}
-    for bad in scope.get("out_of_scope") or []:
-        if _host_matches(host, bad):
-            return False
-    ins = scope.get("in_scope") or []
+    s = scope or {}
+    ins = s.get("in_scope") or []
     if not ins:                            # no scope loaded => cannot assert in-scope => refuse writes
         return False
-    return any(_host_matches(host, g) for g in ins)
+    try:
+        import scope as _scope_mod
+        ins_n = [_norm_scope_pattern(p) for p in ins]
+        oos_n = [_norm_scope_pattern(p) for p in (s.get("out_of_scope") or [])]
+        return _scope_mod.Scope(ins_n, oos_n).in_scope_host(url)
+    except Exception:                      # fallback: local matcher (deny-wins), never break the gate
+        for bad in s.get("out_of_scope") or []:
+            if _host_matches(host, bad):
+                return False
+        return any(_host_matches(host, g) for g in ins)
 
 
 def max_accounts():
