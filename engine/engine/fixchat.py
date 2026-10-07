@@ -272,6 +272,21 @@ def _busy_path(root):
     return os.path.join(root, ".busy")
 
 
+def clear_stale_busy(base=DEFAULT_BASE):
+    """Remove ALL fix-chat '.busy' markers. Called on bridge startup: a fresh process has NO running message
+    threads, so every existing marker is orphaned (its background thread died with the previous process) and
+    would otherwise wedge the chat ('agent is still working') for up to MSG_TIMEOUT. Returns the count cleared."""
+    import glob
+    n = 0
+    for bp in glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", "*", ".busy")):
+        try:
+            os.remove(bp)
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def message_async(cid, text, base=DEFAULT_BASE):
     """Queue a follow-up and run the agent in the BACKGROUND. Agent edits (esp. active reproduction — making
     accounts, re-running the PoC) take minutes, so we must NOT hold the HTTP request open past a proxy/client

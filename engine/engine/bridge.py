@@ -765,6 +765,13 @@ def main(argv=None):
     ap.add_argument("--base", default=DEFAULT_BASE)
     a = ap.parse_args(argv)
     Handler.base = a.base
+    try:                                            # a restart kills in-flight fix-chat threads — clear their
+        import fixchat as _FC                        # orphaned '.busy' markers so chats aren't wedged on startup
+        _n = _FC.clear_stale_busy(base=a.base)
+        if _n:
+            print(f"hunt-bridge: cleared {_n} orphaned fix-chat busy marker(s) from a prior restart", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
     if not TOKEN:
         print("WARNING: HUNT_BRIDGE_TOKEN is empty — the bridge will refuse all authed requests "
               "until it is set.", file=sys.stderr)
