@@ -431,6 +431,12 @@ def auth_block(session, url):
 
 def _provision_task(program, host, ident, alt_hosts=None):
     e = ENGINE
+    phone = (os.environ.get("HUNT_SIGNUP_PHONE") or "").strip()
+    phone_line = ((f"PHONE: if a phone number is required anywhere, use {phone} (a real number the operator "
+                   "controls). PREFER an email-based signup so you can read the verification code from the "
+                   "mail.tm inbox (identity.py poll). If an SMS OTP to the phone is MANDATORY and you cannot "
+                   "read it, do NOT hang \u2014 finish any email step and report notes='phone-otp-required'.\n")
+                  if phone else "")
     alt = [h for h in (alt_hosts or []) if h and h != host]
     alt_line = ""
     if alt:
@@ -446,6 +452,7 @@ def _provision_task(program, host, ident, alt_hosts=None):
         + alt_line +
         f"Identity to use (already has a live inbox): email={ident.get('email')} password={ident.get('password')} "
         f"first={ident.get('first')} last={ident.get('last')}.\n"
+        + phone_line +
         "Steps:\n"
         f"1. Find the signup/registration flow on https://{host} (curl the page, locate the register endpoint+fields). "
         f"If none exists there, move on to one of the other in-scope hosts above.\n"
