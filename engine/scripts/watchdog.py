@@ -152,7 +152,7 @@ def run_once(quiet=False):
     # (by WATCHDOG_HUNT_PRIORITY) so a small box never thrashes; the operator is told on-site. Runs BEFORE
     # the restart loop so a shed hunt is not immediately revived. Raise WATCHDOG_MAX_HUNTS_BOX for a bigger box.
     online = [p.get("name", "")[5:] for p in _pm2_jlist()
-              if p.get("name", "").startswith("hunt-") and p.get("name") not in ("hunt-bridge", "hunt-watchdog")
+              if p.get("name", "").startswith("hunt-") and p.get("name") not in ("hunt-bridge", "hunt-watchdog", "hunt-reviewer")
               and (p.get("pm2_env", {}) or {}).get("status") == "online"]
     if len(online) > MAX_HUNTS_BOX:
         ranked = [s for s in HUNT_PRIORITY if s in online] + [s for s in online if s not in HUNT_PRIORITY]
@@ -169,7 +169,7 @@ def run_once(quiet=False):
     if os.environ.get("HUNT_AUTOFILL", "1") == "1":
         existing = [p.get("name", "")[5:] for p in _pm2_jlist()
                     if p.get("name", "").startswith("hunt-")
-                    and p.get("name") not in ("hunt-bridge", "hunt-watchdog")]
+                    and p.get("name") not in ("hunt-bridge", "hunt-watchdog", "hunt-reviewer")]
         if len(existing) < MAX_HUNTS_BOX:
             try:
                 import yieldrank as _YR
@@ -191,7 +191,7 @@ def run_once(quiet=False):
     revived = dict(prev.get("revived", {}))     # hunts THE WATCHDOG itself restarted (not manual/pm2 restarts)
     for p in _pm2_jlist():
         name = p.get("name", "")
-        if not name.startswith("hunt-") or name in ("hunt-bridge", "hunt-watchdog"):
+        if not name.startswith("hunt-") or name in ("hunt-bridge", "hunt-watchdog", "hunt-reviewer"):
             continue
         slug = name[5:]
         env = p.get("pm2_env", {}) or {}
