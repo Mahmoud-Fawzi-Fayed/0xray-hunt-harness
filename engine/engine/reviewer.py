@@ -219,6 +219,10 @@ def _render_md(snap, rev):
         lines.append("## Auto-applied (by the reviewer)")
         lines += [f"- **{a['action']}** @ {a['target']} — {a['result']}" for a in rev["applied"]]
         lines.append("")
+    if rev.get("autofixed"):
+        lines.append("## Auto-fixed (recommendation implemented)")
+        lines += [f"- [{a.get('where','?')}] **{a['rec']}** — {a['result']}" for a in rev["autofixed"]]
+        lines.append("")
     if rev.get("needs_operator"):
         lines.append("## Needs you (can't auto-fix safely)")
         lines += [f"- {m}" for m in rev["needs_operator"]]
@@ -306,6 +310,96 @@ def apply_fixes(base, snap):
     return applied, needs_op
 
 
+def _selfcheck_ok():
+    """True iff the full selfcheck gauntlet still passes — the gate that lets an auto-fix stay."""
+    import subprocess
+    try:
+        r = subprocess.run(["python3", "/root/Claude-BugHunter/scripts/selfcheck.py"],
+                           capture_output=True, text=True, timeout=300)
+        return "0 failed" in (r.stdout + r.stderr)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _rec_sig(rec):
+    import hashlib
+    key = (rec.get("where", "") + "|" + " ".join((rec.get("action", "") or "").lower().split()[:8]))
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
+_AUTOFIX_DIRS = ["/root/Claude-BugHunter/engine", "/root/Claude-BugHunter/scripts",
+                 os.path.expanduser("~/.claude/skills")]
+
+
+def autofix(base, rev):
+    """ACTUALLY IMPLEMENT the review's recommendations — not just list them. Guarded hard: one rec per run
+    (S/M effort), skips ones already done, snapshots engine+scripts+skills, runs the agent, then GATES on the
+    full selfcheck and AUTO-REVERTS if it fails or errors. Does NOT restart hunts (avoids overload); engine
+    edits take effect on the next natural restart, skills/flags take effect immediately. Off: REVIEW_AUTOFIX=0.
+    Returns [{rec, where, result}]."""
+    out = []
+    if os.environ.get("REVIEW_AUTOFIX", "1") != "1":
+        return out
+    recs = [r for r in (rev.get("recommendations") or [])
+            if (r.get("effort") or "").upper() in ("S", "M")
+            and (r.get("where") or "").lower() in ("skill", "config", "recon", "auth", "engine")]
+    donep = os.path.join(_review_dir(base), "autofix_done.json")
+    try:
+        done = set(json.load(open(donep)))
+    except Exception:  # noqa: BLE001
+        done = set()
+    rec = next((r for r in recs if _rec_sig(r) not in done), None)
+    if not rec:
+        return out
+    import shutil as _sh
+    import tempfile
+    snap = tempfile.mkdtemp(prefix="autofix-")
+    for s in _AUTOFIX_DIRS:                              # snapshot for revert
+        try:
+            _sh.copytree(s, os.path.join(snap, os.path.basename(s)))
+        except Exception:  # noqa: BLE001
+            pass
+    task = (
+        "You are improving the 0xRay bug-hunting harness. Implement EXACTLY this ONE recommendation, "
+        "minimally and safely — nothing else:\n"
+        f"  ACTION: {rec.get('action')}\n  WHY: {rec.get('why')}\n  WHERE: {rec.get('where')}\n\n"
+        "HARD RULES:\n"
+        "- Make the SMALLEST change that achieves it; keep it backward-compatible.\n"
+        "- Preserve ALL safety rails (in-scope only, read-only by default, NO brute-force/cracking, NO DoS, "
+        "stop-at-draft, triager-grade honesty). Never weaken them.\n"
+        "- Do NOT break the selfcheck. After editing, run `python3 /root/Claude-BugHunter/scripts/selfcheck.py` "
+        "yourself and make sure it still prints '0 failed'.\n"
+        "- Edit files only under /root/Claude-BugHunter/engine, /root/Claude-BugHunter/scripts, or "
+        f"{os.path.expanduser('~/.claude/skills')}.\n"
+        "End with a fenced ```json``` block: {\"changed_files\":[...],\"summary\":\"...\"}")
+    try:
+        import agent as A
+        A.run_agent(task, context=None, timeout=int(os.environ.get("REVIEW_AUTOFIX_TIMEOUT", "900")))
+    except Exception:  # noqa: BLE001
+        pass
+    if _selfcheck_ok():
+        done.add(_rec_sig(rec))
+        try:
+            json.dump(list(done), open(donep, "w"))
+        except OSError:
+            pass
+        out.append({"rec": rec.get("action"), "where": rec.get("where"),
+                    "result": "APPLIED (selfcheck passed; engine edits take effect on next hunt restart)"})
+    else:                                               # revert — a broken auto-fix must never reach hunting
+        for s in _AUTOFIX_DIRS:
+            b = os.path.join(snap, os.path.basename(s))
+            if os.path.isdir(b):
+                _sh.rmtree(s, ignore_errors=True)
+                try:
+                    _sh.copytree(b, s)
+                except Exception:  # noqa: BLE001
+                    pass
+        out.append({"rec": rec.get("action"), "where": rec.get("where"),
+                    "result": "REVERTED (selfcheck failed — change discarded, harness untouched)"})
+    _sh.rmtree(snap, ignore_errors=True)
+    return out
+
+
 def review(base=BASE, quiet=False, dry=False):
     try:
         import notify
@@ -332,9 +426,10 @@ def review(base=BASE, quiet=False, dry=False):
                "weaknesses": [], "missing": [], "recommendations": [],
                "top_priority": "(agent produced no structured review this pass)", "score_0_10": None}
     rev["_model"] = r.get("model")
-    applied, needs_op = apply_fixes(base, snap)         # DIRECTLY apply the safe fixes — not just recommend
+    applied, needs_op = apply_fixes(base, snap)         # DIRECTLY apply the safe, deterministic fixes
     rev["applied"] = applied
     rev["needs_operator"] = needs_op
+    rev["autofixed"] = autofix(base, rev)               # IMPLEMENT a recommendation (selfcheck-gated, auto-revert)
     _persist(base, snap, rev)
     if notify:
         tp = rev.get("top_priority") or "review complete"
@@ -342,13 +437,17 @@ def review(base=BASE, quiet=False, dry=False):
                  f"confirmed={snap['yield']['confirmed_total']} valuable={snap['yield']['valuable_total']}"]
         if applied:
             lines.append("AUTO-APPLIED: " + "; ".join(f"{a['action']}@{a['target']}" for a in applied))
+        if rev["autofixed"]:
+            lines.append("AUTO-FIX: " + "; ".join(f"{a['result'].split('(')[0].strip()} — {a['rec'][:50]}"
+                                                   for a in rev["autofixed"]))
         if needs_op:
             lines.append("NEEDS YOU: " + "; ".join(needs_op[:3]))
         notify.site_alert("reviewer", lines, base=base, kind="review")
     if not quiet:
         print(_render_md(snap, rev))
     return {"ok": True, "score": rev.get("score_0_10"), "recs": len(rev.get("recommendations") or []),
-            "applied": len(applied), "needs_operator": len(needs_op), "model": r.get("model")}
+            "applied": len(applied), "autofixed": len(rev["autofixed"]),
+            "needs_operator": len(needs_op), "model": r.get("model")}
 
 
 def _main(argv=None):
