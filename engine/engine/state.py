@@ -81,9 +81,17 @@ class Engagement:
 
     # ---- surface (discovered, scope-checked endpoints/params) ----
     def add_surface(self, items):
+        # DEEP mode: collapse EVERY surface path (recon, graphql, platform, feedback, scope) to ONE
+        # analysis-driven agent per endpoint — so nothing re-introduces per-class spray. Secret findings keep
+        # their own class (the bundle IS the finding).
+        deep = os.environ.get("HUNT_DEEP", "1") == "1"
         seen = {(s["url"], s.get("param", ""), s.get("vuln_class", "")) for s in self.state["surface"]}
         added = 0
         for it in items:
+            if deep and it.get("source") != "secret":
+                it = dict(it)
+                it["vuln_class"] = "deep"
+                it.pop("vuln_classes", None)
             key = (it["url"], it.get("param", ""), it.get("vuln_class", ""))
             if key not in seen:
                 self.state["surface"].append(it)

@@ -29,7 +29,7 @@ from state import Engagement       # noqa: E402
 import agent as A                  # noqa: E402
 
 # deterministic priority by class (impact-ish); used by rank
-CLASS_WEIGHT = {"rce": 100, "sqli": 90, "ssrf": 85, "auth-bypass": 85, "idor": 80,
+CLASS_WEIGHT = {"deep": 95, "rce": 100, "sqli": 90, "ssrf": 85, "auth-bypass": 85, "idor": 80,
                 "deserialization": 88, "xxe": 75, "ssti": 88, "lfi": 78, "llm-ai": 70,
                 "graphql": 65, "open-redirect": 40, "xss": 55, "cors": 45, "csrf": 50,
                 "info-leak": 30}
