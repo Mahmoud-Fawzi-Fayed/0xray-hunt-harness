@@ -314,6 +314,7 @@
         </div>
         <div class="box"><div class="h"><span class="t">Recent activity</span><a onclick="go('activity')">view all</a></div><div class="b" style="padding:0"><table><tbody id="ov-act"><tr><td class="empty" style="padding:14px">—</td></tr></tbody></table></div></div>
       </div>
+      <div class="box" style="margin-top:14px"><div class="h"><span class="t">Workflow review</span><span class="dim" style="font-size:11px;margin-left:8px">every 2h · an agent audits the hunt workflow for weaknesses &amp; missing coverage to lift findings</span><button class="ghost" onclick="runReview()" style="margin-left:auto">Run now</button></div><div class="b" id="ov-review"><div class="empty">No review yet.</div></div></div>
     </section>
 
     <!-- TARGETS -->
@@ -569,6 +570,18 @@ async function loadCaps(){try{
   document.getElementById("cap-audit").innerHTML=`<div class="dim" style="padding:8px 14px;font-size:11px">accounts used — ${per||'none'}</div><table><thead><tr><th>Time</th><th>Program</th><th>Action</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty" style="padding:12px">No write-actions yet.</td></tr>'}</tbody></table>`;
 }catch(e){}}
 async function loadFindings(){try{const j=await api("/findings");document.getElementById("find").innerHTML=(j.findings||[]).map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><a href="${esc(x.url)}" target="_blank">${esc(x.file)}</a><div class="tag">${new Date(x.mtime*1000).toLocaleString()}</div></div>`).join("")||`<div class="empty">No findings yet.</div>`;}catch(e){}}
+async function loadReview(){try{const j=await api("/review/latest");const el=document.getElementById("ov-review");if(!el)return;const r=j&&j.review;if(!r){el.innerHTML='<div class="empty">No review yet — runs every 2h, or hit “Run now”.</div>';return;}
+  const sc=(r.score_0_10==null?"?":r.score_0_10);const when=((j.snapshot&&j.snapshot.ts)||"").slice(0,16).replace("T"," ");
+  const recs=(r.recommendations||[]).slice(0,6).map(x=>`<div style="padding:6px 0;border-bottom:1px solid #141a25"><b>[${esc(x.where||"?")}·${esc(x.effort||"?")}]</b> ${esc(x.action||"")} <span class="dim">— ${esc(x.why||"")} → ${esc(x.impact||"")}</span></div>`).join("");
+  const weak=(r.weaknesses||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");const miss=(r.missing||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");
+  el.innerHTML=`<div style="margin-bottom:8px"><span class="tag" style="font-size:13px">score ${sc}/10</span> <span class="dim">${esc(when)} · ${esc(r._model||"")}</span></div>`+
+    `<div style="margin-bottom:8px">${esc(r.assessment||"")}</div>`+
+    `<div style="margin-bottom:8px"><b>Top priority:</b> ${esc(r.top_priority||"")}</div>`+
+    (weak?`<div class="dim" style="margin:6px 0 2px">Weaknesses</div><ul style="margin:0 0 8px 18px">${weak}</ul>`:"")+
+    (miss?`<div class="dim" style="margin:6px 0 2px">Missing / gaps</div><ul style="margin:0 0 8px 18px">${miss}</ul>`:"")+
+    (recs?`<div class="dim" style="margin:6px 0 2px">Recommendations</div>${recs}`:"");
+}catch(e){}}
+async function runReview(){try{toast("Running a workflow review… (~1–2 min)","info");await api("/review/run","POST",{});setTimeout(loadReview,90000);}catch(e){toast(e.message,"err");}}
 async function sessClear(confirm){try{
   if(confirm && !(await confirmModal("Permanently clear the ORPHANED Cursor sessions (dead hunt transcripts + empty chat husks)? Pooled and running hunts' sessions are protected and kept.","Clear sessions"))){return;}
   const j=await api("/sessions/clear","POST",{confirm});
@@ -755,8 +768,8 @@ async function fcClose(){                            // works ALWAYS — even wh
   }catch(e){msg("vf-msg",e.message,false);}}
 async function startHunt(p){try{await api("/hunt","POST",{program:p});CURLOG=p;toast("Started hunt: "+p,"ok");setTimeout(refresh,1500);}catch(e){toast(e.message,"warn");loadNotifs();}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});toast("Stopped hunt: "+p,"ok");setTimeout(refresh,1000);}catch(e){toast(e.message,"err");}}
-function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();loadNotifs();if(CURLOG&&TAIL)loadLog();}
-function tick(){loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
+function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();loadNotifs();loadReview();if(CURLOG&&TAIL)loadLog();}
+function tick(){loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="overview")loadReview();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
 try{if(localStorage.getItem("fc-side")==="0")fcSide(false);}catch(e){}

@@ -287,6 +287,22 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._send(200, {"hunts": hunts,
                                         "watchdog": {"ts": wd.get("ts"), "revived": wd.get("revived") or {}}})
+            if p.path == "/review/latest":
+                fp = os.path.join(os.path.expanduser(self.base), "_review", "latest.json")
+                try:
+                    return self._send(200, json.load(open(fp)))
+                except Exception:  # noqa: BLE001
+                    return self._send(200, {"error": "no review yet"})
+            if p.path == "/review/journal":
+                fp = os.path.join(os.path.expanduser(self.base), "_review", "journal.jsonl")
+                out = []
+                if os.path.isfile(fp):
+                    for ln in open(fp, encoding="utf-8").read().splitlines()[-50:]:
+                        try:
+                            out.append(json.loads(ln))
+                        except json.JSONDecodeError:
+                            continue
+                return self._send(200, {"count": len(out), "entries": out})
             if p.path == "/hunt/log":
                 import targets as T
                 q = parse_qs(p.query)
@@ -477,6 +493,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, {"error": f"body too large (> {cap} bytes)"})
         b = self._body(cap)
         try:
+            if p.path == "/review/run":                 # trigger a workflow review on demand (panel button)
+                log = os.path.join(os.path.expanduser(self.base), "_review", "run.log")
+                os.makedirs(os.path.dirname(log), exist_ok=True)
+                subprocess.Popen(["python3", os.path.join(ENGINE, "reviewer.py"), "--quiet"],
+                                 start_new_session=True, stdout=open(log, "a"), stderr=subprocess.STDOUT)
+                return self._send(200, {"started": True, "note": "review running; poll /review/latest"})
             if p.path in ("/novelty/watch", "/novelty/diff"):
                 target = b.get("target")
                 if not target:
