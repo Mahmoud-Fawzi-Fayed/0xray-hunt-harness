@@ -152,6 +152,14 @@
   .fc-av{flex:0 0 26px;width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#5b96f7,#2f6ae0);color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;margin-top:1px;box-shadow:0 0 10px rgba(47,106,224,.35)}
   .fc-you{align-self:flex-end;background:linear-gradient(180deg,#3a6fd8,#2b5cc4);color:#f2f6ff;border-radius:18px 18px 4px 18px;padding:9px 14px;max-width:72%;box-shadow:0 2px 10px rgba(47,106,224,.22);font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
   .fc-sys{align-self:center;font-size:11.5px;color:var(--mut);text-align:center;max-width:94%}
+  .fc-md .fc-h2{font-weight:700;font-size:15px;margin:10px 0 4px;color:var(--ink)}
+  .fc-md .fc-h3{font-weight:700;font-size:14px;margin:8px 0 3px;color:var(--ink)}
+  .fc-md .fc-h4{font-weight:700;margin:6px 0 2px;color:var(--ink)}
+  .fc-md .fc-ul,.fc-md .fc-ol{margin:4px 0 8px 20px;padding:0}
+  .fc-md li{margin:2px 0}
+  .fc-md b{color:var(--ink);font-weight:700} .fc-md a{color:var(--acc)}
+  .fc-md .fc-ic{background:#1b2230;border:1px solid #27303f;border-radius:4px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .fc-md .fc-code{background:#0d1118;border:1px solid #1e2634;border-radius:6px;padding:10px 12px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:6px 0}
   .fc-composer{display:flex;align-items:flex-end;gap:8px;background:#0d1219;border:1px solid #232c3e;border-radius:16px;padding:7px 7px 7px 14px;transition:border-color .15s ease,box-shadow .15s ease}
   .fc-composer:focus-within{border-color:var(--acc);box-shadow:0 0 0 3px rgba(91,150,247,.14)}
   .fc-composer textarea{flex:1;min-width:0;border:none !important;background:transparent !important;box-shadow:none !important;padding:6px 0;resize:none;max-height:160px;min-height:24px;font-size:13.5px;line-height:1.5;border-radius:0;font-family:inherit}
@@ -689,9 +697,27 @@ let VF_LAST=null,FC_ID=null,FC_MTIMES={},FC_OPENING=false,FC_BUSY=false,FC_ABORT
 function fcUuid(){return (crypto.randomUUID?crypto.randomUUID():"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c==="x"?r:(r&3|8)).toString(16);}));}
 function fcRenderFiles(files){FC_MTIMES=Object.fromEntries((files||[]).map(x=>[x.name,x.mtime]));
   document.getElementById("fc-files").innerHTML=(files||[]).map(x=>`<a href="/panel/api/verify/fixchat/download?chat_id=${encodeURIComponent(FC_ID)}&name=${encodeURIComponent(x.name)}" style="display:inline-block;margin:0 6px 6px 0;padding:4px 10px;border:1px solid var(--line);border-radius:14px;font-size:12px">${esc(x.name)} <span class="dim">${(x.bytes/1024).toFixed(1)}KB</span>${x._edited?' <span style="color:var(--grn)">● edited</span>':""}</a>`).join("")||'<span class="dim">no files</span>';}
+function mdRender(src){
+  // SAFE markdown: escape HTML FIRST (XSS-proof), then apply formatting on the escaped text.
+  let s=esc(src||"");
+  const cb=[];                                                    // stash fenced code so inner text is untouched
+  s=s.replace(/```[a-z0-9]*\n?([\s\S]*?)```/gi,(m,c)=>{cb.push(c.replace(/\n$/,''));return "\u0000CB"+(cb.length-1)+"\u0000";});
+  s=s.replace(/`([^`\n]+)`/g,'<code class="fc-ic">$1</code>');    // inline code
+  s=s.replace(/^\s*#{4,6}\s+(.*)$/gm,'<div class="fc-h4">$1</div>');
+  s=s.replace(/^\s*###\s+(.*)$/gm,'<div class="fc-h3">$1</div>');
+  s=s.replace(/^\s*#{1,2}\s+(.*)$/gm,'<div class="fc-h2">$1</div>');
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/__([^_]+)__/g,'<b>$1</b>');   // bold
+  s=s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g,'$1<i>$2</i>');                        // italic
+  s=s.replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>'); // links
+  s=s.replace(/(?:^|\n)((?:[ \t]*[-*][ \t]+.*(?:\n|$))+)/g,(m,b)=>'\n<ul class="fc-ul">'+b.trim().split('\n').map(x=>'<li>'+x.replace(/^[ \t]*[-*][ \t]+/,'')+'</li>').join('')+'</ul>');
+  s=s.replace(/(?:^|\n)((?:[ \t]*\d+\.[ \t]+.*(?:\n|$))+)/g,(m,b)=>'\n<ol class="fc-ol">'+b.trim().split('\n').map(x=>'<li>'+x.replace(/^[ \t]*\d+\.[ \t]+/,'')+'</li>').join('')+'</ol>');
+  s=s.replace(/\n/g,'<br>');
+  s=s.replace(/<br>\s*(<\/?(?:ul|ol|li|div)[^>]*>)/g,'$1').replace(/(<\/(?:ul|ol|div)>)\s*<br>/g,'$1');  // tidy
+  s=s.replace(/\u0000CB(\d+)\u0000/g,(m,i)=>'<pre class="fc-code">'+cb[+i]+'</pre>');                    // restore code
+  return s;}
 function fcLog(role,text,cls){const l=document.getElementById("fc-log");
   if(role==="you")l.insertAdjacentHTML("beforeend",`<div class="fc-you">${esc(text)}</div>`);
-  else if(role==="agent")l.insertAdjacentHTML("beforeend",`<div class="fc-row"><div class="fc-av">0x</div><div style="flex:1;min-width:0;padding-top:3px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:13.5px;line-height:1.65;${cls||""}">${esc(text)}</div></div>`);
+  else if(role==="agent")l.insertAdjacentHTML("beforeend",`<div class="fc-row"><div class="fc-av">0x</div><div class="fc-md" style="flex:1;min-width:0;padding-top:3px;overflow-wrap:anywhere;word-break:break-word;font-size:13.5px;line-height:1.65;${cls||""}">${mdRender(text)}</div></div>`);
   else l.insertAdjacentHTML("beforeend",`<div class="fc-sys" style="${cls||""}">${esc(text)}</div>`);
   l.scrollTop=l.scrollHeight;}
 function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
