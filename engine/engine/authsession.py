@@ -278,6 +278,9 @@ def provision_b(program, base=DEFAULT_BASE, scope=None, host=None, timeout=None)
         pass
     if scope is None:
         scope = G._load_scope(program, base)
+    if not host:                                    # prefer the host where A already signed up successfully
+        a = load(program, base)                     # (pick_auth_host may otherwise pick a harder KYC host)
+        host = _clean_host(a.get("host", "")) if valid(a) else None
     host = host or pick_auth_host(scope)
     if not host:
         return {"error": "no in-scope auth host to register on"}
