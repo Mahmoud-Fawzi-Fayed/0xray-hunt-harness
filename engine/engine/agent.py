@@ -43,20 +43,40 @@ def _pick_model():
 
 
 def _parse_result_json(stdout):
-    """cursor-agent --output-format json prints one result object; be tolerant of leading warnings."""
-    stdout = (stdout or "").strip()
+    """cursor-agent --output-format json prints one result object, or (on a long tool-using run) a
+    stream of JSON events with the result last. A single json.loads of the whole buffer fails on
+    that stream, and a greedy `{.*}` span joins the events into invalid JSON — that was the
+    reviewer's `parse:no-json`."""
+    stdout = (stdout or "").strip().lstrip("\ufeff")
     if not stdout:
         return None
     try:
-        return json.loads(stdout)
+        obj = json.loads(stdout)
+        if isinstance(obj, dict):
+            return obj
     except json.JSONDecodeError:
         pass
-    for m in reversed(re.findall(r"\{.*\}", stdout, re.S)):   # last brace-balanced-ish blob
+    dec = json.JSONDecoder()
+    objs, i, n = [], 0, len(stdout)
+    while i < n:
+        while i < n and stdout[i] not in "{[":
+            i += 1
+        if i >= n:
+            break
         try:
-            return json.loads(m)
+            obj, end = dec.raw_decode(stdout, i)
         except json.JSONDecodeError:
+            i += 1
             continue
-    return None
+        if isinstance(obj, dict):
+            objs.append(obj)
+        i = max(end, i + 1)
+    if not objs:
+        return None
+    for obj in reversed(objs):
+        if obj.get("type") == "result" or "result" in obj or "text" in obj:
+            return obj
+    return objs[-1]
 
 
 # transient errors worth one quick retry (a cursor-agent hiccup / non-JSON blip / momentary limit).
@@ -351,4 +371,9 @@ if __name__ == "__main__":
     assert _parse_result_json('{"type":"result","is_error":false,"result":"PONG"}')["result"] == "PONG"
     assert _parse_result_json('warning line\n{"is_error":false,"result":"ok"}')["result"] == "ok"
     assert _parse_result_json("") is None
+    stream = ('{"type":"system","subtype":"init"}\n'
+              '{"type":"assistant","message":{"content":"looking"}}\n'
+              '{"type":"result","is_error":false,"result":"```json\\n{\\"score_0_10\\": 4}\\n```"}')
+    got = _parse_result_json(stream)
+    assert got and got.get("type") == "result" and "score_0_10" in got["result"], got
     print("agent.py (cursor) self-test: PASS")

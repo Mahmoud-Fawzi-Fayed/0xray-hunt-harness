@@ -418,6 +418,35 @@ def autofix(base, rev):
     return out
 
 
+def _coerce_review(agent_result):
+    """The review object inside an agent reply, or None. Accepts a fenced block, a bare object,
+    or a result that is already a dict. Ignores replies that are not a review."""
+    if not isinstance(agent_result, dict):
+        return None
+    text = agent_result.get("result") or ""
+    if isinstance(text, dict):
+        rev = text
+    else:
+        try:
+            import agent as A
+            rev = A.extract_json(text) if text else None
+        except Exception:  # noqa: BLE001
+            rev = None
+    if not isinstance(rev, dict):
+        return None
+    if rev.get("assessment") or rev.get("top_priority") or rev.get("score_0_10") is not None:
+        return rev
+    return None
+
+
+def _next_model(failed):
+    pool = [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+    for m in pool:
+        if m != failed:
+            return m
+    return None
+
+
 def review(base=BASE, quiet=False, dry=False):
     try:
         import notify
@@ -437,10 +466,18 @@ def review(base=BASE, quiet=False, dry=False):
             notify.site_alert("reviewer", msg, base=base, kind="review")
         return {"skipped": "overload"}
     import agent as A
-    r = A.run_agent(_task(snap), context=None, timeout=REVIEW_TIMEOUT)   # one-shot, rotates the model pool
-    rev = A.extract_json(r.get("result") or "") if not r.get("error") else None
+    task = _task(snap)
+    r = A.run_agent(task, context=None, timeout=REVIEW_TIMEOUT)   # one-shot, rotates the model pool
+    rev = _coerce_review(r)
+    if rev is None:                                   # envelope parse miss OR prose-only reply: one other model
+        alt = _next_model(r.get("model"))
+        if alt:
+            r = A.run_agent(task, context=None, model=alt, timeout=REVIEW_TIMEOUT, attempts=1)
+            rev = _coerce_review(r)
     if not isinstance(rev, dict):
-        rev = {"assessment": f"agent review unavailable ({r.get('error') or 'no-json'})",
+        tail = (r.get("result") or "").strip().replace("\n", " ")[-180:]
+        rev = {"assessment": f"agent review unavailable ({r.get('error') or 'no-json'})"
+                             + (f" — {tail}" if tail else ""),
                "weaknesses": [], "missing": [], "recommendations": [],
                "top_priority": "(agent produced no structured review this pass)", "score_0_10": None}
     rev["_model"] = r.get("model")
