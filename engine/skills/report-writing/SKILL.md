@@ -389,7 +389,7 @@ Each YES raises severity:
 
 ## CVSS 4.0 QUICK REFERENCE (newer programs)
 
-CVSS 4.0 replaced CVSS 3.1 in November 2023. Some newer programs require it.
+CVSS 4.0 was published November 1, 2023. CVSS 3.1 is still the default on most programs; some newer programs require 4.0. Use whichever the program specifies, and include the full vector string either way.
 
 ### Key Differences from CVSS 3.1
 

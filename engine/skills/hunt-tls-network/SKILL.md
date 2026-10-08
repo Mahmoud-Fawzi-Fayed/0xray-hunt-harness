@@ -27,8 +27,8 @@ Most findings in this class are **Info/Low and routinely rejected** as "best-pra
 ## Phase 1 — TLS/SSL Audit
 
 ```bash
-# Quick TLS test with testssl.sh
-brew install testssl
+# Quick TLS test with testssl.sh (install: `apt install testssl.sh` / `brew install testssl` /
+# `git clone https://github.com/drwetter/testssl.sh`)
 testssl.sh --fast $TARGET 2>/dev/null | grep -E "CRITICAL|HIGH|MEDIUM|OK|NOT" | head -30
 
 # Or use sslyze (Python)
@@ -316,8 +316,7 @@ Severities below are calibrated to what triage actually accepts. They are delibe
 ## Tools
 
 ```bash
-# testssl.sh — comprehensive TLS audit
-brew install testssl
+# testssl.sh — comprehensive TLS audit (apt/brew/git — see Phase 1)
 testssl.sh $TARGET
 
 # sslyze — Python TLS scanner

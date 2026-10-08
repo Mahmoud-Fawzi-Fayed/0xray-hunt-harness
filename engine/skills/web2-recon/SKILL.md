@@ -37,16 +37,18 @@ which subfinder httpx dnsx nuclei katana waybackurls gau dalfox ffuf anew gf int
 
 ---
 
-## THE 5-MINUTE RULE
+## THE 5-MINUTE TRIAGE (prioritization, not a stop sign)
 
-> If a target shows nothing interesting after 5 minutes of recon, move on. Don't burn hours on dead surface.
+> This is about ORDER of effort when choosing among many programs, NOT a reason to abandon an
+> assigned/authorized target. If you were told to hunt this target, hunt it fully (see
+> `redteam-mindset`: recon-is-not-hunting). Use the signals below only to decide what to hit first.
 
-**5-minute kill signals:**
-- All subdomains return 403 or static marketing pages
-- No API endpoints visible in URLs
-- No JavaScript bundles with interesting endpoint paths
-- nuclei returns 0 medium/high findings
-- No forms, no authentication, no user data
+**Low-signal indicators (deprioritize vs richer surface, don't abandon an in-scope asset):**
+- All subdomains return 403 or static marketing pages → pivot to alt-port scan, JS bundles, API spec paths, sibling TLDs before concluding "dead"
+- No API endpoints visible in crawled URLs → check `/_next/data`, Swagger/OpenAPI paths, GraphQL, mobile-app traffic
+- No JS bundles with interesting endpoints → re-crawl authenticated, diff after login
+- nuclei returns 0 medium/high → nuclei misses logic/authz bugs entirely; absence of nuclei hits means nothing
+- No forms/auth/user data visible yet → register an account and re-map
 
 ---
 
@@ -275,9 +277,9 @@ curl -sI https://target.com | grep -iE "server|x-powered-by|x-aspnet|x-runtime|x
 | Flask | SSTI (render_template_string) | SSRF (requests lib) |
 | Laravel | Mass assignment ($fillable) | IDOR (Eloquent, no ownership) |
 | Express (Node.js) | Prototype pollution | Path traversal |
-| Spring Boot | Actuator endpoints (/actuator/env) | SSTI (Thymeleaf) |
-| ASP.NET | ViewState deserialization | Open redirect (ReturnUrl) |
-| Next.js | SSRF via Server Actions | Open redirect via redirect() |
+| Spring Boot | Actuator (/actuator/heapdump, /env, /gateway/routes) | SpEL injection / SSTI (Thymeleaf) |
+| ASP.NET | ViewState deserialization (signed-only + machineKey) | Open redirect (ReturnUrl) |
+| Next.js | Middleware auth bypass (x-middleware-subrequest, CVE-2025-29927) | SSRF via Server Actions / image optimizer |
 | GraphQL | Introspection → auth bypass on mutations | IDOR via node(id:) |
 | WordPress | Plugin SQLi | REST API auth bypass |
 

@@ -1,6 +1,6 @@
 ---
 name: hunt-grpc
-description: "Hunt gRPC vulnerabilities — server reflection enabled (enumerate all services/methods), missing authentication / metadata-stripping on internal endpoints, plaintext gRPC over HTTP/2, internal endpoint disclosure, proto file leakage, gRPC-Web/grpc-gateway transcoding injection, and HTTP/2 Rapid Reset DoS (CVE-2023-44487). Use when target exposes port 50051 / 443 / 8443 / 9090 with HTTP/2, when grpcurl/grpcui detects reflection, when an Envoy or grpc-gateway proxy is fronting a microservice, or when recon reveals a microservice architecture."
+description: "Hunt gRPC vulnerabilities — server reflection enabled (enumerate all services/methods), missing authentication / metadata-stripping on internal endpoints, plaintext gRPC over HTTP/2, internal endpoint disclosure, proto file leakage, gRPC-Web/grpc-gateway transcoding injection, and CVE-2023-44487 as a version lead only (do not send a Rapid Reset flood). Use when target exposes port 50051 / 443 / 8443 / 9090 with HTTP/2, when grpcurl detects reflection, when an Envoy or grpc-gateway proxy is fronting a microservice, or when recon reveals a microservice architecture."
 sources: hackerone_public, grpc_security_research, cert_cc_advisory
 report_count: 6
 ---
@@ -16,9 +16,20 @@ gRPC reflection enabled = full service catalog enumeration without source code. 
 - **Missing auth on internal service** — a service designed for east-west microservice traffic exposed externally with no mTLS and no per-method authorization → call privileged methods directly.
 - **Edge-auth-only / metadata-stripping** — proxy authenticates the user but the backend re-trusts proxy-injected headers (`x-user-id`, `x-tenant-id`, `x-forwarded-*`); if you reach the backend or can inject those headers via the proxy, you impersonate any tenant.
 - **Plaintext gRPC** — gRPC h2c (cleartext HTTP/2) on a non-standard port → credential/metadata interception.
-- **HTTP/2 Rapid Reset DoS (CVE-2023-44487)** — interleaved HEADERS + immediate RST_STREAM frames bypass `MAX_CONCURRENT_STREAMS` accounting → resource exhaustion. **DoS is in scope on almost no program — get explicit written authorization before sending a single burst.**
+- **HTTP/2 Rapid Reset (CVE-2023-44487)** — a version/fingerprint lead only. DoS is out of scope unless the program explicitly authorizes it. Do not send a reset flood to prove the CVE.
 
 ---
+
+## Decision tree
+
+| Observation | Next step | Finding only if |
+|---|---|---|
+| ALPN `h2` or `grpc-status` trailer | Reflection or a method named in JS | A **sensitive** RPC returns `grpc-status: 0` without the right principal |
+| `grpcurl list` prints business services | Describe, then one unauth call of the most privileged method | Response body is another user's data or a state change you re-read |
+| Reflection off | Methods from the bundle, a leaked `.proto`, or grpc-gateway JSON | Same status-0 proof |
+| Edge proxy adds `x-user-id` / `x-tenant-id` | Send that metadata through the **public** host, not only the pod IP | Public route accepts the spoofed tenant |
+| RPC argument is a URL | OOB then one metadata URL (`hunt-ssrf`) | Callback or internal body |
+| Banner matches an unpatched HTTP/2 stack | Record the version | Do not flood. Version alone is a lead, not a DoS report |
 
 ## Phase 1 — Fingerprint & Port Discovery
 
@@ -46,7 +57,8 @@ curl -s --http2 -X POST "https://$TARGET/grpc.health.v1.Health/Check" \
 ## Phase 2 — Service Enumeration via Reflection
 
 ```bash
-brew install grpcurl   # or: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+# Linux: grpcurl from the distro or `go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest`
+command -v grpcurl >/dev/null || echo "grpcurl missing"
 
 # List services — -plaintext for h2c, -insecure for self-signed TLS, plain for valid TLS
 grpcurl -plaintext $TARGET:50051 list
@@ -81,8 +93,8 @@ grep -iE 'admin|internal|debug|secret|impersonate|exec|migrate|reset|delete' grp
 # Baseline: call a sensitive method with NO auth metadata
 grpcurl -plaintext $TARGET:50051 -d '{}' admin.AdminService/ListUsers
 
-# IDOR across an enumerable id field
-for ID in 1 2 3 100 1000 1001; do
+# IDOR: a handful of ids you already know (A's, B's, one neighbor). Stop at the first foreign object.
+for ID in "$ID_A" "$ID_B"; do
   echo "id=$ID"; grpcurl -plaintext $TARGET:50051 \
     -d "{\"user_id\": $ID}" user.UserService/GetUser 2>&1 | head -4
 done
@@ -184,49 +196,25 @@ Why this matters: the browser-facing transcoder commonly forwards to the SAME ba
 
 ---
 
-## Phase 7 — HTTP/2 Rapid Reset DoS (CVE-2023-44487)
+## Phase 7 — CVE-2023-44487 (do not flood)
 
-**Authorization gate:** DoS is out of scope on the overwhelming majority of programs. Do NOT run this without explicit, written, scoped permission and a target/window the program owner agreed to. Skip to Validation if unsure.
+DoS is out of scope unless the written rules for this program allow availability tests. Default: **do not send RST_STREAM bursts**, do not clone a flood client, do not run `h2load` / `ghz` and call a slowdown the CVE.
 
-The attack is NOT a load test. It opens streams (HEADERS) and immediately cancels them (RST_STREAM) before the server finishes, so each cancelled stream frees a `MAX_CONCURRENT_STREAMS` slot instantly while the server still spends work on it — the client races far ahead of the concurrency cap. `h2load`/`ghz` are throughput benchmarkers; **they have no rapid-reset mode and never interleave HEADERS+immediate-RST_STREAM, so they cannot test this.**
-
-**Correct tooling — author-sanctioned PoCs that actually emit the frame pattern:**
 ```bash
-# CERT/CC + community tracking and PoCs for CVE-2023-44487:
-#   https://kb.cert.org/vuls/id/421644
-#   https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack/  (Cloudflare writeup)
-# Go PoC that sends HEADERS then immediate RST_STREAM in a tight loop:
-git clone https://github.com/secengjeff/rapidresetclient
-cd rapidresetclient && go build -o rapidreset .
-# Detection-only: a SHORT, low-count burst, with permission, then STOP:
-./rapidreset --help    # confirm current flags first, then a SMALL authorized burst, e.g.:
-# ./rapidreset -url https://$TARGET:443 -concurrency 1 -requests 20
-
-# If you must roll your own, use the h2 framing layer (golang.org/x/net/http2)
-# to write a HEADERS frame immediately followed by RST_STREAM(CANCEL) per stream id.
+curl -sI --http2 "https://$TARGET/" | grep -iE '^server:|^via:'
 ```
 
-**Detection without DoSing — prefer this:** the only thing you need to PROVE is whether mitigations are present. Check the server banner / version and whether it tracks reset floods:
-```bash
-# Fingerprint the HTTP/2 implementation and version (patched versions are known):
-curl -sI --http2 https://$TARGET/ | grep -i '^server:'
-# nghttp2 >=1.57.0, Go net/http with the 2023-10 fix, Envoy >=1.27.1/1.26.5/1.25.10/1.24.11,
-# grpc-go >=1.56.3/1.57.1/1.58.3 are mitigated. Version-match instead of flooding.
-```
-Report the *version-confirmed* mitigation gap rather than a benchmark slowdown. "Server got slower under load" is not proof of CVE-2023-44487 — it produces false positives on slow/under-provisioned servers and false negatives on patched ones that throttle resets gracefully.
+Patched lines include nghttp2 ≥1.57.0, Envoy ≥1.27.1 / 1.26.5 / 1.25.10 / 1.24.11, grpc-go ≥1.56.3 / 1.57.1 / 1.58.3, and Go `net/http` builds with the 2023-10 fix. A banner inside the affected range is a lead. It is not impact. "The server got slower" is not proof. If the program explicitly authorized a test, a single minimal probe they defined is the ceiling — then stop. Otherwise skip this phase.
 
 ---
 
 ## Tools
 
 ```bash
-grpcurl   # primary CLI client (list/describe/call, -protoset for reflection-off)
-grpcui    # web UI for interactive exploration:  grpcui -plaintext $TARGET:50051
-protoc + protoscope   # build/inspect raw protobuf and gRPC-Web frames (Phase 6)
-buf       # lint/inspect proto, drive Connect endpoints
-# DoS-only, AUTHORIZED engagements: secengjeff/rapidresetclient (true rapid-reset PoC).
-#   NOTE: ghz and h2load are LOAD benchmarkers, NOT rapid-reset testers — do not
-#   use them to "prove" CVE-2023-44487.
+grpcurl   # list/describe/call; -protoset when reflection is off
+protoc + protoscope   # gRPC-Web frames (Phase 6)
+buf       # Connect endpoints
+# Do not use ghz, h2load, or a rapid-reset client to "prove" CVE-2023-44487.
 ```
 
 ---

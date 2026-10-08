@@ -26,10 +26,11 @@ Subdomain takeover is high-value because it allows an attacker to serve content 
 
 ## Attack Surface Signals
 
-**DNS signals:**
-- `CNAME` pointing to `*.github.io`, `*.gitlab.io`, `*.fastly.net`, `*.herokudns.com`, `*.wordpress.com`, `*.uservoice.com`, `*.zendesk.com`, `*.s3.amazonaws.com`, `*.azurewebsites.net`, `*.netlify.app`
+**DNS signals** (non-exhaustive — any dangling CNAME to a provider that re-issues names first-come is a candidate; always check the current `can-i-take-over-xyz` matrix):
+- `CNAME` pointing to `*.github.io`, `*.gitlab.io`, `*.fastly.net`, `*.herokudns.com`, `*.wordpress.com`, `*.uservoice.com`, `*.zendesk.com`, `*.s3.amazonaws.com`, `*.azurewebsites.net`, `*.cloudapp.azure.com`, `*.trafficmanager.net`, `*.netlify.app`, `cname.vercel-dns.com`, `*.ghost.io`, `*.readthedocs.io`, `*.statuspage.io`, `*.pages.dev` (Cloudflare Pages), `*.webflow.io`, `*.surge.sh`, `*.bitbucket.io`, `*.firebaseapp.com`/`*.web.app`
 - NXDOMAIN or `SERVFAIL` on the CNAME target while the parent record still exists
-- NS records delegating to registrars where the zone is no longer registered
+- NS records delegating to registrars/providers where the zone is no longer registered (NS-takeover — often full-zone control, higher impact than a single CNAME)
+- Dangling A/AAAA to a released cloud IP (re-claim by cycling instances in the same region/pool) — less common but high impact
 
 **HTTP response signals:**
 - `"There isn't a GitHub Pages site here"`
@@ -65,11 +66,12 @@ Subdomain takeover is high-value because it allows an attacker to serve content 
    cat subdomains.txt | dnsx -a -cname -o resolved.txt
    ```
 
-3. **Cross-reference CNAMEs** against known vulnerable provider fingerprints using `nuclei` or `subjack`:
+3. **Cross-reference CNAMEs** against known vulnerable provider fingerprints. Prefer actively-maintained detectors (`nuclei` takeover templates, `subzy`) — `subjack` is largely unmaintained, so treat its fingerprint list as stale and verify any hit manually:
    ```bash
-   subjack -w subdomains.txt -t 100 -timeout 30 -ssl -c fingerprints.json
-   nuclei -l subdomains.txt -t takeovers/
+   nuclei -l subdomains.txt -t ~/nuclei-templates/http/takeovers/ -severity medium,high,critical
+   subzy run --targets subdomains.txt --concurrency 100 --hide_fails
    ```
+   Fingerprint lists go stale fast — always confirm a flagged host by hand (step 4) before claiming, and treat a `can-i-take-over-xyz` "vulnerable" entry as a lead, not proof.
 
 4. **Manual verification** for each flagged subdomain:
    - `dig CNAME subdomain.target.com` — confirm CNAME exists
@@ -83,9 +85,9 @@ Subdomain takeover is high-value because it allows an attacker to serve content 
    - UserVoice/Zendesk/WordPress: visit registration URL
    - Fastly: check if origin hostname is unregistered
 
-6. **Claim the resource** (only enough to prove control — do NOT serve malicious content):
-   - Create a minimal index page with your HackerOne username and a timestamp
-   - Take screenshot showing your content served on `subdomain.target.com`
+6. **Claim the resource** (only enough to prove control — do NOT serve malicious content, phishing, or anything that reaches real users; this is a hard safety rail):
+   - Serve a minimal, benign page containing a unique synthetic marker (your researcher handle + per-engagement nonce + UTC timestamp) so the proof is unambiguous and attributable to you.
+   - Capture the marker served over `https://subdomain.target.com` (screenshot + raw `curl` of the marker). Prove control ONCE; do not escalate the takeover beyond the marker.
 
 7. **Document the chain**: CNAME record → provider target → unclaimed resource → your content
 

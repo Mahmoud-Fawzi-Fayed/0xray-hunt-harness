@@ -38,6 +38,17 @@ The 9 corrections below are nuance. THIS is the core. If you only retain one thi
 
 Do not insert mid-engagement permission gates. If the user chose a mode at the start ("full engagement", "Option D", "go deep", "test these assets") that authorization stands until the engagement window expires or the user explicitly revokes it. **`AskUserQuestion` mid-loop after the user already chose a path is a stall, not a check.**
 
+### The no-brute-force rail is NOT a self-throttle — keep it.
+
+"Do not stop" means exhaust *vectors and surfaces*, never *keyspaces*. Brute force, password
+spraying, credential stuffing, OTP/2FA guessing, and captcha-cracking **to defeat a login** stay
+off the table (hard operator rail). The access-yielding move is almost always a real vuln
+(auth-bypass class, leaked/default creds, token flaw), not guessing. When you hit a login wall,
+the next vector is an auth-bypass technique or a leaked-secret hunt — not a wordlist. Rate-limit /
+lockout *absence* is proven with a tiny synthetic probe (<=10 attempts on a non-existent user), not
+by actually cracking anything. Treat captcha/WAF/rate-limit decision trees below as ways to keep
+*testing other classes*, not as license to brute a credential.
+
 ### Discipline rules are about correctness of FINDINGS, not throttling of EFFORT.
 
 Read this twice. The bundle's discipline rules — OOB-Or-It-Didn't-Happen, Marker Discipline, Body-Diff, Pre-Severity Gate, Server-Policy-vs-State, Statistical Sampling — all answer one question: *"is this signal actually a finding?"*. **None of them answer the question *"should I send the next probe?"*** The answer to that second question is always *yes*, unless scope is exhausted or the user said stop.
@@ -162,7 +173,7 @@ The authorized-engagement case: SQLi confirmed on one sub-app (`<app-A>`); four 
 
 Aggressive defaults:
 1. **Probe every live host** for top 20 paths (admin, api, login, /.git, /.env, server-status, swagger, openapi.json, robots.txt, /actuator, /healthz, etc.)
-2. **For every login form discovered**, attempt 1-of-leaked + 1-of-spray-pattern + SQLi + auth-bypass-via-parameter-tampering
+2. **For every login form discovered**, run the access-yielding classes: auth-bypass-via-parameter-tampering, JWT/alg flaws, SQLi, and a single verified-leaked credential if the engagement provides one — NOT spraying or guessing (no-brute-force rail)
 3. **For every JS bundle**, grep for hardcoded API keys, JWT, base URLs, hidden endpoints, admin paths
 4. **For every API endpoint**, check OPTIONS preflight, missing-auth response, alg=none JWT, X-Forwarded-User header injection
 5. **For every mobile app**, decompile + grep for secrets + check pinned certs + identify exported components
@@ -182,14 +193,15 @@ Aggressive defaults:
 
 Decision-tree for blockers:
 
-**Captcha:**
+**Captcha (goal: find the logic flaw, not OCR a login into submission):**
 1. Omit field → check if required
-2. Empty value → check validation
-3. Reuse value across multiple submits → check session-bind
-4. Tesseract with preprocessing
-5. Trained-model OCR (deep-text-recognition-benchmark, calamari-OCR)
-6. Paid solving service (2captcha API, anti-captcha)
-7. Audio captcha if available (much weaker)
+2. Empty / null value → check validation
+3. Reuse the same solved token across multiple submits → check session-bind (the real bug: non-single-use captcha)
+4. Check whether the captcha is enforced server-side at all vs only rendered client-side
+5. Look for an unprotected sibling endpoint (mobile/API/legacy) that skips the captcha entirely
+Note: OCR/paid-solver loops exist to *bypass a captcha as a control*, but using them to then
+brute/guess a credential is the forbidden path — stay on the no-brute-force rail. Report the
+captcha weakness (replayable/absent/client-only) as the finding; don't turn it into a cracking run.
 
 **WAF:**
 1. Slower pace

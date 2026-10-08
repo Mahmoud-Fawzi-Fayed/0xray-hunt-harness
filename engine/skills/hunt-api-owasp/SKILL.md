@@ -6,50 +6,67 @@ sources: 0xray-authored
 
 # HUNT-API-OWASP — OWASP API Security Top 10 (2023) triage map
 
-Use this as the **coverage checklist** for any JSON/REST/GraphQL API: walk each item, and on a hit
-pivot to the deeper `hunt-*` skill named in the "Go deeper" column. It exists to stop you
-tunnel-visioning on one class and leaving the rest of the API surface untested.
+Walk every row on every in-scope API. The 2023 list is still the current OWASP API Top 10; GraphQL, gRPC, and BaaS are covered by the pivot skills, not by skipping a row. This map does not replace the per-class skill.
 
-## First — inventory the surface
-- Pull the spec: `/openapi.json`, `/swagger.json`, `/v3/api-docs`, `/graphql` (introspection),
-  `/.well-known/`, `asset-manifest.json`, and JS bundles (see `hunt-source-leak`,
-  `changed-js-deepdive`).
-- Enumerate **versions and environments**: `/api/v1` vs `/v2` vs `/internal`, and
-  `staging.` / `dev.` / `beta.` hosts — old and shadow versions are API9.
+## Inventory (do this once)
 
-## The Top 10 — what to test, where to go deeper
-| # | Class | Quick test | Go deeper |
-|---|---|---|---|
-| API1 | **BOLA** (object-level authz) | swap `id`/`uuid`/`slug` across two identities; body-diff | `hunt-idor` |
-| API2 | **Broken authentication** | missing/expired/forged token; weak JWT; reset/OTP flaws | `hunt-auth-bypass`, `hunt-jwt`, `hunt-mfa-bypass` |
-| API3 | **BOPLA** (mass assignment + excessive data) | POST extra fields (`is_admin`, `role`, `verified`); scan responses for over-returned PII | `hunt-api-misconfig` |
-| API4 | **Unrestricted resource consumption** | no rate limit / no pagination cap / huge `limit`; expensive GraphQL | `hunt-brute-force`, `hunt-graphql` |
-| API5 | **BFLA** (function-level authz) | call admin/privileged methods as a low-priv user; HTTP verb tampering | `hunt-idor`, `hunt-api-misconfig` |
-| API6 | **Sensitive business flows** | automate a flow meant to be rate/human-gated (checkout, invite, signup) | `hunt-business-logic` |
-| API7 | **SSRF** | user-supplied URL (webhook, import, link-preview, PDF render) -> internal/metadata | `hunt-ssrf`, `hunt-webhook` |
-| API8 | **Security misconfiguration** | verbose errors, permissive CORS, authz missing on `OPTIONS`, debug endpoints, default creds | `hunt-cors`, `hunt-api-misconfig`, `hunt-source-leak` |
-| API9 | **Improper inventory** | shadow/old API versions, undocumented hosts, deprecated-but-live endpoints | `hunt-source-leak`, `changed-js-deepdive` |
-| API10 | **Unsafe consumption of 3rd-party APIs** | the API blindly trusts an upstream/partner response -> injection/SSRF via that channel | `hunt-ssrf`, `hunt-api-misconfig` |
+- Spec: `/openapi.json`, `/swagger.json`, `/v3/api-docs`, `/graphql`, `/.well-known/`, `asset-manifest.json`, JS bundles (`hunt-source-leak`, `changed-js-deepdive`).
+- Versions and hosts: `/api/v1` vs `/v2` vs `/internal`, `staging.` / `dev.` / `beta.` — old versions are API9 and often miss a check the new one has.
+- Two identities, A and B, before any authz test. Body-diff. Status codes lie (`200` with an empty list, `500` that still wrote).
 
-## Discipline
-- Use **two identities (A, B)** for every authz test; **body-diff**, never trust status codes alone.
-- For SSRF and other blind classes, require **OOB confirmation** (see the specific skill's gate).
-- **Severity honesty**: a single cross-account read via a random UUIDv4 is AC:H / Medium, not a
-  "mass breach" — you must demonstrate a way to obtain other users' IDs to scale it. See
-  `triage-validation`.
+## Decision tree
+
+| Response you see | Try first | Class |
+|---|---|---|
+| Object URL with an id you did not create | Replay as A with B's id | API1 |
+| `401` missing, or JWT in `Authorization` / cookie | Drop the token; flip `alg`; call as the other user | API2 |
+| JSON has `role`, `is_admin`, `email`, `balance`, fields the UI never shows | Add those fields on write; read a list endpoint | API3 |
+| `limit` / `page_size` / GraphQL `first` echoes your number | One large **capped** read (e.g. 1000) | API4 |
+| `/admin`, verb `PUT`/`DELETE`, or `action=export` works as a normal user | Same request as a fresh low-priv user | API5 |
+| Coupon, invite, checkout, transfer, vote | One logic abuse (`hunt-business-logic`) | API6 |
+| Field named `url`, `callback`, `avatar`, `feed`, `file` | OOB URL, then one metadata URL | API7 |
+| Stack trace, `Access-Control-Allow-Origin: <your origin>`, `/debug`, default creds in a spec | Confirm data leaves the browser or the debug route returns secrets | API8 |
+| Path only in an old bundle or `/v1` | Hit it with A's token | API9 |
+| The API stores a URL it later fetches from a partner, or trusts a webhook body | `hunt-webhook` / `hunt-ssrf` | API10 |
+
+## The ten checks
+
+| # | Class | One request | Proves it | Go deeper |
+|---|---|---|---|---|
+| API1 | **BOLA** | `GET /api/orders/ID_B` as A | Body contains B's fields A cannot see in the UI | `hunt-idor` |
+| API2 | **Broken auth** | Same call with no token, `alg:none`, or A's token on B's action | Unauthorized object read or state change | `hunt-auth-bypass`, `hunt-jwt`, `hunt-mfa-bypass` |
+| API3 | **BOPLA** | `PATCH /me {"role":"admin","verified":true}` and `GET /users?limit=1` | Role sticks on re-read, or response includes another user's secret field | `hunt-api-misconfig` |
+| API4 | **Resource use** | `?limit=1000` or a 5-alias GraphQL query once | Server returns far more than the business cap, or skips authz when batched | `hunt-graphql` — do not load the origin |
+| API5 | **BFLA** | Low-priv user calls `POST /admin/...` or `X-HTTP-Method-Override: DELETE` | Privileged state change or admin-only data | `hunt-idor`, `hunt-api-misconfig` |
+| API6 | **Business flow** | Skip a step, negative qty, replay a webhook, race one coupon | Persisted money/entitlement/state is wrong | `hunt-business-logic`, `hunt-race-condition` |
+| API7 | **SSRF** | `url=https://<rand>.<oob>/` then one `169.254.169.254` URL | OOB hit or internal body | `hunt-ssrf`, `hunt-webhook` |
+| API8 | **Misconfig** | Spec, CORS preflight, verbose error, debug route | Sensitive data actually obtained, not a header in isolation | `hunt-cors`, `hunt-api-misconfig`, `hunt-source-leak` |
+| API9 | **Inventory** | Request a path that exists only in an old JS bundle or `/v0` | It still authorizes differently from current `/v2` | `changed-js-deepdive`, `hunt-source-leak` |
+| API10 | **Unsafe consumption** | Callback or import URL the server fetches for a partner | Forged partner body changes state, or the fetch hits metadata | `hunt-webhook`, `hunt-ssrf` |
+
+API2 rate-limit notes: a missing limit is reportable when a **small** sample (about 10) of a sensitive action all succeed and the program cares about that control. Do not guess passwords, OTPs, or API keys. No credential stuffing.
+
+API4: one oversized read or one batch that bypasses a cost/authz check. Stop. Do not stream until the process falls over.
+
+## Validation (every row)
+
+- **Body-diff** A vs B, and before vs after. A `200` that matches the unauthenticated error page is a miss.
+- **ID source:** a single BOLA hit on a UUIDv4 you were handed is real but not "the whole table" unless you show how the next id is obtained (a list endpoint, a predictable id, an object you can enumerate). Say which.
+- **Blind classes** (SSRF, stored XSS, outbound webhooks) need OOB with a unique marker. Timing claims need n≥10 paired samples, not one slow response.
+- **Re-read** after a write. Mass assignment and BFLA are whatever `GET` returns after the `PATCH`, not the `PATCH` body echoing your input.
+
+## Rails
+
+- In-scope hosts only. Read-only by default; the single write in the table is the proof, then stop.
+- No brute-force, no DoS, no mass export of user tables.
+- Draft only — do not submit. Dedup with the **specific** class you proved (`idor`, `ssrf`, `auth-bypass`, …), not `api`.
 
 ## Before you report — dedup gate
-
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding, run the dedup gate with the **specific** class you
-landed (`idor`, `ssrf`, `auth-bypass`, ...), e.g.:
 
 ```bash
 python3 engine/dedup.py check --program <program> --class idor --url "<endpoint>" --title "<title>"
 ```
 
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
+`NOVEL` → `/validate`. `LIKELY_DUP` → stop unless endpoint, param, or a fix bypass is a concrete differentiator.
 
-Cross-references: `hunt-idor`, `hunt-auth-bypass`, `hunt-jwt`, `hunt-api-misconfig`, `hunt-ssrf`,
-`hunt-webhook`, `hunt-graphql`, `hunt-business-logic`, `triage-validation`, `dedup-novelty`.
+Cross-refs: `hunt-idor`, `hunt-auth-bypass`, `hunt-jwt`, `hunt-api-misconfig`, `hunt-ssrf`, `hunt-webhook`, `hunt-graphql`, `hunt-grpc`, `hunt-baas`, `hunt-business-logic`, `triage-validation`.

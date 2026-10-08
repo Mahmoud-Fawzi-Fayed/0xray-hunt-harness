@@ -246,6 +246,13 @@ curl -sk "$SRV/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurati
 
 ---
 
+## Also check (same proof standard)
+
+- **`containerd.sock` / `crio.sock`** — same class as `docker.sock` (`/run/containerd/containerd.sock`). `crictl` or the containerd API that lists pods and starts a privileged container. Proof is a host file the container cannot already see. One container, remove it, stop.
+- **RBAC verbs `escalate`, `bind`, `impersonate`** — SelfSubjectAccessReview for those verbs. `impersonate` on `users`/`serviceaccounts` plus one request with `Impersonate-User` that reads a Secret is the finding. Do not bind `cluster-admin`.
+- **ingress-nginx admission (IngressNightmare, CVE-2025-1974 and CVE-2025-1097 / -1098 / -24513 / -24514).** Affected controller versions: `<1.11.5` and `1.12.0` (fixed `1.11.5` and `1.12.1`). The validating webhook is often unauthenticated on the pod network and, on some installs, on a public Service. Fingerprint the image tag or the controller version and whether the webhook answers an `AdmissionReview` without credentials. A version match plus reachability is a **lead**. RCE is claimed only with command output from the controller, and you do not upload a shared library, leave a pod, or persist a binary. If you cannot show execution safely, report the exposed unauthenticated webhook and the vulnerable version as the proven facts and stop.
+- **Cloud metadata from a pod** you already exec: EKS/GKE/AKS paths in Phase 1. GKE legacy `kube-env` attribute is a secret if it returns. One token, then Phase 6.
+
 ## Chain Table
 
 | K8s finding | Chain to | Impact |

@@ -3,110 +3,100 @@ name: hunt-mfa-bypass
 description: "Hunt MFA / 2FA bypass — 7 distinct patterns. (1) MFA not enforced on sensitive endpoints (password change, email change accept without MFA challenge), (2) MFA-step skip via direct navigation to post-login URL, (3) MFA-token replay (same code accepted twice), (4) brute-force the 6-digit OTP without rate limit (10^6 attempts at server speed), (5) race condition on OTP validation, (6) recovery-code dump via /api/me, (7) backup factor downgrade (SMS factor with no rate limit). Plus the chain: cookie theft + password oracle + no step-up = ATO without MFA challenge. Detection: trace auth flow in Burp, find every state transition, check if MFA is middleware-gated vs per-endpoint, check OTP entropy and rate limit on OTP-validate. Validate: attacker session reaching post-MFA state. Use when hunting auth bypass, MFA flows, chaining primitives toward ATO."
 ---
 
-## 19. MFA / 2FA BYPASS
-> Growing bug class — 7 distinct patterns. Pays High/Critical when it enables ATO without prior session.
+# HUNT-MFA-BYPASS — MFA / 2FA
 
-### Pattern 1: No Rate Limit on OTP
+## Rails
+- In-scope only. Use **your** test accounts. Never send OTP guesses against a third-party mailbox.
+- **No keyspace exhaustion.** A 6-digit OTP is 10^6 — do **not** ffuf 000000–999999. Prove “no effective rate limit” with a **small burst on your pending-MFA session**, then report reachability math (`hunt-brute-force`).
+- No destructive lockouts of other users. One proof, then stop.
+- STOP at draft. Claim only a session that reached **post-MFA state** without a valid second factor you were entitled to reuse.
+
+## Decision tree (any MFA stack)
+Fingerprint the factor: TOTP, SMS/email OTP, push, WebAuthn/passkey, backup codes, “remember this device”, recovery email. Then for **every** post-password state transition:
+
+1. Can you **skip** the MFA step (direct URL / API / other verb / other version)?
+2. Is MFA **missing** on a sensitive mutation (email, password, OAuth link, disable-MFA, recovery codes)?
+3. Is the OTP **bound** (one-time, purpose-bound, session-bound, rate-limited)?
+4. Can you **downgrade** to a weaker factor (SMS, email, backup) or disable MFA without step-up?
+5. Does a **client-only** check decide success (`success:true` in JSON the server never re-validates)?
+
+Run every branch that exists. Do not stop at the first 401 on `/mfa`.
+
+## Pattern matrix
+
+| # | Pattern | Probe | Confirm |
+|---|---|---|---|
+| 1 | **Step skip** | After password, app sets pre-MFA cookie and 302s to `/mfa`. Hit `/dashboard`, `/api/me`, `/graphql`, mobile API, `/admin` with that cookie. Try other API versions (`/v1/` vs `/v2/`), `X-Original-URL`, method override. | Post-MFA resource returns **your unique identity marker** without OTP. Body-diff vs truly unauthenticated. |
+| 2 | **No MFA on sensitive endpoints** | From a **password-only** or already-authed session: change email, change password, generate API tokens, disable MFA, view backup codes, add OAuth IdP. | State change succeeds with no OTP/WebAuthn challenge. Then chain to reset (`hunt-ato`). |
+| 3 | **OTP reuse / not invalidated** | Complete MFA with code C on session A. Logout. Login again. Submit **the same** C (within window). Also: use C on session B while A is in-flight. | Second success = OTP not one-time. |
+| 4 | **No effective rate limit** | On **your** pending-MFA session: ~20–50 wrong OTPs. Classify hard lockout / IP throttle / CAPTCHA / **silent shadow-throttle** (`hunt-brute-force` 4-state table). Seed a **known-good** OTP at the end of the burst — if it still works, limit is absent or header-bypassable. | Report math: throughput × OTP lifetime vs 10^6. **Do not** exhaust the keyspace. |
+| 5 | **Race on consume** | Same OTP, **20+ concurrent** HTTP/2 streams (Turbo Intruder single-packet), not 2 sequential requests. | >1 success, or 1 success + N “already used” on the same code. |
+| 6 | **Recovery / backup dump** | `GET /api/me`, `/users/current`, GraphQL `viewer { backupCodes mfaSecret }`, mobile `/settings`. IDOR the same fields (`hunt-idor`). | Plaintext backup codes, TOTP seed, or recovery email. Using **one** backup code on a test account proves login. |
+| 7 | **Remember-device / trust cookie** | Complete MFA, capture device cookie. Replay from new IP/UA **without** OTP. Bindings to test: IP, UA, `Sec-CH-UA`, TLS fingerprint. | MFA skipped from a second environment. |
+| 8 | **Factor downgrade** | Enroll TOTP+WebAuthn; request SMS/email fallback; `preferred_mfa=sms`; `/mfa/challenge` with `type=sms`. Disable WebAuthn via API that UI hides. | Weaker factor issued or MFA turned off without step-up. |
+| 9 | **Client-side success** | Wrong OTP → intercept `{"ok":false}` / 401 → flip to `{"ok":true}` / 200. If SPA proceeds, **re-request** a protected API — server must also be fooled. | Server issues post-MFA cookie/JWT, not just UI skip. |
+| 10 | **WebAuthn / passkey skip** | Drop `PublicKeyCredential`; POST `/webauthn/verify` empty; call the JSON login-complete endpoint the SPA hits **after** `navigator.credentials.get`. Origin/rpId mismatch if you control a trusted origin (`hunt-cors` / takeover). | Session without a real assertion. |
+| 11 | **Purpose-unbind** | Password-reset OTP accepted on login MFA; email-change OTP accepted on disable-MFA (same 6 digits, different purpose). | Cross-purpose verify succeeds. |
+
+### Step skip
 ```bash
-# Test with ffuf — all 1M 6-digit codes
-ffuf -u "https://target.com/api/verify-otp" \
-  -X POST -H "Content-Type: application/json" \
-  -H "Cookie: session=YOUR_SESSION" \
-  -d '{"otp":"FUZZ"}' \
-  -w <(seq -w 000000 999999) \
-  -fc 400,429 -t 5
-# -t 5 (slow down) — aggressive rates get 429 or ban
+# After first factor, cookie jar holds pre-MFA session — do not follow /mfa
+curl -s -b "$PRE_MFA_JAR" https://$TARGET/api/me
+curl -s -b "$PRE_MFA_JAR" https://$TARGET/dashboard
+curl -s -b "$PRE_MFA_JAR" -H 'Content-Type: application/json' \
+  -d '{"query":"{ viewer { email mfaEnabled } }"}' https://$TARGET/graphql
 ```
 
-### Pattern 2: OTP Not Invalidated After Use
-```
-1. Login → receive OTP "123456" → enter it → success
-2. Logout → login again with same credentials
-3. Try OTP "123456" again
-4. If accepted → OTP never invalidated = ATO (attacker sniffs OTP once, reuses forever)
-```
-
-### Pattern 3: Response Manipulation
-```
-1. Enter wrong OTP → capture response in Burp
-2. Change {"success":false} → {"success":true} (or 401 → 200)
-3. Forward → if app proceeds → client-side only MFA check
-```
-
-### Pattern 4: Skip MFA Step (Workflow Bypass)
+### Sensitive endpoint without step-up
 ```bash
-# After entering password, app sets a "pre-mfa" cookie → redirects to /mfa
-# Test: skip /mfa entirely, access /dashboard directly with pre-mfa cookie
-# If app grants access without MFA = auth flow bypass = Critical
-curl -s -b "session=PRE_MFA_SESSION" https://target.com/dashboard
+curl -s -X POST https://$TARGET/api/account/disable-mfa -H "Cookie: $SESSION" -d '{}'
+curl -s -X PUT https://$TARGET/api/user/email -H "Cookie: $SESSION" \
+  -H 'Content-Type: application/json' -d '{"email":"attacker@ex.com"}'
+curl -s -X POST https://$TARGET/api/account/password -H "Cookie: $SESSION" \
+  -H 'Content-Type: application/json' -d '{"new_password":"NewPass!2"}'
 ```
 
-### Pattern 5: Race on MFA Verification
+### OTP reuse + small rate-limit probe (your account only)
+```bash
+# 1) Reuse: submit the OTP you just used on a fresh login
+# 2) Limit: 25 wrong codes, then the REAL current OTP last
+for i in $(seq 1 25); do
+  curl -s -o /tmp/mfa -w "%{http_code} %{time_total} %{size_download}\n" \
+    -X POST https://$TARGET/api/mfa/verify -H "Cookie: $PRE" \
+    -H 'Content-Type: application/json' -d "{\"otp\":\"00000$i\"}"
+done
+# Then submit the real OTP. If it still authenticates → not shadow-throttled.
+```
+
+### Race (same OTP, many streams)
 ```python
-import asyncio, aiohttp
-
-async def verify(session, otp):
-    async with session.post("https://target.com/api/mfa/verify",
-                            json={"otp": otp}) as r:
-        return r.status, await r.text()
-
-async def race():
-    cookies = {"session": "YOUR_SESSION"}
-    async with aiohttp.ClientSession(cookies=cookies) as s:
-        # Fire ~30 concurrent submissions of the SAME OTP to hit the TOCTOU
-        # window before the server marks it used. Two requests are NOT enough —
-        # they almost always resolve sequentially as "already-used" (false negative).
-        # Best done as a single-packet / 20+ HTTP-2-stream attack (Turbo Intruder).
-        results = await asyncio.gather(*[verify(s, "123456") for _ in range(30)])
-        # Race confirmed if >1 success (or 1 success among many "already-used").
-        for status, body in results:
-            print(status, body)
-asyncio.run(race())
+# Turbo Intruder / httpx HTTP/2 is better; this is the idea.
+# Fire ≥20 concurrent POSTs of ONE valid OTP before the server marks it used.
 ```
 
-### Pattern 6: Backup Code Brute Force
-```
-Backup codes: typically 8 alphanumeric = 36^8 = ~2.8T (too large)
-BUT: check if backup codes are only 6-8 digits = 1-10M range = feasible with no rate limit
-Also test: can backup codes be reused after exhaustion? Some apps regenerate predictably.
-```
+## Validation
+- **Post-MFA state:** `/api/me` (or equivalent) returns the same identity marker as a legitimately MFA’d session. Status-only 200 on an SPA shell is not enough (body-diff).
+- **Server-side:** flipping JSON in Burp only counts if a **new** request with the resulting cookie/JWT hits a protected API.
+- **Rate limit:** 4-state classification + known-good seed. Quote throughput × lifetime vs 10^6. Never claim “I brute-forced OTP” without that math — and never actually exhaust it.
+- **Race:** n≥20 concurrent, not 2. Unique marker in success body.
+- Standalone MFA skip **when you already have the password** is typically **High**, not Critical, unless you also show a password-oracle / reset / cookie-theft entry (`hunt-ato`).
 
-### Pattern 7: "Remember This Device" Trust Escalation
-```
-1. Complete MFA once on Device A (attacker's browser)
-2. Capture the "remember device" cookie
-3. Present that cookie from a new IP/browser
-4. If MFA skipped = device trust not bound to IP/UA = ATO from any location
-```
+**Severity:** skip MFA on login → session = **High–Critical** (Critical if first factor is also bypassed or password not required). Disable-MFA / email-change without step-up → ATO chain = **Critical** when the entry cookie is obtainable in-scope. OTP reuse = **High**. Rate-limit gap with reachability math = **High–Critical**. Client-only UI skip with server still requiring OTP = **not a finding**.
 
-### MFA Chain Escalation
-```
-Rate limit bypass + no lockout = ATO (Critical)
-Response manipulation = client-side only check = Critical
-Skip MFA step = auth flow bypass = Critical
-OTP reuse = persistent session hijack = High
-```
+## Chains
+| Primitive | Compose into | Impact |
+|---|---|---|
+| Step skip | Password spray is **out of rails** — instead pair with reset/IDOR/JWT (`hunt-ato`) | ATO without 2FA |
+| No step-up on email/password | Stolen session (XSS/CSWSH/fixation) | Persistent ATO, victim locked out |
+| Backup codes in `/api/me` | IDOR or XSS | MFA satisfy without OTP |
+| Remember-device unbound | Cookie theft | MFA-less login from anywhere |
+| Race on OTP | One sniffed/guessed code, double spend | ATO + victim still logs in |
+| Downgrade to SMS | SIM-swap is out of scope; **in-app** downgrade without step-up is the bug | Weaker factor |
 
----
+Cross-refs: `hunt-ato`, `hunt-brute-force`, `hunt-race-condition`, `hunt-auth-bypass`, `hunt-session`, `hunt-idor`, `triage-validation`.
 
-## Related Skills & Chains
-
-- **`hunt-ato`** — MFA bypass is a primitive; ATO is the destination. Chain primitive: cookie theft (via XSS or session-fixation) + password oracle (login response timing/length diff reveals valid passwords without lockout) + no MFA step-up on password-change endpoint = persistent ATO without ever facing the OTP challenge → password rotated, attacker locks victim out.
-- **`hunt-race-condition`** — Pattern 5 (OTP race) lives in race-condition territory; load both skills together. Chain primitive: same 6-digit OTP submitted via 20 parallel HTTP/2 streams (single-packet Turbo Intruder attack) before the server marks it used → 1 success + 19 "already-used" → race window confirmed → attacker doesn't need to brute, just guesses once and parallelizes → ATO.
-- **`hunt-auth-bypass`** — MFA-step-skip is auth-flow bypass at the workflow layer. Chain primitive: pre-MFA cookie issued after password step + direct navigation to `/dashboard` skipping `/mfa` route + server only middleware-gates `/mfa` not `/dashboard` = full post-auth access from password-only state → MFA never enforced because the route gate was misplaced.
-- **`hunt-misc`** — Recovery-code dump via `/api/me` is a misc-class info disclosure that becomes Critical when chained. Chain primitive: `/api/me` returns full user object including `backup_codes` array (plaintext, never rotated) → attacker with any read-IDOR or XSS exfils backup codes → uses one backup code → MFA satisfied → ATO without OTP knowledge.
-- **`security-arsenal`** — Pull the OTP-brute-force payload section (000000-999999 wordlist generator, ffuf rate-limit-evasion patterns with `-t 5 -p 0.5-2`, distributed-IP rotation via proxychains) and the JWT-token-replay table when "MFA satisfied" claim lives in a JWT claim that can be forged.
-- **`triage-validation`** — Run the Pre-Severity Gate before claiming Critical on an MFA bypass that only works when the attacker already has the password. Standalone MFA bypass is High; chained-with-password-oracle is Critical; chained-with-cookie-theft-only is Critical. The chain question separates the two.
-
-
-## Before you report — dedup gate
-
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
-
+## Dedup gate
 ```bash
 python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
 ```
-
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
+`NOVEL` → `/validate`. `LIKELY_DUP` → stop unless a concrete differentiator.

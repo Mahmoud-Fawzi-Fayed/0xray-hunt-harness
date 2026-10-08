@@ -68,6 +68,7 @@ Process Explorer                   → loaded DLLs, handles, command lines, miti
    - Audit `ipcMain.on/handle` handlers for command/file/URL sinks reachable from a compromised renderer
    - Check navigation guards: missing `setWindowOpenHandler` / `will-navigate` validation → open redirect into privileged window
    - Check `app.setAsDefaultProtocolClient` + second-arg handling on Windows (args arrive via `process.argv`, not the `open-url` event)
+   - Dump Electron Fuses: `npx @electron/fuses read --app "App.exe"` — `RunAsNode` on + `set ELECTRON_RUN_AS_NODE=1` = arbitrary Node exec as the app; `EnableNodeCliInspectArguments` on = `--inspect` debugger attach; `OnlyLoadAppFromAsar`/ASAR-integrity off = plant a modified ASAR in the user-writable install dir
 
 4. **Intercept traffic.** Try in order: system proxy env vars → `--proxy-server=` flag → `NODE_EXTRA_CA_CERTS` (Electron honors it) → `--ignore-certificate-errors` → Frida pinning bypass → patch the ASAR/binary. Log every endpoint; each is a pivot to the web hunt-* set (API tokens in desktop traffic are often a richer, less-hardened API surface than the web portal).
 

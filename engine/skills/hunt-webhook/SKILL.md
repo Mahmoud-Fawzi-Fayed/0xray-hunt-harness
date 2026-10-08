@@ -4,88 +4,105 @@ description: "Hunt webhook & callback-URL vulnerabilities — SSRF via user-cont
 sources: 0xray-authored
 ---
 
-# HUNT-WEBHOOK — Webhook & Callback-URL Abuse
+# HUNT-WEBHOOK — Webhook & callback-URL abuse
 
-Webhooks hand an attacker-influenceable URL to the server and have it make an **authenticated
-outbound request** to that URL — frequently from inside the trust boundary. That is a first-class
-SSRF primitive, bundled with a cluster of auth/idempotency bugs on the inbound receiver side.
+Two different bugs share the word "webhook". Classify first:
 
-## What actually pays (and what does not)
+- **Outbound (you choose their URL).** The server sends an event to a URL you control. Bug classes: SSRF, data leak to an attacker host, allow-list bypass, secret-in-query leakage.
+- **Inbound (they POST to the app).** A provider-style receiver accepts events. Bug classes: missing/forgeable signature, replay, event-type confusion, cross-tenant routing.
 
-- **SSRF to a sensitive internal target** with the **response body** (or an OOB callback carrying
-  internal data) proving the request landed. A webhook that only resolves DNS, or returns a generic
-  error, is *not yet* a finding — apply the OOB-or-it-didn't-happen gate from `hunt-ssrf`.
-- **Signature verification missing or bypassable** AND a forged event drives a **persisted** state
-  change (e.g. a forged `payment.succeeded` marks an order paid).
-- **Replay without idempotency** where re-sending a captured signed event re-applies a state change
-  (double credit, double fulfilment).
-- **Cross-tenant subscription (IDOR)** where you register your URL to receive **another tenant's**
-  events — prove it by capturing a victim tenant's payload.
+A webhook that delivers **your** event to **your** URL is the feature. It becomes a finding only with internal reach, another tenant's data, or a forged/replayed event that changes state.
 
-What does **not** pay: a webhook posting to *your own* configured URL with *your own* data (that is
-the feature); a 200 on a callback with no internal reach or state effect; "I could point it at
-localhost" with no evidence the request was actually made.
+## Decision tree
 
-## Where to look
-- Settings -> Integrations / Developer / Webhooks; `/webhooks`, `/hooks`, `/api/*/webhooks`,
-  `/integrations`, `/callbacks`, `/notifications`, `/subscribe`.
-- Any field named `url`, `callback_url`, `notification_url`, `endpoint`, `target_url`,
-  `webhook_url`, `return_url`.
-- Inbound webhook *receivers* (them -> you): Stripe/GitHub/Shopify-style endpoints that verify
-  `Stripe-Signature`, `X-Hub-Signature-256`, `X-Signature`.
+1. Find every field: `url`, `callback_url`, `notification_url`, `endpoint`, `target_url`, `webhook_url`, `hook_url`, `return_url`, plus Integration / Developer settings and `/webhooks`, `/hooks`, `/integrations`, `/callbacks`, `/subscriptions`.
+2. **Outbound?** Register your OOB host (unique path per sink). Wait for the delivery — many products queue it. Record source IP, User-Agent, redirects followed, and which headers the product lets you set.
+3. If the HTTP callback arrived, try one internal target (metadata or `127.0.0.1` on a known port). Prefer a product "custom headers" feature to send `Metadata-Flavor: Google`, `Metadata: true`, or `X-aws-ec2-metadata-token`.
+4. **Inbound?** Capture one real delivery. Replay it unchanged. Then mutate the body with the signature stripped, blank, and mismatched. Watch **state**, not the HTTP status.
+5. **IDOR?** Point your URL at an event subscription whose id, org, or project belongs to account B. Proof is B's payload at your listener.
 
-## 1) SSRF via the callback URL
-Point the webhook at your OOB listener first to confirm the server fetches it — note the **source IP**,
-the User-Agent, and whether it **follows redirects**. Then pivot inward:
+## 1) Outbound SSRF and leaks
 
-```
-http://169.254.169.254/latest/meta-data/iam/security-credentials/     # AWS IMDSv1
-http://metadata.google.internal/computeMetadata/v1/                   # GCP (needs Metadata-Flavor: Google)
-http://127.0.0.1:<port>/   http://[::1]/   http://localhost/
+Confirm the fetch first (`https://<sink>-<rand>.<oob>/`). DNS-only means the resolver ran; an HTTP hit from their IP means the dispatcher fetched. Then one internal URL, not a port sweep (`hunt-ssrf` bypass table: decimal/octal/IPv6, `@` confusion, DNS rebinding, 30x from an allowlisted host, `http://allowed.attacker.com`).
+
+```text
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/api/token          (IMDSv2 PUT + header; only if the client can set method/headers)
+http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+http://169.254.169.254/metadata/instance?api-version=2021-02-01
+http://127.0.0.1:80/
 ```
 
-Confirm with the response body surfaced in the delivery log, or an OOB hit carrying internal data.
-Bypass allow-lists with the `hunt-ssrf` table: decimal/octal/IPv6 encodings, `@`-confusion,
-DNS rebinding, an open redirect on an allowed host, or `http://allowed.com.attacker.com`.
+Header gate (this is the usual metadata miss): GCP returns 403 without `Metadata-Flavor: Google`; Azure returns 400 without `Metadata: true`; IMDSv2 returns 401 without the token header. Those error bodies **are** proof you reached link-local. Credential theft needs the header. Paths that add it:
 
-## 2) Signature verification (inbound receivers)
-- Strip the signature header entirely — is the event still accepted?
-- Send an empty / garbage signature — accepted?
-- If the signing secret is **publishable or leaked** (JS bundle, APK, docs sample, repo), forge a
-  valid signature.
-- Try algorithm downgrade on the receiver (HMAC-SHA256 -> none / plaintext compare).
+- The webhook form has custom headers → set the one header, resend once.
+- The URL is passed to a raw client → CRLF in the URL (`%0d%0aMetadata-Flavor:%20Google`) if the client does not strip CR/LF. Prove with the metadata body or a Collaborator request that shows the injected header, not with a theory.
+- The dispatcher follows redirects → 302 from your host does **not** add third-party headers. Use CRLF or a custom-header field instead.
 
-Prove impact: a forged inbound event must drive a **persisted** state change, not just a 200.
+Also try non-HTTP schemes once (`file:///etc/passwd`, `gopher://127.0.0.1:6379/`, `dict://127.0.0.1:6379/`) when the value is not forced to `https`. A scheme error that echoes `file` is not a read.
 
-## 3) Replay / idempotency
-Capture one legitimately-signed delivery and re-POST it N times. If the handler has no idempotency
-key / event-id dedup, each replay re-applies the effect. Show the **state after** replay (balance,
-order count, credits) — not just N×200. See `hunt-race-condition` for the single-packet variant.
+**Data leak without SSRF:** the delivery body contains another user's events, or the signing secret is appended to the query string and shows up in your access log. Quote the field. Your own test event is not a leak.
 
-## 4) Cross-tenant subscription (IDOR)
-Subscribe your URL to an event type scoped to another tenant/object id. If you start receiving their
-payloads, that is cross-tenant data exfiltration — prove it with a captured payload belonging to
-victim B. See `hunt-idor`.
+**Allow-list:** validation that fetches you and then follows your 302, or that checks the host string but not the DNS answer (rebinding). One successful internal response or one OOB hit from the internal hop is enough.
 
-## PoC minimums
-| Sub-class | Minimum proof |
+## 2) Inbound signature
+
+Test in this order. Stop at the first one that changes persisted state.
+
+| Test | Passes if |
 |---|---|
-| Webhook SSRF | internal response body, or OOB callback carrying internal data |
-| Signature bypass | forged event accepted **and** state change persisted |
-| Replay | duplicate processing visible in state after N replays |
-| Cross-tenant | another tenant's event payload received at your URL |
+| Header omitted | Event applied (order paid, user created, flag flipped) |
+| Empty / `sha256=` / wrong hex of the right length | Same |
+| Old algorithm still accepted (`X-Hub-Signature` sha1 when sha256 exists, `v0` vs `v1`) | Forged body accepted |
+| Secret is in the JS bundle, docs, mobile app, or a sample repo | You compute the real HMAC and the forged event sticks |
+| Timestamp window (Stripe-style `t=`) | A captured signature still works after the documented tolerance, or `t` is not checked |
+
+Compute HMAC only for a secret you already have. Do not brute-force the signing key.
+
+Provider header names vary (`Stripe-Signature`, `X-Hub-Signature-256`, `X-Shopify-Hmac-Sha256`, `X-Signature`, `svix-signature`). The test is the same: does the handler bind the signature to **this** body and **this** tenant?
+
+**Event-type confusion:** keep a valid signature if you must, but also try an unsigned body that flips `type` (`payment.failed` → `payment.succeeded`, `test` → `live`). Impact is the object that changed, shown by reading it back.
+
+## 3) Replay
+
+Re-POST one captured delivery N times (N≈10, not thousands). If there is no event-id / idempotency dedup, each replay re-applies the effect. Proof is the **after** state: balance, credit count, order status, seat count. N× HTTP 200 with unchanged state is not a bug. See `hunt-race-condition` for the concurrent variant (same event in one packet).
+
+## 4) Cross-tenant subscription
+
+`POST /webhooks` or `PUT /webhooks/{id}` with B's org/project/account id and your URL. Also try `GET /webhooks/{id}` for B's secret or historical deliveries. Proof: one payload that contains B's identifier or data you did not create. Your own subscription echoing your own action is the feature (`hunt-idor`).
+
+## Validation
+
+| Sub-class | Proof | Not proof |
+|---|---|---|
+| SSRF | Internal body (metadata, `localhost` banner) **or** OOB HTTP hit that could only come from an internal hop | Error string that echoes your URL; DNS-only on a public host; "I set the URL to localhost" |
+| Signature bypass | Forged or stripped-signature event **and** a persisted state change you can re-read | HTTP 200 with no object change |
+| Replay | Same event id applied twice; show the counter/balance before and after | Repeated 200s |
+| Cross-tenant | B's event body at your listener, or B's webhook secret via IDOR | A list of your own endpoints |
+| Secret in URL | The secret appears in the request your server received | A secret shown once in the owner's settings UI |
+
+Unique marker per sink (`/<rand>`). Body-diff the business object. Blind deliveries: wait for the queue; do not retract on a 30s poll.
+
+## Chains
+
+- Webhook SSRF → cloud role creds → `cloud-iam-deep` (read-only `sts get-caller-identity` / one scoped read).
+- Forged `payment.succeeded` → order marked paid → `hunt-business-logic`.
+- Replay of a credit/refund → double balance → `hunt-race-condition`.
+- Cross-tenant stream → PII or internal URLs → further IDOR.
+- Custom-header SSRF → IMDSv2/GCP/Azure header requirement bypassed.
+
+## Rails
+
+- In-scope only. One test subscription, one internal URL, one forged event. Do not mass-create hooks or dump another tenant's backlog.
+- No signing-secret brute-force. No traffic flood against the receiver.
+- Draft only — do not submit.
 
 ## Before you report — dedup gate
-
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
 
 ```bash
 python3 engine/dedup.py check --program <program> --class ssrf --url "<endpoint>" --title "<title>"
 ```
 
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
+Use class `idor` or `business-logic` when that is the actual bug. `NOVEL` → `/validate`. `LIKELY_DUP` → stop unless the endpoint, event type, or bypass is a concrete differentiator.
 
-Cross-references: `hunt-ssrf`, `hunt-idor`, `hunt-api-misconfig`, `hunt-race-condition`,
-`security-arsenal`, `triage-validation`.
+Cross-refs: `hunt-ssrf`, `hunt-idor`, `hunt-race-condition`, `hunt-business-logic`, `triage-validation`.

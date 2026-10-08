@@ -108,6 +108,14 @@ on the same endpoint still scores as a dup — that is the point.
 anyway, that's a *new* finding (regression / incomplete fix) — say so in the report and link the
 original.
 
+**If `engine/dedup.py` is unavailable, dedup manually — never skip the gate.** Pull disclosed
+reports (H1 Hacktivity / Bugcrowd crowdstream / program changelog via WebFetch) + your own prior
+reports, then compare the candidate on three axes: (1) vuln class, (2) normalised endpoint/param
+(strip volatile ids/UUIDs), (3) impact. A match on all three = treat as `LIKELY_DUP`; a clear
+difference on any one (different param, different impact, or a bypass of a deployed fix) = proceed
+and document the differentiator. Record the manual verdict in your hunt notes exactly as you would
+the tool's.
+
 ---
 
 ## 4. Automatic integration points

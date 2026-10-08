@@ -229,6 +229,27 @@ trufflehog docker --image ORG/IMAGE:latest --only-verified
 
 ---
 
+## Also on the same pipeline
+
+**TeamCity (CVE-2024-27198 / CVE-2024-27199), versions before 2023.11.4.** Read-only check — a random path plus the `jsp` matrix parameter reaches an authenticated REST route. Patched servers return 403.
+
+```bash
+curl -sk "https://$TARGET/justcheck?jsp=/app/rest/server;.jsp"
+# 200 + server XML = auth bypass. Stop.
+# CVE-2024-27199 sibling: GET /res/../admin/diagnostic.jsp — info leak, read once.
+```
+
+Do not `POST` a new admin user or token unless the program allows a write. If it does: one user, prove one authenticated read, stop. Do not upload a plugin.
+
+**GitHub Actions, beyond `pull_request_target` title injection** (Phase 2 still applies):
+
+- `issue_comment`, `issues`, `workflow_dispatch`, and `workflow_run` bodies are attacker-controlled when those events fire from users who can open issues or run a dispatch. Same rule: `${{ github.event.* }}` inside `run:` is shell; the `env:` then `"$VAR"` form is not.
+- `toJSON(github)` inside `run:` expands the whole event payload into the script.
+- **Cache poisoning:** a fork `pull_request` job writes `actions/cache` under a key a privileged workflow (`pull_request_target`, default-branch `push`) restores. Proof is your marker file printed by the privileged job or an OOB hit from that job — not a reverse shell. One cache entry.
+- **OIDC `sub`:** a trust policy that allows `repo:ORG/REPO:pull_request` (or `repo:ORG/*`) lets a fork workflow assume the role. Proof is `aws sts get-caller-identity` from a workflow you control, in scope. Do not change cloud state.
+
+**GitLab:** `CI_JOB_TOKEN` that can read another in-scope project (token scope not limited) is IDOR of build secrets. Show one foreign variable or artifact. A registration token is a finding only if you register one ephemeral runner and it receives a real job (Phase 4).
+
 ## Chain Table
 
 | CI/CD finding | Chain to | Impact |
