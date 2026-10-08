@@ -123,6 +123,10 @@ class Orchestrator:
         os.makedirs(drafts_dir, exist_ok=True)
         os.makedirs(held_dir, exist_ok=True)
         import disposition as DP
+        # draft / publish / EMAIL each finding ONCE. A confirmed finding persists across rounds, so without a
+        # dedup here the same bug is re-drafted, re-published and re-emailed every round (the duplicate loop).
+        drafted_keys = {tuple(k) for k in (self.eng.eng.state.get("drafted_keys") or [])}
+        links = dict(self.eng.eng.state.get("draft_links") or {})
         drafted, held, policy = [], [], []
         for i, f in enumerate(confirmed, 1):
             name = f"{i:02d}-{(f.get('vuln_class') or 'finding')}.md"
@@ -146,10 +150,20 @@ class Orchestrator:
                        f"held: {v.get('score')}", base=self.base)
             else:
                 open(os.path.join(drafts_dir, name), "w").write(md)
-                link = self._publish(f, v, md, i)          # public HTML page (finding.redtracefai.com)
-                drafted.append({"finding": f, "dedup": v, "file": os.path.join(drafts_dir, name), "link": link})
-                E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "reported",
-                       v.get("verdict", ""), base=self.base)
+                key = (f.get("url", ""), f.get("vuln_class", ""))
+                is_new = key not in drafted_keys
+                link = self._publish(f, v, md, i) if is_new else links.get("|".join(key))   # publish ONCE
+                if link:
+                    links["|".join(key)] = link
+                drafted.append({"finding": f, "dedup": v, "file": os.path.join(drafts_dir, name),
+                                "link": link, "new": is_new})
+                if is_new:                                 # first time only -> count as reported + allow one email
+                    drafted_keys.add(key)
+                    E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "reported",
+                           v.get("verdict", ""), base=self.base)
+        self.eng.eng.state["drafted_keys"] = [list(k) for k in drafted_keys]
+        self.eng.eng.state["draft_links"] = links
+        self.eng.eng.save()
         self._policy = policy
         self._write_index(drafted)
         self._approval(drafted, held, policy)
@@ -329,8 +343,9 @@ class Orchestrator:
         phases = ["recon", "rank", "map"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
         self.eng.run(phases)
         drafted, held = self.draft_gate()
-        if drafted:
-            self._email_drafts(drafted)
+        new_drafts = [d for d in drafted if d.get("new")]
+        if new_drafts:
+            self._email_drafts(new_drafts)             # email each finding ONCE — only drafts NEW this round
         elif not self.eng.eng.state.get("confirmed"):
             self.eng.eng.log("orchestrator: no confirmed finding THIS pass — NOT a conclusion. "
                              "Rotate classes / re-recon for new surface (redteam-mindset: DO NOT STOP).")
