@@ -487,6 +487,13 @@ class Engine:
                 todo.append(it)
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
         for it, f in self._run_parallel(self._hunt_agent, todo):
+            if f and f.get("error") == "timeout":
+                # MODEL-FAILOVER: a timeout (often an overloaded box or a stuck model) usually clears on a
+                # DIFFERENT model with a tighter budget — try ONCE more now before deferring to next round.
+                alt = self._alt_model(f.get("model"))
+                self.eng.log(f"hunt: timeout on {it.get('vuln_class')}@{it['url']} (model {f.get('model')}) "
+                             f"— failover to {alt} (tighter budget)")
+                f = self._hunt_agent(it, model=alt, timeout=max(180, self.timeout // 2))
             if f and f.get("error"):
                 # a transient agent error (parse/rate-limit/timeout) must NOT permanently mark the
                 # endpoint tested — leave it so the next round retries it (with a fresh pool model).
@@ -544,7 +551,16 @@ class Engine:
             f"`python3 {e}/apkmap.py extract --apk <file>` -> hosts + endpoints + secrets.\n"
             "- All account/login/SMS actions pass engine/guardrails.py (scope + per-program cap) and are audited.\n")
 
-    def _hunt_agent(self, it):
+    @staticmethod
+    def _alt_model(current):
+        """A pool model different from `current` — for timeout failover (a stuck model/endpoint often
+        clears on another model)."""
+        import random
+        pool = [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+        alts = [m for m in pool if m and m != current] or pool
+        return random.choice(alts) if alts else None
+
+    def _hunt_agent(self, it, model=None, timeout=None):
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
         cls = (it.get("vuln_class") or "").lower()
@@ -559,15 +575,18 @@ class Engine:
                 ids = _AN.identities(self.scope.name, self.base)
                 if "A" in ids and "B" in ids:
                     d = _AZ.diff_one("GET", it["url"], None, self.scope.name)
-                    if d.get("bola_suspect"):
+                    # direct diff catches an already-id-bearing url; else the ID-ORACLE harvests A's object
+                    # ids from this (list/self) endpoint and tries to read A's objects AS B.
+                    s = d if d.get("bola_suspect") else (_AZ.id_oracle(it["url"], self.scope.name) or [None])[0]
+                    if s and s.get("bola_suspect"):
                         return {"vulnerable": True, "severity": "high", "vuln_class": "idor",
-                                "evidence": (f"Cross-account read (authz.diff): identity B requested A's object "
-                                             f"{it['url']} and received HTTP {d['B_status']} with {d['similarity']:.0%}-"
-                                             f"identical id-bearing content (A={d['A_status']}/{d['A_len']}B, "
-                                             f"B={d['B_status']}/{d['B_len']}B) — object-level authorization missing."),
-                                "request": f"GET {it['url']}  — as A vs as B (two-account diff)",
+                                "evidence": (f"Cross-account read (authz 2-account): identity B requested A's object "
+                                             f"{s['url']} and received HTTP {s['B_status']} with {s['similarity']:.0%}-"
+                                             f"identical id-bearing content (A={s['A_status']}/{s['A_len']}B, "
+                                             f"B={s['B_status']}/{s['B_len']}B) — object-level authorization missing."),
+                                "request": f"GET {s['url']}  — as A vs as B (two-account diff)",
                                 "attacker_holds": "own_session", "id_source": "in_scope_oracle",
-                                "_model": "authz-diff", "_skills": ["hunt-idor"]}
+                                "_model": "authz-idor", "_skills": ["hunt-idor"]}
             except Exception:  # noqa: BLE001
                 pass
         import skill_map as SM
@@ -627,7 +646,8 @@ class Engine:
                 task += tl
         except Exception:  # noqa: BLE001
             pass
-        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # pooled sessions per target
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns,
+                        timeout=timeout or self.timeout, model=model)   # model/timeout override => failover path
         self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} model={r.get('model', '?')} "
                      f"skills=[{','.join(names)}]" + (f" ERR={r['error']}" if r.get("error") else ""))
         if r.get("error"):

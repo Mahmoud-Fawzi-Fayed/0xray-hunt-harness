@@ -54,6 +54,78 @@ def diff(reqs, slug, _get=None):
     return out
 
 
+_ID_KEY = re.compile(r"(?:^|_)(id|uuid|guid|key|ref|slug|number|no)$", re.I)
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def _extract_ids(text, limit=12):
+    """Harvest plausible object identifiers from a body A can read: values of id-ish JSON keys, bare
+    UUIDs, and long numeric ids. These become the <id> we then try to read AS B (the IDOR test)."""
+    ids = []
+    try:
+        def walk(o):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    if isinstance(v, (str, int)) and _ID_KEY.search(str(k)) and 2 <= len(str(v)) <= 64:
+                        ids.append(str(v))
+                    else:
+                        walk(v)
+            elif isinstance(o, list):
+                for x in o[:25]:
+                    walk(x)
+        walk(json.loads(text))
+    except Exception:  # noqa: BLE001
+        pass
+    ids += _UUID.findall(text or "")
+    seen, out = set(), []
+    for i in ids:
+        if i not in seen and 2 <= len(i) <= 64 and not i.lower() in ("true", "false", "null"):
+            seen.add(i)
+            out.append(i)
+    return out[:limit]
+
+
+def _object_urls(base_url, ids):
+    """From a list/collection url + A's object ids, build object-by-id URLs to probe as B: both
+    `<url>/<id>` (collection -> object) and `<parent>/<id>` (a list endpoint -> its sibling object,
+    e.g. /folders/selector-list + id -> /folders/<id>). Bounded; wrong guesses just 404 (no false +)."""
+    u = base_url.split("?", 1)[0].rstrip("/")
+    parent = u.rsplit("/", 1)[0] if u.count("/") > 2 else u
+    out = []
+    for i in ids:
+        out.append(f"{u}/{i}")
+        if parent and parent != u:
+            out.append(f"{parent}/{i}")
+    seen, res = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            res.append(x)
+    return res[:20]
+
+
+def id_oracle(base_url, slug, _get=None):
+    """IDOR ID-ORACLE — the primitive a plain A-vs-B diff misses on list/self endpoints. As A, read
+    base_url, harvest A's object ids, then try to read A's objects AS B. A bola_suspect means B read
+    A-owned data => IDOR/BOLA candidate. Read-only, bounded. Returns suspect diffs (may be empty)."""
+    g = _get or netget.get
+    try:
+        sa, ta, _ = g(base_url, method="GET", ident="A", slug=slug)
+    except Exception:  # noqa: BLE001
+        return []
+    if not (200 <= (sa or 0) < 300) or not ta:
+        return []
+    suspects = []
+    for ou in _object_urls(base_url, _extract_ids(ta)):
+        try:
+            d = diff_one("GET", ou, None, slug, _get=g)
+        except Exception:  # noqa: BLE001
+            continue
+        if d.get("bola_suspect"):
+            suspects.append(d)
+    return suspects
+
+
 def _main(argv=None):
     ap = argparse.ArgumentParser(description="cross-account IDOR/BOLA diff")
     ap.add_argument("--base", default=os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements"))

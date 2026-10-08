@@ -24,6 +24,11 @@ import time
 
 ENGINE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engine")
 sys.path.insert(0, ENGINE)
+try:                                   # pull WATCHDOG_*/HUNT_* from the harness .env so config actually
+    import notify as _notify           # applies to this pm2-cron process (which doesn't inherit the shell env)
+    _notify._load_env_file()
+except Exception:  # noqa: BLE001
+    pass
 
 BASE = os.path.expanduser(os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements"))
 STATE = os.path.join(BASE, "_watchdog.json")
