@@ -340,9 +340,12 @@ def autofix(base, rev):
     out = []
     if os.environ.get("REVIEW_AUTOFIX", "1") != "1":
         return out
+    # SAFE scope only: skill (markdown). Engine/config auto-edits over-reach (an agent will rewrite 6 files
+    # for "one rec") and can slip triager-grade violations past a structural selfcheck — those stay surfaced
+    # for supervised/in-session application. recon/auth are already handled deterministically in apply_fixes.
     recs = [r for r in (rev.get("recommendations") or [])
             if (r.get("effort") or "").upper() in ("S", "M")
-            and (r.get("where") or "").lower() in ("skill", "config", "recon", "auth", "engine")]
+            and (r.get("where") or "").lower() == "skill"]
     donep = os.path.join(_review_dir(base), "autofix_done.json")
     try:
         done = set(json.load(open(donep)))
@@ -377,7 +380,21 @@ def autofix(base, rev):
         A.run_agent(task, context=None, timeout=int(os.environ.get("REVIEW_AUTOFIX_TIMEOUT", "900")))
     except Exception:  # noqa: BLE001
         pass
-    if _selfcheck_ok():
+    # over-reach guard: a minimal skill fix must touch very few files; many changed => revert even if selfcheck
+    # passes (agents will quietly rewrite half the tree for "one rec").
+    import subprocess as _sp
+    nchanged = 0
+    for s in _AUTOFIX_DIRS:
+        b = os.path.join(snap, os.path.basename(s))
+        if os.path.isdir(b):
+            try:
+                rr = _sp.run(["diff", "-rq", b, s], capture_output=True, text=True, timeout=60)
+                nchanged += len([ln for ln in rr.stdout.splitlines() if ln.strip()])
+            except Exception:  # noqa: BLE001
+                nchanged += 99
+    maxf = int(os.environ.get("REVIEW_AUTOFIX_MAXFILES", "3"))
+    sc_ok = _selfcheck_ok()
+    if sc_ok and nchanged <= maxf:
         done.add(_rec_sig(rec))
         try:
             json.dump(list(done), open(donep, "w"))
@@ -394,8 +411,9 @@ def autofix(base, rev):
                     _sh.copytree(b, s)
                 except Exception:  # noqa: BLE001
                     pass
+        reason = "selfcheck failed" if not sc_ok else f"over-reach ({nchanged} files > {maxf})"
         out.append({"rec": rec.get("action"), "where": rec.get("where"),
-                    "result": "REVERTED (selfcheck failed — change discarded, harness untouched)"})
+                    "result": f"REVERTED ({reason} — change discarded, harness untouched)"})
     _sh.rmtree(snap, ignore_errors=True)
     return out
 
