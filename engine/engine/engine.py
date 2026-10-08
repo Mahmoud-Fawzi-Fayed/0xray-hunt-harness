@@ -535,6 +535,29 @@ class Engine:
     def _hunt_agent(self, it):
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
+        cls = (it.get("vuln_class") or "").lower()
+        # DETERMINISTIC 2-account IDOR/BOLA — the #1 missing paying class. 2025 IDOR attempts produced 0
+        # candidates because the LLM alone rarely runs the cross-account diff. When TWO identities exist and
+        # the URL bears an object id, run authz.diff ourselves: if B reaches A's id-bearing object (2xx,
+        # >=90% identical), that's a real BOLA/IDOR candidate the validate phase then confirms.
+        if cls in ("idor", "bola") and str(it.get("url", "")).startswith("http"):
+            try:
+                import authn as _AN
+                import authz as _AZ
+                ids = _AN.identities(self.scope.name, self.base)
+                if "A" in ids and "B" in ids:
+                    d = _AZ.diff_one("GET", it["url"], None, self.scope.name)
+                    if d.get("bola_suspect"):
+                        return {"vulnerable": True, "severity": "high", "vuln_class": "idor",
+                                "evidence": (f"Cross-account read (authz.diff): identity B requested A's object "
+                                             f"{it['url']} and received HTTP {d['B_status']} with {d['similarity']:.0%}-"
+                                             f"identical id-bearing content (A={d['A_status']}/{d['A_len']}B, "
+                                             f"B={d['B_status']}/{d['B_len']}B) — object-level authorization missing."),
+                                "request": f"GET {it['url']}  — as A vs as B (two-account diff)",
+                                "attacker_holds": "own_session", "id_source": "in_scope_oracle",
+                                "_model": "authz-diff", "_skills": ["hunt-idor"]}
+            except Exception:  # noqa: BLE001
+                pass
         import skill_map as SM
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
         paths = SM.skill_paths(it.get("vuln_class", ""), tech)
@@ -563,6 +586,20 @@ class Engine:
             _AS = _authmod()
             if _AS:
                 task += _AS.auth_block(sess, it["url"])
+        if cls in ("idor", "bola"):                             # two accounts present -> demand the cross-account proof
+            try:
+                import authn as _AN2
+                if "B" in _AN2.identities(self.scope.name, self.base):
+                    e, sl = ENGINE_DIR, _AN2._slug(self.scope.name)
+                    task += (f"\nTWO ACCOUNTS AVAILABLE (A and B) — do NOT conclude from one session. Prove cross-account "
+                             f"access:\n  1) As A, GET the endpoint and note an object id it returns: "
+                             f"`python3 {e}/netget.py GET \"{it['url']}\" --as A`.\n"
+                             f"  2) As B, request A's object id: `python3 {e}/netget.py GET \"<A-object-url>\" --as B`. "
+                             "If B receives A's data, that is IDOR/BOLA.\n"
+                             f"  3) Confirm deterministically: `python3 {e}/authz.py diff --slug {sl} "
+                             "--url \"<A-object-url>\"` (bola_suspect=true -> report). vulnerable:true ONLY if B read A's data.\n")
+            except Exception:  # noqa: BLE001
+                pass
         r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # pooled sessions per target
         self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} model={r.get('model', '?')} "
                      f"skills=[{','.join(names)}]" + (f" ERR={r['error']}" if r.get("error") else ""))

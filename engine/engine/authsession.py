@@ -93,9 +93,17 @@ def _vault(program, base):
 
 def load(program, base=DEFAULT_BASE):
     try:
-        return json.load(open(_vault(program, base)))
+        s = json.load(open(_vault(program, base)))
     except (OSError, json.JSONDecodeError):
         return None
+    if valid(s):                                    # back-fill the authn A/B store for sessions saved BEFORE the
+        try:                                        # mirror existed, so authz.py / netget --as A can use them
+            import authn as _an
+            if not _an.configured(program, base):
+                _mirror_to_authn(program, s, base)
+        except Exception:  # noqa: BLE001
+            pass
+    return s
 
 
 def save(program, session, base=DEFAULT_BASE):
