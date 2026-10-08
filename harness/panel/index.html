@@ -355,8 +355,9 @@
 
     <!-- FINDINGS -->
     <section class="page" id="p-findings">
-      <div class="cols">
-        <div class="box"><div class="h"><span class="t">Findings</span><span class="dim" style="font-size:11px">published to finding.redtracefai.com</span></div><div class="b" id="find"><div class="empty">—</div></div></div>
+      <div class="box"><div class="h"><span class="t">Confirmed findings — mark &amp; learn</span><span id="find-summary" class="dim" style="font-size:11px;margin-left:8px"></span><button class="ghost" onclick="loadMarks()" style="margin-left:auto">Refresh</button></div><div class="b" style="padding:0" id="findlist"><div class="empty" style="padding:14px">—</div></div></div>
+      <div class="cols" style="margin-top:14px">
+        <div class="box"><div class="h"><span class="t">Published pages</span><span class="dim" style="font-size:11px">finding.redtracefai.com</span></div><div class="b" id="find"><div class="empty">—</div></div></div>
         <div class="box"><div class="h"><span class="t">New-surface alerts</span></div><div class="b" id="alerts"><div class="empty">—</div></div></div>
       </div>
     </section>
@@ -582,6 +583,22 @@ async function loadReview(){try{const j=await api("/review/latest");const el=doc
     (recs?`<div class="dim" style="margin:6px 0 2px">Recommendations</div>${recs}`:"");
 }catch(e){}}
 async function runReview(){try{toast("Running a workflow review… (~1–2 min)","info");await api("/review/run","POST",{});setTimeout(loadReview,90000);}catch(e){toast(e.message,"err");}}
+async function loadMarks(){try{const j=await api("/findings/list");const s=j.summary||{};const el=document.getElementById("findlist");if(!el)return;
+  const sm=document.getElementById("find-summary");if(sm)sm.textContent=`${s.total||0} findings · ${s.valid||0} valid · ${s.bad||0} invalid/NA · ${s.duplicate||0} dup · ${s.pending||0} unmarked`;
+  const sevcol=(v)=>(v==="critical"||v==="high")?"#ff6b6b":(v==="medium"?"var(--amb)":"#8a93a5");
+  const opts=(st)=>(j.statuses||[]).map(o=>`<option value="${o}"${o===st?" selected":""}>${o}</option>`).join("");
+  const rows=(j.findings||[]).map((x,i)=>`<tr>`+
+    `<td><b>${esc(x.program)}</b></td><td>${esc(x.vuln_class)}</td>`+
+    `<td><span class="tag" style="color:${sevcol(x.severity)}">${esc(x.severity||"?")}</span></td>`+
+    `<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.title||x.url)}">${esc((x.title||x.url||"").slice(0,90))}</td>`+
+    `<td>${x.page?`<a href="${esc(x.page)}" target="_blank">page</a>`:'<span class="dim">—</span>'}</td>`+
+    `<td><select id="ms-${i}">${opts(x.status)}</select></td>`+
+    `<td><input id="mn-${i}" value="${esc(x.note||"")}" placeholder="reason / note" style="width:150px"></td>`+
+    `<td><button class="ghost" onclick="markFinding('${encodeURIComponent(x.key)}',${i})">Save</button></td></tr>`).join("");
+  el.innerHTML=rows?`<table><thead><tr><th>Program</th><th>Class</th><th>Sev</th><th>Finding</th><th>Page</th><th>Disposition</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty" style="padding:14px">No confirmed findings yet.</div>`;
+}catch(e){}}
+async function markFinding(keyEnc,i){try{const key=decodeURIComponent(keyEnc);const status=document.getElementById("ms-"+i).value;const note=(document.getElementById("mn-"+i)||{}).value||"";
+  await api("/findings/mark","POST",{key,status,note});toast("Marked "+status+" — the hunt will learn from it","ok");loadMarks();}catch(e){toast(e.message,"err");}}
 async function sessClear(confirm){try{
   if(confirm && !(await confirmModal("Permanently clear the ORPHANED Cursor sessions (dead hunt transcripts + empty chat husks)? Pooled and running hunts' sessions are protected and kept.","Clear sessions"))){return;}
   const j=await api("/sessions/clear","POST",{confirm});
@@ -768,8 +785,8 @@ async function fcClose(){                            // works ALWAYS — even wh
   }catch(e){msg("vf-msg",e.message,false);}}
 async function startHunt(p){try{await api("/hunt","POST",{program:p});CURLOG=p;toast("Started hunt: "+p,"ok");setTimeout(refresh,1500);}catch(e){toast(e.message,"warn");loadNotifs();}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});toast("Stopped hunt: "+p,"ok");setTimeout(refresh,1000);}catch(e){toast(e.message,"err");}}
-function refresh(){loadCore();loadActivity();loadFindings();loadAlerts();loadNotifs();loadReview();if(CURLOG&&TAIL)loadLog();}
-function tick(){loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="overview")loadReview();if(VIEW==="findings")loadFindings();if(VIEW==="findings")loadAlerts();if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
+function refresh(){loadCore();loadActivity();loadFindings();loadMarks();loadAlerts();loadNotifs();loadReview();if(CURLOG&&TAIL)loadLog();}
+function tick(){loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="overview")loadReview();if(VIEW==="findings"){loadFindings();loadMarks();loadAlerts();}if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
 try{if(localStorage.getItem("fc-side")==="0")fcSide(false);}catch(e){}

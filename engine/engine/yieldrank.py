@@ -63,7 +63,7 @@ def _learn(base):
         c = (c or "").strip().lower()
         if not c:
             return
-        stats.setdefault(c, {"confirmed": 0, "dup": 0, "reported": 0})[key] += n
+        stats.setdefault(c, {"confirmed": 0, "dup": 0, "reported": 0, "bad": 0})[key] += n
 
     jp = _find_journal(base)
     if jp:
@@ -81,6 +81,8 @@ def _learn(base):
                 bump(c, "confirmed")
             elif res.startswith("dup"):
                 bump(c, "dup")
+            elif res.startswith("invalid") or res.startswith("false") or res in ("na", "informative"):
+                bump(c, "bad")                          # operator marked it invalid/NA -> learn to deprioritize
 
     cdir = os.path.join(os.path.expanduser(base), "_dedup", "corpus")
     if os.path.isdir(cdir):
@@ -113,9 +115,10 @@ class Model:
         s = self.learned.get(c)
         if not s:
             return 0.0
-        denom = max(s["reported"] + s["confirmed"] + s["dup"], 1)
+        denom = max(s["reported"] + s["confirmed"] + s["dup"] + s.get("bad", 0), 1)
         dup_rate = s["dup"] / denom
-        return min(s["confirmed"], 6) * 2.0 - dup_rate * 30.0
+        bad_rate = s.get("bad", 0) / denom                # operator-marked invalid/NA/informative
+        return min(s["confirmed"], 6) * 2.0 - dup_rate * 30.0 - bad_rate * 20.0
 
     def bonus(self, c):
         """Small ADDITIVE bump for engine.rank() (keeps impact baseline, nudges by yield). ~ -20..+52."""

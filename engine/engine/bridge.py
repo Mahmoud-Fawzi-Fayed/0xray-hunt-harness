@@ -318,6 +318,10 @@ class Handler(BaseHTTPRequestHandler):
                         lines = open(path, encoding="utf-8", errors="ignore").read().splitlines()
                         break
                 return self._send(200, {"program": slug, "lines": lines[-n:]})
+            if p.path == "/findings/list":
+                import findings as FD
+                return self._send(200, {"findings": FD.list_findings(self.base),
+                                        "summary": FD.summary(self.base), "statuses": FD.STATUSES})
             if p.path == "/findings":
                 wd = os.environ.get("HUNT_WEB_DIR")
                 base_url = (os.environ.get("HUNT_PUBLIC_URL") or "").rstrip("/")
@@ -493,6 +497,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, {"error": f"body too large (> {cap} bytes)"})
         b = self._body(cap)
         try:
+            if p.path == "/findings/mark":              # operator disposition -> stored + feeds the learning loop
+                import findings as FD
+                key = (b.get("key") or "").strip()
+                status = (b.get("status") or "").strip().lower()
+                if not key or not status:
+                    return self._send(400, {"error": "key and status required"})
+                try:
+                    rec = FD.set_mark(self.base, key, status, b.get("note", ""))
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, {"ok": True, "mark": rec})
             if p.path == "/review/run":                 # trigger a workflow review on demand (panel button)
                 log = os.path.join(os.path.expanduser(self.base), "_review", "run.log")
                 os.makedirs(os.path.dirname(log), exist_ok=True)

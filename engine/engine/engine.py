@@ -600,6 +600,21 @@ class Engine:
                              "--url \"<A-object-url>\"` (bola_suspect=true -> report). vulnerable:true ONLY if B read A's data.\n")
             except Exception:  # noqa: BLE001
                 pass
+        try:                                                    # LEARN from the operator's past dispositions
+            import findings as _FS
+            les = _FS.lessons_for(self.base, self.scope.name, it.get("vuln_class"))
+            if les["invalid"] or les["valid"]:
+                tl = "\nOPERATOR DISPOSITION LESSONS — learn from how past findings here were judged:\n"
+                for l in les["invalid"][:4]:
+                    tl += (f"  - AVOID: a '{l['vuln_class']}' finding was marked {l['status']} — "
+                           f"{l['reason'] or 'not a valid/impactful bug'}. Do NOT submit this again unless you "
+                           "now have the exact missing proof/impact.\n")
+                for l in les["valid"][:3]:
+                    tl += (f"  - WORKS: a '{l['vuln_class']}' finding was {l['status']} — "
+                           f"{l['reason'] or 'accepted as a real bug'}. Prioritise this kind of proven impact.\n")
+                task += tl
+        except Exception:  # noqa: BLE001
+            pass
         r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # pooled sessions per target
         self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} model={r.get('model', '?')} "
                      f"skills=[{','.join(names)}]" + (f" ERR={r['error']}" if r.get("error") else ""))
