@@ -521,7 +521,7 @@ async function loadCore(){try{
   // targets table
   const sel=document.getElementById("logSel");
   sel.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");
-  const au=document.getElementById("auProg");if(au){const cur=au.value;au.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");if(cur)au.value=cur;}
+  const au=document.getElementById("auProg");if(au&&au!==document.activeElement){const cur=au.value;au.innerHTML=(t.targets||[]).map(x=>`<option>${esc(x.name)}</option>`).join("");if(cur)au.value=cur;}
   const runh=(st.hunts||[]).find(h=>h.running);
   if(!LOGPICKED){CURLOG=runh?runh.program:((t.targets||[])[0]||{}).name||"";}
   if(CURLOG)sel.value=CURLOG;
@@ -587,7 +587,7 @@ async function loadReview(){try{const j=await api("/review/latest");const el=doc
     (recs?`<div class="dim" style="margin:6px 0 2px">Recommendations</div>${recs}`:"");
 }catch(e){}}
 async function runReview(){try{toast("Running a workflow review… (~1–2 min)","info");await api("/review/run","POST",{});setTimeout(loadReview,90000);}catch(e){toast(e.message,"err");}}
-async function loadMarks(){try{const j=await api("/findings/list");const s=j.summary||{};const el=document.getElementById("findlist");if(!el)return;
+async function loadMarks(force){try{const el=document.getElementById("findlist");if(!el||(!force&&el.contains(document.activeElement)))return;const j=await api("/findings/list");const s=j.summary||{};
   const sm=document.getElementById("find-summary");if(sm)sm.textContent=`${s.total||0} findings · ${s.valid||0} valid · ${s.bad||0} invalid/NA · ${s.duplicate||0} dup · ${s.pending||0} unmarked`;
   const sevcol=(v)=>(v==="critical"||v==="high")?"#ff6b6b":(v==="medium"?"var(--amb)":"#8a93a5");
   const opts=(st)=>(j.statuses||[]).map(o=>`<option value="${o}"${o===st?" selected":""}>${o}</option>`).join("");
@@ -602,7 +602,7 @@ async function loadMarks(){try{const j=await api("/findings/list");const s=j.sum
   el.innerHTML=rows?`<table><thead><tr><th>Program</th><th>Class</th><th>Sev</th><th>Finding</th><th>Page</th><th>Disposition</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty" style="padding:14px">No confirmed findings yet.</div>`;
 }catch(e){}}
 async function markFinding(keyEnc,i){try{const key=decodeURIComponent(keyEnc);const status=document.getElementById("ms-"+i).value;const note=(document.getElementById("mn-"+i)||{}).value||"";
-  await api("/findings/mark","POST",{key,status,note});toast("Marked "+status+" — the hunt will learn from it","ok");loadMarks();}catch(e){toast(e.message,"err");}}
+  await api("/findings/mark","POST",{key,status,note});toast("Marked "+status+" — the hunt will learn from it","ok");loadMarks(true);}catch(e){toast(e.message,"err");}}
 async function sessClear(confirm){try{
   if(confirm && !(await confirmModal("Permanently clear the ORPHANED Cursor sessions (dead hunt transcripts + empty chat husks)? Pooled and running hunts' sessions are protected and kept.","Clear sessions"))){return;}
   const j=await api("/sessions/clear","POST",{confirm});
