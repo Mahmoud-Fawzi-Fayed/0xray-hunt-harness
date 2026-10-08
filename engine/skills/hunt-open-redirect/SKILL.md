@@ -25,7 +25,7 @@ Standalone open redirect is **Low** on most programs. It **pays** when a trusted
 ```
 redirect next url return returnTo continue dest destination go forward
 location target redir redirect_uri callback checkout_url success_url cancel_url
-RelayState loginHint returnUrl r u to jump out link
+RelayState loginHint returnUrl r u to jump out link post_logout_redirect_uri
 /logout?returnTo=  /login?next=  /sso?callback=
 ```
 
@@ -35,6 +35,9 @@ RelayState loginHint returnUrl r u to jump out link
 |---|---|---|
 | Basic | `https://UNIQUE.oastify.com` | Always first |
 | Protocol-relative | `//UNIQUE.oastify.com` | Common allowlist miss |
+| Triple slash | `///UNIQUE.oastify.com` `////UNIQUE.oastify.com` | Browsers collapse this to protocol-relative. Confirm in a browser |
+| Param pollution | `next=https://target.example/cb&next=https://UNIQUE.oastify.com` and the reverse | First value wins vs last value wins |
+| Encoded userinfo | `https://target.example%40UNIQUE.oastify.com` | `%40` decoded before or after the allowlist check |
 | Backslash | `/\UNIQUE.oastify.com` `\/\/UNIQUE.oastify.com` `/\\UNIQUE.oastify.com` | IIS/Tomcat/`\`→`/` |
 | Userinfo | `https://target.com@UNIQUE.oastify.com` | Works **only** if `@` is still in authority (before first `/`) |
 | Suffix host | `https://target.com.UNIQUE.oastify.com` | `startsWith` / unescaped `.` |

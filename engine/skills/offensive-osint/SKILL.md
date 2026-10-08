@@ -52,10 +52,12 @@ URL + UTC timestamp + SHA-256 + tool version + run_id, every artifact. PNG scree
 ## 5. Do NOT
 
 - Don't paste creds/PII/session tokens into cloud LLMs.
-- Don't run destructive probes outside DEEP/`--aggressive`.
-- Don't use validated credentials for anything except read-only liveness check.
+- Don't run destructive or availability probes in any mode, including DEEP / `--aggressive`. No DoS, no mass writes, no Redis `CONFIG SET` / `BGSAVE` into `authorized_keys`, no kubelet `POST /run`. Read-only proof first. One canary write only when the engagement allows it, then revert.
+- Don't crack secrets. No `hashcat`, `john`, wordlists, or HMAC/JWT keyspace guesses — even if a reference file shows those commands. `alg=none`, algorithm confusion, and a secret already present in the target repo are logic tests. Brute force is not.
+- Don't use validated credentials for anything except a read-only liveness check.
 - Don't single-source attribute.
 - Don't assume vendor labels are ground truth.
+- Don't file a rubric score or a DMARC `p=none` record as a proven finding. The score orders the queue. Email spoofing is proven only by a message delivered to an Inbox (`hunt-tls-network`). When a reference file disagrees with this section, this section wins.
 
 ---
 
@@ -139,7 +141,9 @@ For every classified endpoint (§22 in methodology skill), apply this rubric:
 | 25–49 | LOW |
 | < 25 | INFO |
 
-For score ≥ 70, attach an `attack_path_hint` in evidence (see §29).
+This score orders what to test next. It is not the severity you file. A report still needs the proof gate of the matching hunt skill (a real object read, a unique marker, or a body diff). Missing rate-limit headers alone stay Info.
+
+For score ≥ 70, attach an `attack_path_hint` in evidence (see §39 in this file).
 
 ---
 
@@ -176,17 +180,17 @@ When emitting a HIGH/CRITICAL API endpoint finding (score ≥ 70), include a one
 | API key in URL | *"API key in URL: `?{param}=...` — token leaks to access logs, browser history, Referer headers, third-party CDNs. Check Wayback / Google for cached copies."* |
 | Schema leak in error | *"Schema leak in error response — framework signature `{framework}` exposed; map to known {framework} vulns and craft targeted payloads."* |
 | Sensitive keyword | *"Path contains '{keyword}' — review for direct object reference, mass-assignment, or hidden admin functionality."* |
-| Open RTDB Firebase | *"Open Firebase RTDB at https://{project}.firebaseio.com/.json — read everything, then test write at `/<random-key>.json` with PUT to gauge ACL scope."* |
+| Open RTDB Firebase | *"Open Firebase RTDB at https://{project}.firebaseio.com/.json — the unauthenticated read is the finding. One PUT of a random canary key only if writes are in scope; delete it after."* |
 | Listable cloud bucket | *"Listable {provider} bucket `{bucket}` — recursive object listing + content-type analysis; look for backups, logs, customer data, AWS keys in JSON configs."* |
 | .git exposed | *"Exposed .git/config on {host} — reconstruct repository with git-dumper or githacker; full source history."* |
 | .env exposed | *"Exposed .env on {host} — grep for `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`; validate all credentials read-only via §23 validators."* |
 | /actuator/env | *"Spring Boot /actuator/env exposed — dump environment variables; look for `spring.datasource.password`, JWT secrets, cloud creds."* |
 | /actuator/heapdump | *"Spring Boot /actuator/heapdump exposed — download HPROF, run `jhat` or VisualVM, search for cleartext secrets in heap strings."* |
-| Open Elasticsearch | *"Open Elasticsearch on {host}:9200 — `/_cat/indices?v` for index list; sample documents from each high-value index; test write to `/test-idx/_doc` to gauge ACL."* |
-| Open Redis | *"Open Redis on {host}:6379 — `INFO`, `KEYS *`, sample reads; check for write access via `CONFIG SET` then `BGSAVE` to write `authorized_keys`."* |
+| Open Elasticsearch | *"Open Elasticsearch on {host}:9200 — `GET /_cat/indices?v`, then one `GET` of a document from a high-value index. Do not create indexes or write documents."* |
+| Open Redis | *"Open Redis on {host}:6379 — unauthenticated `INFO` plus one `GET` of a key that `INFO` shows exists. That read is the finding. Do not `CONFIG SET`, `BGSAVE`, or write `authorized_keys`."* |
 | Open MongoDB | *"Open MongoDB on {host}:27017 — `show dbs`, `show collections`, sample find queries; check user collection for password hashes."* |
 | Subdomain takeover | *"CNAME for {host} points to unclaimed {provider} resource → register `{takeover-target}` on {provider} to serve content from {host}; pivot to phishing or content injection on the trusted domain."* |
-| Open kubelet | *"Open kubelet on {host}:10250 — `GET /pods` to list; `POST /run/<ns>/<pod>/<container>` for in-container exec without K8s API auth."* |
+| Open kubelet | *"Open kubelet on {host}:10250 — `GET /pods` without credentials is the finding (cluster listing). Do not `POST /run` or exec."* |
 | Open etcd | *"Open etcd on {host}:2379 — `etcdctl get / --prefix --keys-only` for full cluster state; secrets stored under `/registry/secrets/`."* |
 | K8s API anonymous | *"Kubernetes API on {host}:6443 with anonymous-auth — `kubectl --server=https://{host}:6443 --insecure-skip-tls-verify get pods --all-namespaces`."* |
 | Citrix unpatched | *"Citrix NetScaler version {ver} on {host} — vulnerable to CVE-{cve} (KEV-listed); see vendor advisory; do not exploit but flag for client immediate patching."* |
@@ -194,7 +198,7 @@ When emitting a HIGH/CRITICAL API endpoint finding (score ≥ 70), include a one
 | VMware vCenter accessible | *"vCenter at {host} accessible without VPN; CVE-2021-21972 RCE if unpatched; check version banner."* |
 | Cloud function URL unauth | *"AWS Lambda Function URL at {url} accessible anonymously — review IAM auth configuration; if unauthenticated by design, audit input validation aggressively."* |
 | npm typosquat candidate | *"Package name `{candidate}` is unregistered + similar to target's published `{official}` — typosquat takeover risk; advise client to defensively register."* |
-| DMARC missing/permissive | *"DMARC `p=none` on {domain} — spoof of `{anything}@{domain}` deliverable to recipients; recommend enforcement to `p=quarantine` or `p=reject` after observing reports."* |
+| DMARC missing/permissive | *"DMARC `p=none` or absent on {domain} — the domain asks receivers not to enforce. Info until a spoofed message is delivered to an Inbox (`hunt-tls-network`). Do not report spoofing from the TXT record alone."* |
 | Live AI API key (Anthropic/OpenAI) | *"Validated `sk-{provider}-...` key with model access — quota cost can be exfiltrated; rotate immediately + audit usage logs in provider console."* |
 | Public Slack invite link | *"Slack workspace invite link discoverable via search engine — anyone can join the workspace without approval; trivially access internal channels."* |
 | Open Docker registry | *"Public Docker registry at {host} — `GET /v2/_catalog` lists images; pull and scan layers for embedded secrets."* |
@@ -208,7 +212,9 @@ When emitting a HIGH/CRITICAL API endpoint finding (score ≥ 70), include a one
 
 ## 49. Skill Self-Test
 
-Drop these prompts into a fresh Claude session to verify the skill loads correctly.
+The `§` numbers below are section ids **inside the reference files** (see the index), except §20, §21, and §39 which are in this file. Load the matching reference before answering. Map: §15 `breach-and-credentials.md`; §16 `probes-and-wordlists.md`; §17 `secret-patterns.md`; §18 `dork-corpus.md`; §22 `identity-fabric.md`; §23 `secret-validators.md`; §27–§28 `recon-stack.md`; §29 `specialized-osint.md`; §40 `severity-matrix.md`; §41–§45 `recon-techniques.md`; §46 `tooling-install.md`; §47 `sector-notes.md`.
+
+Drop these prompts into a fresh session to verify the skill loads correctly. The §5 rails override any cracking or destructive command in a reference.
 
 1. *"What paths should I probe to find Swagger or OpenAPI specs on a webapp?"* → §16.1.
 2. *"Give me the GraphQL introspection query I should POST."* → §16.2.

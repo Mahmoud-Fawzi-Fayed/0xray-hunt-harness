@@ -20,8 +20,8 @@ String-built LDAP filters (RFC 4515) and string-built XPath queries. Public writ
 
 | | OpenLDAP, 389-DS, ApacheDS | Active Directory |
 |---|---|---|
-| Password attr | `userPassword` may be readable (`{SSHA}`, `{CRYPT}`) | `unicodePwd` is never returned |
-| What a read proves | that attribute's value | `sAMAccountName`, `userPrincipalName`, `mail`, `memberOf`, `description` / `info` |
+| Password attr | `userPassword` may be readable (`{SSHA}`, `{CRYPT}`). `+` requests operational attributes when you control the attribute list | `unicodePwd` is never returned. `ms-Mcs-AdmPwd` and `msLAPS-Password` are local-admin passwords when the directory actually returns them |
+| What a read proves | that attribute's value | `sAMAccountName`, `userPrincipalName`, `mail`, `memberOf`, `description` / `info`, or a LAPS value in the body |
 | Auth bypass | same filter tricks | same filter tricks, if the app builds the filter by concat |
 
 `description` sometimes holds a password an admin typed there. That is a finding only when the value is in the response. Do not guess that it does.
@@ -30,7 +30,7 @@ String-built LDAP filters (RFC 4515) and string-built XPath queries. Public writ
 
 1. **Confirm the backend.** Errors: `InvalidSearchFilterException`, `Bad search filter`, `LDAP: error code`, `javax.naming`, `com.sun.jndi.ldap`, `ldap_search`, `System.DirectoryServices`. Surfaces: corporate login, people search, address book, "find a colleague", `/api/directory`, SSO that still binds to LDAP.
 2. **Baseline** a normal username and a wrong password. Save status, length, and a body marker (`Invalid credentials` vs a session cookie).
-3. **Unbalanced vs balanced.** Username `test)` vs `test()`. A syntax error on the unbalanced input and a normal failure on the balanced one means the value is inside a filter. If both look identical, try `*` and `\` and then leave.
+3. **Unbalanced vs balanced.** Username `test)` vs `test()`. A syntax error on the unbalanced input and a normal failure on the balanced one means the value is inside a filter. If **this** field looks identical for both, still try `*` / `\` here, then move to the next LDAP-shaped input (people search, address book, `/api/directory`, group picker, password field). Do not retire the class off one login box.
 4. **Which context.**
    - Filter `(attr=VALUE)` → `* ( ) \ NUL & | !`.
    - DN `uid=VALUE,ou=people,dc=corp` → `, = + " \ < > ;`. A `*` is not a wildcard in a DN. Payloads do not transfer.
@@ -51,6 +51,8 @@ admin)(&)
 admin)(!(userPassword=ZZZ))
 ```
 NUL (`%00`) truncates on some C libraries; try once.
+
+If the parameter selects **attributes** rather than the filter, ask for `*` and `+`, then `userPassword` or `ms-Mcs-AdmPwd` / `msLAPS-Password`. A `*` in the filter widens matches; it does not add operational attributes. Quote the value. Do not dump the directory.
 
 **DN injection** (commas matter): `admin,ou=other,dc=corp` and see if the bind DN changes in an error string.
 

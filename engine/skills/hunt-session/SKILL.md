@@ -15,7 +15,7 @@ report_count: 18
 
 ## Decision tree
 1. Capture full `Set-Cookie` set (names, flags, `Domain`, prefixes) on anonymous + login + logout.
-2. **Fixation** (Phase 1) → **logout invalidation** (2) → **password/email/MFA change** (3) → flags (4) → entropy (5) → JWT-session (6) → refresh rotation (7) → SSO/DBSC (8) → cookie toss/partition (9).
+2. **Fixation** (Phase 1) → **logout invalidation** (2) → **password/email/MFA change** (3) → flags (4) → entropy (5) → JWT-session (6) → refresh rotation (7) → SSO/DBSC (8) → cookie toss/partition (9) → URL sid / shared cache (10).
 3. Every “still authenticated” claim = **body-diff of unique identity marker**, garbage-cookie negative control, cache-buster, second IP if possible.
 
 ## Surface
@@ -73,19 +73,22 @@ curl -sI -L "https://$TARGET/" | grep -i '^set-cookie'
 | No `Partitioned` / CHIPS | Third-party embed still gets the cookie — CSRF/embed chains |
 
 ### Phase 5 — Entropy (issued to you)
-Sample **tens** of login cookies (not 10). Duplicates = catastrophic. Decode base64/hex for `userId`/timestamp. Sequential delta. **Do not** iterate guessed sids against `/api/me`. NIST SP 800-63B ≥64 bits is the bar.
+Sample **tens** of login cookies (not 10). Duplicates = catastrophic. Decode base64/hex for `userId`/timestamp. Sequential delta. **Do not** iterate guessed sids against `/api/me`. OWASP wants ≥128 bits of session entropy; a visible user id or timestamp is the finding, a short token is only a finding when you can show the structure.
 
 ### Phase 6 — JWT-as-session
 Decode `exp`/`jti`. Logout then replay **same** JWT — body-diff `/api/me`. Forge attacks live in `hunt-jwt` (no cracking).
 
 ### Phase 7 — Refresh rotation / reuse
-Mint RT1 → rotate to RT2 → replay RT1. BCP: replay of RT1 must kill the **family** (RT2 dead). No rotation or no family-kill = persistent stealable credential. Confirm with your tokens only.
+Mint RT1 → rotate to RT2 → replay RT1. BCP: replay of RT1 must kill the **family** (RT2 dead). No rotation or no family-kill = persistent stealable credential. Also send **two parallel** refreshes of the same RT1 (one race, not a loop). Both returning a new token means reuse detection is not atomic. Confirm with your tokens only.
 
 ### Phase 8 — SSO / DBSC
 Logout at IdP only; app session still authed = SLO gap. If `Sec-Session-*` present, strip device-bound proof and replay plain cookie — if accepted, DBSC is advisory.
 
 ### Phase 9 — Cookie toss / jar overflow
 Over-write session from a **weaker** origin (HTTP sibling, taken-over host) via `Set-Cookie; Domain=.target.com`. Cookie bomb (jar overflow) dropping `__Host-` cookies is a rare auxiliary — prove fixation/ATO, not just 400s.
+
+### Phase 10 — URL session and shared cache
+If the sid is in the query or the path, load one external image or script you control and read the `Referer`. The sid in that header is the leak (WSTG-SESS-04). Then: `GET /api/me` authenticated, note `Cache-Control` / `Vary`. Repeat with **no** cookie and a cache-buster removed. If the second body still contains A's marker, a shared cache is serving the session. Garbage cookie must not match. One pair of requests.
 
 ## Validation
 - Two **real** sessions, never placeholders.

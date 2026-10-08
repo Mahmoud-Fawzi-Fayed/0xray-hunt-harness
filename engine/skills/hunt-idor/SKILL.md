@@ -18,7 +18,7 @@ B reads or mutates **A’s** object (or tenant C’s) with no grant. Highest: bi
 
 ## Decision tree (any API)
 1. **Map object references** while logged in as A: path IDs, query, JSON body, headers (`X-Org-Id`, `X-User-Id`), GraphQL `id`/`gid://`, WS payloads, exports, signed URLs.
-2. **Classify the ID:** sequential int → ±1/±10 on **your** objects. UUID v4 → harvest from other responses (do not brute). UUID v1 → timestamp reconstruct. Hashids/sqids/base64 → decode. ULID → prefix time.
+2. **Classify the ID:** sequential int → ±1/±10 on **your** objects. UUID v4 → harvest from other responses (do not brute). UUID v1 and UUID v7 (time-ordered, RFC 9562) → reconstruct only inside a timestamp you already saw on your own objects. Hashids/sqids/base64 → decode. ULID → prefix time.
 3. Replay **A’s IDs as B** (swap cookie/Bearer only). All verbs: GET POST PUT PATCH DELETE. Also: no auth, expired token, another tenant.
 4. If 403: run **bypass table**. If 200: **body-diff** vs B’s own object — must contain A’s unique marker (email, invoice line, filename).
 5. Ask: which **state-change** takes the same ID? Read-IDOR + write on email/role/refund/membership = ATO/financial (`hunt-ato`).
@@ -60,10 +60,16 @@ query { node(id:"gid://app/Invoice/A"){ ... on Invoice { pdfUrl total } } }
 | Sequential ID | A’s id ±1, ±10 (objects you can see leaked in lists). Stop after proof. |
 | UUID leaked elsewhere | Notifications, exports, webhooks, GraphQL lists, `Location`, email links |
 | Encoded | `echo dXNlcl8xMjM= \| base64 -d`; Hashids; hex(int) |
+| Alternate identifier | Path UUID is checked, body/query `email`/`username`/`slug`/`external_id`/`customer_number` is not. Replay A’s *other* key as B. |
+| Wrap / sentinel | `id=-1`, `0`, `null`, `""`, `2147483647`, `2147483648` (32-bit wrap). One each. |
+| Array / CSV | `?id=B,A`  `id[]=B&id[]=A`  `{"id":["B","A"]}` |
+| Relay / global ID | `printf 'Invoice:%s' "$ID_A" \| base64` → `node(id:"base64")`. Shopify `gid://app/Invoice/A` already in GraphQL block. |
 | 403 on `/v2/` | Repeat on `/v1/`, `/internal/`, `/mobile/`, trailing slash, `.json`, `;.css` |
 | GET protected | POST/PUT/PATCH/DELETE/OPTIONS; `_method=DELETE`; `X-HTTP-Method-Override` |
 | `user_id` in WHERE | Body `{"id":A}`, nested `{"data":{"id":A}}`, array `{"id":[B,A]}` / `{"id":{"$in":[A]}}` (`hunt-nosqli`) |
-| HPP | `?id=B&id=A`  `?user_id=B&userId=A` |
+| HPP | `?id=B&id=A`  `?user_id=B&userId=A`. JSON duplicate keys `{"id":B,"id":A}` (first-key vs last-key parsers) |
+| Other representation of the same id | `/resource/A.pdf`, `/resource/A.json`, `Accept: application/xml`, the mobile or GraphQL field for the REST id. One format often skips the check |
+| JSON Patch / merge-patch | `Content-Type: application/json-patch+json` with `{"op":"replace","path":"/ownerId","value":A}` on **your** URL; `application/merge-patch+json` body `{"id":A}` |
 | Name variants | `user_id` `userId` `uid` `account` `customer_id` `ownerId` `subject` |
 | JSON merge / mass assignment | Add `"role":"admin"`, `"org_id":A_ORG` on a membership POST (`hunt-api-misconfig`) |
 | Tenant in JWT only | Send `X-Org-Id: A_ORG` or body `tenantId` that disagrees with token |

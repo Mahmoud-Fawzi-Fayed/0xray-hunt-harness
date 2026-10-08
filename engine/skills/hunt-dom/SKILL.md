@@ -22,7 +22,7 @@ DOM-based attacks execute in the victim's browser — the server often never see
 ## Decision tree
 
 1. **Source.** Where does the attacker string enter? `location.search` / `hash` / `href`, `document.referrer`, `document.baseURI`, `window.name`, `postMessage`, `localStorage`, a JSON field the client writes into the DOM.
-2. **Sink.** Where does it go? `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `iframe.srcdoc` / `eval` / `setTimeout(string)` / `location` / `script.src` / `$.html` / `dangerouslySetInnerHTML` / `v-html` / Alpine `x-html`.
+2. **Sink.** Where does it go? `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `iframe.srcdoc` / `eval` / `setTimeout(string)` / `location` / `script.src` / `$.html` / `dangerouslySetInnerHTML` / `v-html` / Alpine `x-html` / `setHTMLUnsafe` (2024 Sanitizer API — `setHTML` with the default sanitizer is usually safe; `setHTMLUnsafe` is `innerHTML`).
 3. **Sanitizer in between?** DOMPurify / sanitize-html / a framework auto-escape. If yes, you need mXSS, a config bug, or clobbering — not a raw `<script>`.
 4. **Prove execution or the privileged effect** in the target origin (OOB from that page, or a state change). A breakpoint in DevTools is not a report.
 5. **CSP / Trusted Types** actually block the sink? Then the bug is the policy gadget or the `createPolicy` passthrough (`hunt-xss`), not the source.
@@ -141,6 +141,8 @@ addEventListener('message', e => {
 ```
 
 > False-positive guard: a handler with a *partial* check (`origin.indexOf('target.com')>-1`, `endsWith('target.com')`, regex `target\.com`) is still vulnerable — bypass with `target.com.evil.com` or `eviltarget.com`. Confirm by serving the PoC from such a look-alike host and showing the message still lands.
+>
+> `Cross-Origin-Opener-Policy: same-origin` blocks `window.opener` / `window.open` handoffs. It does **not** block an iframe you framed plus `contentWindow.postMessage`. A failed opener PoC is not "no listener" until the iframe PoC also fails.
 
 ---
 
@@ -149,6 +151,8 @@ addEventListener('message', e => {
 **Hard rule (corrects a common mistake):** a SW script URL **must be same-origin** as the page calling `register()`. A cross-origin script URL (`https://evil.com/sw.js`) throws `SecurityError` — there is **no header that enables cross-origin SW *script* registration**. `Service-Worker-Allowed` only widens the **scope** a same-origin script may control, not where the script may live.
 
 So the realistic path is: get a SW script **onto the target origin** (file upload that serves JS, open-redirect/path the origin reflects as a script, a JSON/JSONP endpoint with `text/javascript`, or an existing route under your control), then register it from same-origin XSS.
+
+**Already-registered SW, no new `register()`.** If the live `sw.js` calls `importScripts(url)` and you control that URL (dangling CDN, bucket takeover, a path that reflects your JS, missing SRI), the installed worker runs your code on the next visit. CSP `script-src` must allow that host or the import throws. Proof: close every tab, reopen the origin, and show a fresh OOB hit with no XSS and no new registration.
 
 ```bash
 # Enumerate existing SW + its scope
@@ -229,7 +233,7 @@ https://TARGET/page?constructor[prototype][marker]=ppm-<rand>
 
 The merge has to be unsafe (`Object.assign`, `$.extend(true)`, `_.merge`, a recursive query parser) **and** a sink has to read the polluted key. A parameter that is stored as the literal key `__proto__` did not pollute `Object.prototype`. Confirm with a **second** page load that does not contain the parameter and still fires, or with `ppm-<rand>` showing up on an object you did not set.
 
-DOMPurify: if its config is merged from an object that inherits the polluted prototype, `ADD_TAGS` / `ALLOWED_ATTR` / `ALLOW_UNKNOWN_PROTOCOLS` can flip. Version-gate mXSS separately (`hunt-xss`: CVE-2024-47875, CVE-2024-45801, CVE-2025-15599). A version string is a lead; execution is the proof.
+DOMPurify: if its config is merged from an object that inherits the polluted prototype, `ADD_TAGS` / `ALLOWED_ATTR` / `ALLOW_UNKNOWN_PROTOCOLS` can flip. Version-gate mXSS separately (`hunt-xss`): the nesting-based mXSS pair is CVE-2024-47875 (fixed 2.5.0 / 3.1.3) and CVE-2024-45801 (special nesting bypassing the depth check, prototype pollution weakening it — fixed 2.5.4 / 3.1.3). Note the numeric depth cap added in 3.1.1 was **removed again in 3.1.5** — current builds rely on the namespace + `SAFE_FOR_XML` checks, so "old depth-cap bypass" is not a live lead on recent versions; confirm the exact bundled version. A version string is a lead; execution is the proof.
 
 ```html
 <!-- window.name survives top-level navigation into the target -->
@@ -245,7 +249,8 @@ Only counts if that page copies `window.name` into HTML/JS. `document.baseURI` /
 ## Phase 6 — dangerouslySetInnerHTML / framework sinks
 
 ```bash
-grep -rnE "dangerouslySetInnerHTML|v-html=|\[innerHTML\]=|\.html\(" recon/$TARGET/ --include="*.js" 2>/dev/null
+grep -rnE "dangerouslySetInnerHTML|v-html=|\[innerHTML\]=|\.html\(|bypassSecurityTrust" recon/$TARGET/ --include="*.js" 2>/dev/null
+# Angular bypassSecurityTrustHtml/Script/Url/ResourceUrl = raw sink by design (no sanitizer).
 # In minified Next/React bundles:
 curl -s "https://$TARGET/_next/static/chunks/pages/index.js" | grep -oP 'dangerouslySetInnerHTML.{0,120}'
 # Trace whether user data reaches it WITHOUT a sanitizer (DOMPurify/sanitize-html).
@@ -261,8 +266,11 @@ curl -s "https://$TARGET/_next/static/chunks/pages/index.js" | grep -oP 'dangero
 grep -rnE "angular|vue|handlebars|mustache|nunjucks|alpinejs|\bv-|ng-app" recon/$TARGET/ --include="*.js" 2>/dev/null | head
 # Probe: {{7*7}} -> 49 in the live DOM and NOT in the raw HTML response => client template.
 # Server-side 49 in curl is SSTI (hunt-ssti), not this skill.
-# AngularJS 1.x (version-specific): {{constructor.constructor('alert(document.domain)')()}}
-# Vue 2 (build-specific): {{_c.constructor('alert(document.domain)')()}}
+# AngularJS 1.x only (Angular 2+ does not eval {{}} from innerHTML):
+#   {{constructor.constructor('alert(document.domain)')()}}
+# Vue 2 (runtime+compiler / full build): {{_c.constructor('alert(document.domain)')()}}
+# Vue 3 production is almost always runtime-only: {{7*7}} stays literal — not CSTI.
+#   Confirm the bundle is the compiler build (`vue.esm-browser` / runtime+compiler) before claiming Vue CSTI.
 # Alpine: <div x-html="'<img src=x onerror=alert(document.domain)>'">
 # HTMX: hx-vals / hx-get pointed at an attacker URL is request forgery if the server reflects it into the DOM.
 ```

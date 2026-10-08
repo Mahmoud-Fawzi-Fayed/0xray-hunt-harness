@@ -1,6 +1,6 @@
 ---
 name: hunt-grpc
-description: "Hunt gRPC vulnerabilities — server reflection enabled (enumerate all services/methods), missing authentication / metadata-stripping on internal endpoints, plaintext gRPC over HTTP/2, internal endpoint disclosure, proto file leakage, gRPC-Web/grpc-gateway transcoding injection, and CVE-2023-44487 as a version lead only (do not send a Rapid Reset flood). Use when target exposes port 50051 / 443 / 8443 / 9090 with HTTP/2, when grpcurl detects reflection, when an Envoy or grpc-gateway proxy is fronting a microservice, or when recon reveals a microservice architecture."
+description: "Hunt gRPC vulnerabilities — server reflection enabled (enumerate all services/methods), missing authentication / metadata-stripping on internal endpoints, plaintext gRPC over HTTP/2, internal endpoint disclosure, proto file leakage, gRPC-Web/Connect/grpc-gateway transcoding injection (including HTTP/1.1 and Connect unary GET), Grpc-Metadata-* header-to-metadata mapping, and CVE-2023-44487 as a version lead only (do not send a Rapid Reset flood). Use when target exposes port 50051 / 443 / 8443 / 9090 with HTTP/2, when a response carries grpc-status or content-type application/grpc-web or connect-protocol-version, when grpcurl detects reflection, when an Envoy or grpc-gateway proxy is fronting a microservice, or when recon reveals a microservice architecture."
 sources: hackerone_public, grpc_security_research, cert_cc_advisory
 report_count: 6
 ---
@@ -24,7 +24,8 @@ gRPC reflection enabled = full service catalog enumeration without source code. 
 
 | Observation | Next step | Finding only if |
 |---|---|---|
-| ALPN `h2` or `grpc-status` trailer | Reflection or a method named in JS | A **sensitive** RPC returns `grpc-status: 0` without the right principal |
+| ALPN `h2`, or `grpc-status` in a trailer **or** response header | Reflection or a method named in JS | A **sensitive** RPC returns `grpc-status: 0` without the right principal |
+| HTTP/1.1 only, but `application/grpc-web` or `connect-protocol-version` | Phase 6. Native gRPC needs h2; gRPC-Web, Connect, and grpc-gateway JSON do not | Same status-0 proof on that HTTP/1.1 route |
 | `grpcurl list` prints business services | Describe, then one unauth call of the most privileged method | Response body is another user's data or a state change you re-read |
 | Reflection off | Methods from the bundle, a leaked `.proto`, or grpc-gateway JSON | Same status-0 proof |
 | Edge proxy adds `x-user-id` / `x-tenant-id` | Send that metadata through the **public** host, not only the pod IP | Public route accepts the spoofed tenant |
@@ -37,7 +38,8 @@ gRPC reflection enabled = full service catalog enumeration without source code. 
 # Common gRPC ports (50051 native; 443/8443 via TLS+ALPN h2; 9090/8080 h2c)
 nmap -sV -p 50051,50052,443,9090,8080,8443,6565,9000 $TARGET 2>/dev/null | grep open
 
-# ALPN must negotiate h2 — gRPC cannot run on HTTP/1.1
+# Native gRPC needs ALPN h2. No h2 does NOT end the hunt: gRPC-Web, Connect, and
+# grpc-gateway JSON are commonly served on HTTP/1.1 (Phase 6).
 echo | openssl s_client -alpn h2 -connect $TARGET:443 2>/dev/null | grep -i "ALPN.*h2"
 
 # Native-gRPC fingerprint: an HTTP/2 POST to a bogus method returns a grpc-status
@@ -190,6 +192,28 @@ curl -s "https://$TARGET/user.UserService/GetUser" \
 curl -s "https://$TARGET/user.UserService/GetUser" \
   -H 'content-type: application/json' -H 'connect-protocol-version: 1' \
   -d '{"user_id": 1}'
+
+# (d2) Connect unary GET — methods marked NO_SIDE_EFFECTS (and any that still
+#     answer GET by mistake). Cacheable, often no CORS preflight, cookie-auth CSRF.
+#     Query keys: connect=v1, encoding=json|proto, message=<json or base64 proto>.
+curl -sG "https://$TARGET/user.UserService/GetUser" \
+  --data-urlencode 'connect=v1' --data-urlencode 'encoding=json' \
+  --data-urlencode 'message={"user_id":1}'
+# Mutating RPC that still returns status-0 on GET = CSRF + cacheable write.
+# Private body on GET + cache HIT on a second client = hunt-cache-poison.
+
+# (e) application/grpc-web-text — the body is standard base64 of the same frame
+#     (browsers and some Envoy routes use this, not raw +proto):
+B64=$(base64 -w0 frame.bin 2>/dev/null || base64 frame.bin | tr -d '\n')
+curl -s "https://$TARGET/user.UserService/GetUser" \
+  -H 'content-type: application/grpc-web-text' -H 'x-grpc-web: 1' --data-binary "$B64"
+
+# (f) grpc-gateway / Envoy: HTTP headers named Grpc-Metadata-* become gRPC
+#     metadata (prefix stripped). Phase 4 identity probes over plain HTTP:
+curl -s -X POST "https://$TARGET/v1/admin/users:list" \
+  -H 'content-type: application/json' \
+  -H 'Grpc-Metadata-x-user-id: 1' -H 'Grpc-Metadata-authorization: Bearer x' \
+  -d '{}'
 ```
 
 Why this matters: the browser-facing transcoder commonly forwards to the SAME backend as the internal gRPC plane. If the transcoder route exposes `AdminService` or fails to require the auth the gRPC client would have sent, you have a real, externally-reachable authz bug. Confirm each transcoded route returns `OK` with sensitive data, and verify it is reachable as an unauthenticated/low-priv user (not just from inside the mesh).
@@ -228,6 +252,8 @@ buf       # Connect endpoints
 | Proxy forwards `x-user-id`/`x-tenant-id` unstripped | Spoof identity metadata → cross-tenant impersonation | Tenant isolation bypass — Critical |
 | IDOR via enumerable id field | Iterate `user_id` over `GetUser` | Mass PII exfil — High |
 | grpc-gateway / gRPC-Web route re-exposes internal RPC | Hit transcoded REST/JSON path unauth | Externally-reachable authz bypass — High/Critical |
+| Connect GET on a mutating or authed RPC | CSRF (cookie) or cache of private body (`hunt-cache-poison`, `hunt-csrf`) | ATO / data leak — High |
+| `Grpc-Metadata-x-user-id` accepted on HTTP | Same as proxy metadata spoof, from a browser | Tenant impersonation — Critical |
 | Plaintext h2c on internal port | MITM / sniff metadata (bearer tokens) | Credential capture — High |
 | `.proto` leak (repo/swagger) | `-protoset` to drive reflection-off target | Unlocks Phases 3–4 — Low alone, High as enabler |
 
@@ -239,7 +265,7 @@ Related skills: **hunt-idor** (id enumeration logic), **hunt-api-misconfig** (JW
 
 gRPC's failure modes look like successes to a naive `grep`. Apply these gates before any submission.
 
-1. **Status-code discrimination, not byte-counting.** A non-empty response can still be an error frame. Confirm the `grpc-status` trailer is `0` (OK). `Unauthenticated (16)` / `PermissionDenied (7)` mean auth WORKS — close the candidate. `Unimplemented (12)` means you have the wrong method. Re-run with `grpcurl -v` and read the trailers explicitly.
+1. **Status-code discrimination, not byte-counting.** A non-empty response can still be an error frame. Confirm `grpc-status` is `0` (OK). On native gRPC it is a trailer; on gRPC-Web over HTTP/1.1 it is often a response **header**, or the last base64 frame with the high bit set (`0x80`). `Unauthenticated (16)` / `PermissionDenied (7)` mean auth WORKS — close the candidate. `Unimplemented (12)` means you have the wrong method. Re-run with `grpcurl -v` and read the trailers explicitly.
 
 2. **Reflection / health endpoints are often intentionally public.** `grpc.reflection.*` and `grpc.health.v1.Health` being reachable is, by itself, **info disclosure (Low/Medium at most)** — many vendors ship reflection on by design. Do NOT report it as "missing auth" unless it leaks a non-public service catalog. The finding is the *sensitive* service you can then call without auth, proven in Phase 3.
 

@@ -225,6 +225,12 @@ CVSS 3.1 Score: X.X ([Severity]) — AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N
 
 ---
 
+## YESWEHACK REPORT TEMPLATE
+
+Use the Intigriti shape: summary, copy-paste HTTP, expected vs actual, CVSS vector, remediation. Severity is the program's reward grid, not a generic CVSS table. YesWeHack triagers close hypothetical preconditions as N/A — the victim id, token, or cookie has to be obtained in the PoC (`triage-rtfs`). Stop at draft. Do not submit until the operator approves.
+
+---
+
 ## IMMUNEFI REPORT TEMPLATE
 
 ```markdown
@@ -297,6 +303,8 @@ CVSS = f(AV, AC, PR, UI, S, C, I, A)
 | **Integrity (I)** | High | +0.56 | Can modify any data |
 | **Availability (A)** | High | +0.56 | Crashes service |
 
+The numbers above are CVSS 3.1 metric values inside the formula. They are not added together. Ship the vector string.
+
 ### Typical Scores by Bug Class
 
 | Bug | Typical CVSS | Severity |
@@ -333,7 +341,7 @@ CVSS = f(AV, AC, PR, UI, S, C, I, A)
 - IDOR on specific user's non-critical data
 - XSS on low-sensitivity page requiring victim interaction
 - CSRF on important but non-critical action
-- Rate limit bypass on OTP (with effort demonstrated)
+- Missing re-auth on password/email change **without** a theft primitive (not full ATO)
 
 ### Low (P4)
 - Information disclosure (non-sensitive, no PII)
@@ -375,13 +383,14 @@ Each YES raises severity:
 [ ] First sentence states exact impact in plain English
 [ ] Steps to Reproduce has exact HTTP request (copy-paste ready)
 [ ] Response showing the bug is included (screenshot or JSON body)
-[ ] Two test accounts used — not just one account testing itself
+[ ] Two test accounts when the class needs a victim (IDOR/ATO/CSRF) — unauth bugs do not
 [ ] CVSS score calculated and included
 [ ] Recommended fix is 1-2 sentences (not a lecture)
 [ ] No typos in endpoint paths or parameter names
-[ ] Report is < 600 words — triagers skim long reports
+[ ] Impact is in sentence 1. Length follows the chain — do not pad, and do not cut a multi-step PoC to hit a word cap
 [ ] Severity claimed matches impact described — don't overclaim
 [ ] Never used "could potentially" or "may allow"
+[ ] Proof is a unique marker, a body-diff, n≥10 timing, or an OOB callback — not a reflection, a stack trace, or one slow response
 [ ] PoC is reproducible by triager from a fresh state
 ```
 
@@ -439,7 +448,7 @@ Key fields:
 "This vulnerability does not require any special privileges — only a free account."
 "The exposed data includes [PII type], which is subject to GDPR requirements."
 "An attacker can automate this with a simple loop — all [N] records in minutes."
-"This is exploitable externally without network access to any internal system."
+"This is exploitable from the internet, with no foothold on the internal network."
 "The impact is equivalent to a full data breach of [feature/data type]."
 ```
 
@@ -489,6 +498,7 @@ Authorization: Bearer ACCOUNT_A_TOKEN
 - **`bugcrowd-reporting`** — When the target is a Bugcrowd program. Workflow primitive: this skill's body template is the foundation; `bugcrowd-reporting` overlays VRT selection, severity-request paragraph, OOS-clause rebuttals on top.
 - **`evidence-hygiene`** — When PoC screenshots / HARs are being attached to the report. Workflow primitive: every artifact referenced in the "Supporting Materials" / "Proof of Concept" section gets routed through `evidence-hygiene` for cookie + PII redaction before attachment.
 - **`redteam-report-template`** — When the engagement is an external red team (NOT bug bounty). Workflow primitive: confirm engagement mode via `bb-methodology` PART 0; if red-team, swap this skill out for `redteam-report-template` (different audience, different structure: Subject / Observations / Description / Impact / Recommendation / PoC).
+- **`bb-methodology`** — When Phase 5's report-writing step starts. Workflow primitive: Phase 5 calls `/report` which loads this skill for the platform-specific template (H1 / Bugcrowd / Intigriti / Immunefi / YesWeHack).
 
 ---
 
@@ -564,4 +574,3 @@ Two valid paths:
 2. **Downgrade the severity claim to match what you actually demonstrated.** "IDOR on /api/users/{uid} reading email + role" is real and reportable; "IDOR chained to potential admin takeover" is not until you demonstrate the takeover.
 
 Pick one. Never split the difference with "could potentially" or "may allow" — those phrases are the triager's signal that the report is theoretical, and theoretical reports get N/A.
-- **`bb-methodology`** — When Phase 5's report-writing step starts. Workflow primitive: Phase 5 calls `/report` which loads this skill for the platform-specific template (H1 / Bugcrowd / Intigriti / Immunefi).

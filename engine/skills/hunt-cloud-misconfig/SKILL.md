@@ -18,8 +18,13 @@ Proof is an object, a role, or an unauthenticated invoke. A bucket name that ret
 | `identityPoolId` / `guestRoleArn` / Cognito in JS (incl. CloudWatch RUM) | `get-id` then `get-credentials-for-identity` | STS creds whose policy allows more than the intended API |
 | Leaked `AKIA` / service-account JSON | `sts get-caller-identity` or the GCP token info endpoint | A real account id. Then one read |
 | SSRF already confirmed | One IMDS URL with the required header (`hunt-ssrf`) | Role name or token body |
+| CDN/CloudFront in front of an origin you can name (DNS history, cert SAN, 301) | One request to that origin with the app `Host`, without the CDN's secret header | A body the public CDN URL does not return |
+| SAS or presigned URL already in JS (`sig=`, `sp=`, `X-Amz-Signature`) | Replay that exact URL once | Object bytes. `sp` / signed method says read vs write |
+| SQS/SNS URL already in JS (`sqs.<region>.amazonaws.com`, `sns.<region>`) | One unsigned `ReceiveMessage` / `GetQueueAttributes` (SQS) or one marker `Publish` to **that** topic (SNS) | Message body, or publish accepted. Do not guess queue names |
+| S3-compatible host (`*.digitaloceanspaces.com`, `*.backblazeb2.com`, MinIO `:9000`) | Same unsigned list/get as S3 | Object body |
+| Snapshot id or account id already in a leak or tfstate | Read that snapshot's restore attribute | `all` / public, then one read of the copy in an account you own |
 
-`NoSuchBucket` / `NoSuchBucket` XML on a hostname the app still uses is a takeover lead (`hunt-subdomain`), not data exposure. `AllAccessDisabled` and `AccessDenied` mean you do not have a list; try keys the site already references (`/static/`, `/uploads/`, source maps).
+`NoSuchBucket` on a hostname the app still uses, or a `PermanentRedirect` to a bucket you can claim, is a takeover lead (`hunt-subdomain`), not data exposure. `AllAccessDisabled` and `AccessDenied` mean you do not have a list; try keys the site already references (`/static/`, `/uploads/`, source maps).
 
 ## Storage
 
@@ -33,8 +38,13 @@ aws s3 ls "s3://$BUCKET" --no-sign-request
 curl -s "https://storage.googleapis.com/storage/v1/b/$BUCKET/o?maxResults=5"
 curl -sI "https://storage.googleapis.com/$BUCKET/$KEY"
 
-# Azure Blob
+# Azure Blob (include the static-website container if the account hosts $web)
 curl -s "https://$ACCOUNT.blob.core.windows.net/$CONTAINER?restype=container&comp=list&maxresults=5"
+curl -s "https://$ACCOUNT.blob.core.windows.net/\$web?restype=container&comp=list&maxresults=5"
+
+# S3-compatible (Spaces / B2 / MinIO) — virtual-hosted or path-style, unsigned
+curl -s "https://$BUCKET.$REGION.digitaloceanspaces.com/?list-type=2&max-keys=5"
+curl -sI "https://pub-$HASH.r2.dev/$KEY"
 ```
 
 Name guesses come from the program: the hostname, `<project>-prod`, `<project>-backup`, `<project>-logs`, `<project>-tfstate`, the CNAME target, and names in JS. A handful of informed names, not a cloud-wide brute.
@@ -57,10 +67,33 @@ http://169.254.169.254/latest/api/token     # IMDSv2: PUT, header X-aws-ec2-meta
 http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI    # ECS
 http://169.254.170.23/v1/credentials        # EKS pod identity, when advertised
 http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+  # GCP requires header Metadata-Flavor: Google. A 403 without that header is not "no role".
 http://169.254.169.254/metadata/instance?api-version=2021-02-01   # Azure, header Metadata: true
 ```
 
 A 401/403 body from the metadata IP is proof of **reach**. Credential impact starts when the token or role keys come back. Header requirements and bypasses: `hunt-ssrf`. Hop-limit 1 blocks IMDSv2 through an extra proxy; a browser or a client on the instance itself still reaches it. Hand live keys to `cloud-iam-deep` for read-only enumeration — do not create users or change policy.
+
+## Origin bypass, SAS, public snapshots
+
+**CloudFront / CDN origin.** Name the origin from the program (CNAME history, certificate SAN, a redirect, the S3 website host). One request:
+
+```bash
+curl -sI "https://$ORIGIN/" -H "Host: $APP_HOST"
+curl -sk "https://$ORIGIN_IP/" -H "Host: $APP_HOST" --resolve "$APP_HOST:443:$ORIGIN_IP"
+```
+
+Impact is a body the public CDN URL does not serve (admin, listing, stack trace) because the origin does not check the header the CDN injects (`X-Origin-Verify` or similar). The same marketing page you already get through the CDN is not a bypass.
+
+**SAS / presign already in a bundle.** Replay the URL once. Azure `sp=r` is read; `w`, `c`, `a` are write — one `marker-<rand>.txt` only if the engagement allows writes, then stop. An expired `se=` is not a finding.
+
+**Snapshots.** Only an id or account id you already have (tfstate, JS, an error). Do not search the public snapshot namespace.
+
+```bash
+aws rds describe-db-snapshot-attributes --db-snapshot-identifier "$SNAP"
+aws ec2 describe-snapshot-attribute --snapshot-id "snap-$ID" --attribute createVolumePermission
+```
+
+`all` means any AWS account can copy it. That is the misconfiguration. Data impact starts when you read one row or one file from a copy in an account **you** own, then delete that copy. Do not restore into the target account. If you did not read the copy, do not claim its contents.
 
 ## Cognito identity pools and CloudWatch RUM
 
@@ -86,7 +119,7 @@ Then **one** read the role should not have (`s3 ls` of a bucket you did not auth
 - Unsigned `GET` of a non-public object, or STS `get-caller-identity` plus one extra API read.
 - Unique marker for any write, fetched from a second unauthenticated client.
 - Metadata: the token body, not a timeout.
-- Do not modify cloud state, do not snapshot, do not invoke delete APIs. A lab emulator (LocalStack or similar) is not evidence — only the in-scope account is.
+- Do not modify the target account: no new snapshot, no policy change, no delete API. A public snapshot may be copied once into an account you own; delete that copy after one read. A lab emulator (LocalStack or similar) is not evidence — only the in-scope account is.
 
 ## Chains
 
@@ -95,6 +128,10 @@ Then **one** read the role should not have (`s3 ls` of a bucket you did not auth
 - SSRF + IMDSv1 or header-capable IMDSv2 → role creds.
 - Over-broad Cognito guest role → same as a leaked key.
 - Function URL unauth → `hunt-idor` or `hunt-ssrf` inside the function.
+- SAS or presign with write permission → one marker, then the key it sits next to in the bundle.
+- Public snapshot → read of the copy you restored in your own account.
+- Origin without the CDN secret → whatever the WAF was hiding (admin, metadata, upload).
+- SQS/SNS URL in JS → `GetQueueAttributes` first; one `ReceiveMessage` only if you must prove message contents. Do not `DeleteMessage` or drain the queue.
 
 ## Rails
 

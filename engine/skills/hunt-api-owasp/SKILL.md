@@ -1,12 +1,12 @@
 ---
 name: hunt-api-owasp
-description: "Triage map for the OWASP API Security Top 10 (2023) — API1 BOLA, API2 Broken Authentication, API3 BOPLA (mass assignment + excessive data exposure), API4 Unrestricted Resource Consumption, API5 BFLA, API6 Unrestricted Access to Sensitive Business Flows, API7 SSRF, API8 Security Misconfiguration, API9 Improper Inventory Management (shadow/old versions), API10 Unsafe Consumption of 3rd-party APIs. Use to systematically cover a JSON/REST/GraphQL API surface and pivot to the deeper hunt-* skill for each class. Umbrella methodology, not a replacement for the per-class skills."
+description: "Triage map for the OWASP API Security Top 10 (2023) — API1 BOLA, API2 Broken Authentication, API3 BOPLA (mass assignment + excessive data exposure), API4 Unrestricted Resource Consumption, API5 BFLA, API6 Unrestricted Access to Sensitive Business Flows, API7 SSRF, API8 Security Misconfiguration, API9 Improper Inventory Management (shadow/old versions), API10 Unsafe Consumption of 3rd-party APIs. Distinct from OWASP Top 10 2025 (web). Use to systematically cover a JSON/REST/GraphQL API surface and pivot to the deeper hunt-* skill for each class. Umbrella methodology, not a replacement for the per-class skills."
 sources: 0xray-authored
 ---
 
 # HUNT-API-OWASP — OWASP API Security Top 10 (2023) triage map
 
-Walk every row on every in-scope API. The 2023 list is still the current OWASP API Top 10; GraphQL, gRPC, and BaaS are covered by the pivot skills, not by skipping a row. This map does not replace the per-class skill.
+Walk every row on every in-scope API. The 2023 list is still the current **OWASP API** Top 10. Do not remap these rows onto OWASP Top 10 **2025** (web: A01–A10) — that is a different document. GraphQL, gRPC, BaaS, and MCP/LLM tool APIs still walk this map; pivot skills cover depth, not a skipped row. This map does not replace the per-class skill.
 
 ## Inventory (do this once)
 
@@ -18,7 +18,7 @@ Walk every row on every in-scope API. The 2023 list is still the current OWASP A
 
 | Response you see | Try first | Class |
 |---|---|---|
-| Object URL with an id you did not create | Replay as A with B's id | API1 |
+| Object id in a path, query, JSON body, GraphQL variable, or a batch/array | Replay as A with B's id, including one `{"ids":["ID_B"]}` | API1 |
 | `401` missing, or JWT in `Authorization` / cookie | Drop the token; flip `alg`; call as the other user | API2 |
 | JSON has `role`, `is_admin`, `email`, `balance`, fields the UI never shows | Add those fields on write; read a list endpoint | API3 |
 | `limit` / `page_size` / GraphQL `first` echoes your number | One large **capped** read (e.g. 1000) | API4 |
@@ -33,8 +33,8 @@ Walk every row on every in-scope API. The 2023 list is still the current OWASP A
 
 | # | Class | One request | Proves it | Go deeper |
 |---|---|---|---|---|
-| API1 | **BOLA** | `GET /api/orders/ID_B` as A | Body contains B's fields A cannot see in the UI | `hunt-idor` |
-| API2 | **Broken auth** | Same call with no token, `alg:none`, or A's token on B's action | Unauthorized object read or state change | `hunt-auth-bypass`, `hunt-jwt`, `hunt-mfa-bypass` |
+| API1 | **BOLA** | `GET /api/orders/ID_B` as A, or the same id in a JSON/GraphQL body | Body contains B's fields A cannot see in the UI. One extra id in a batch, then stop | `hunt-idor` |
+| API2 | **Broken auth** | Same call with no token, `alg:none`, or A's token on B's action. Magic-link host poison and passkey enroll are the same class | Unauthorized object read, state change, or a session as B | `hunt-auth-bypass`, `hunt-jwt`, `hunt-mfa-bypass`, `hunt-ato` |
 | API3 | **BOPLA** | `PATCH /me {"role":"admin","verified":true}` and `GET /users?limit=1` | Role sticks on re-read, or response includes another user's secret field | `hunt-api-misconfig` |
 | API4 | **Resource use** | `?limit=1000` or a 5-alias GraphQL query once | Server returns far more than the business cap, or skips authz when batched | `hunt-graphql` — do not load the origin |
 | API5 | **BFLA** | Low-priv user calls `POST /admin/...` or `X-HTTP-Method-Override: DELETE` | Privileged state change or admin-only data | `hunt-idor`, `hunt-api-misconfig` |
@@ -42,7 +42,7 @@ Walk every row on every in-scope API. The 2023 list is still the current OWASP A
 | API7 | **SSRF** | `url=https://<rand>.<oob>/` then one `169.254.169.254` URL | OOB hit or internal body | `hunt-ssrf`, `hunt-webhook` |
 | API8 | **Misconfig** | Spec, CORS preflight, verbose error, debug route | Sensitive data actually obtained, not a header in isolation | `hunt-cors`, `hunt-api-misconfig`, `hunt-source-leak` |
 | API9 | **Inventory** | Request a path that exists only in an old JS bundle or `/v0` | It still authorizes differently from current `/v2` | `changed-js-deepdive`, `hunt-source-leak` |
-| API10 | **Unsafe consumption** | Callback or import URL the server fetches for a partner | Forged partner body changes state, or the fetch hits metadata | `hunt-webhook`, `hunt-ssrf` |
+| API10 | **Unsafe consumption** | Callback or import URL the server fetches for a partner (PSP webhook, MCP/LLM tool result, SaaS import) | Forged partner body changes state, or the fetch hits metadata | `hunt-webhook`, `hunt-ssrf`, `hunt-mcp` |
 
 API2 rate-limit notes: a missing limit is reportable when a **small** sample (about 10) of a sensitive action all succeed and the program cares about that control. Do not guess passwords, OTPs, or API keys. No credential stuffing.
 
@@ -69,4 +69,4 @@ python3 engine/dedup.py check --program <program> --class idor --url "<endpoint>
 
 `NOVEL` → `/validate`. `LIKELY_DUP` → stop unless endpoint, param, or a fix bypass is a concrete differentiator.
 
-Cross-refs: `hunt-idor`, `hunt-auth-bypass`, `hunt-jwt`, `hunt-api-misconfig`, `hunt-ssrf`, `hunt-webhook`, `hunt-graphql`, `hunt-grpc`, `hunt-baas`, `hunt-business-logic`, `triage-validation`.
+Cross-refs: `hunt-idor`, `hunt-auth-bypass`, `hunt-jwt`, `hunt-api-misconfig`, `hunt-ssrf`, `hunt-webhook`, `hunt-graphql`, `hunt-grpc`, `hunt-baas`, `hunt-business-logic`, `hunt-mcp`, `triage-validation`.

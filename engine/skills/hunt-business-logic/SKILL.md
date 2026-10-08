@@ -21,6 +21,9 @@ The server trusts the client, or trusts a step the client can skip, about money,
 | Webhook / return URL from a PSP | Unsigned `status=paid` (`hunt-webhook`) | Order moves to paid without a real charge |
 | Transfer / refund | `beneficiary_id` = B, or refund after you keep the item | B's balance or the ledger entry |
 | Multi-step wizard | Jump to the last step's API | State machine accepts `complete` from `new` |
+| Store receipt / license / IAP | Replay A's valid receipt or license on account B once | B's entitlement flips. Do not forge or crack the store signature |
+| Refund | `amount` above the capture, or a different currency / unit (cents vs dollars) | The ledger entry is the larger refund. One refund |
+| Approval / workflow | `approver_id` or `reviewer_id` set to yourself on your own request | Stored state becomes approved |
 
 If the endpoint never changes server state, it is not this class.
 
@@ -38,7 +41,7 @@ Send the tamper on the **server** request that creates the charge or the order, 
 amount=0.01&currency=USD&order_id=ORDER&product_id=SKU
 ```
 
-What to vary, one at a time: `price` / `amount` / `unit_amount`, `qty` (0, negative, fraction, huge), `currency` (zero-decimal vs two-decimal), `product_id` swapped after the price was quoted, `tax` / `shipping` negative, coupon stacked with a sale price. Integer overflow on a cents field (`qty` × `price` wraps) shows up as a tiny or negative server total.
+What to vary, one at a time: `price` / `amount` / `unit_amount`, `qty` (0, negative, fraction, huge), `currency` (zero-decimal vs two-decimal), `product_id` swapped after the price was quoted, `tax` / `shipping` negative, coupon stacked with a sale price. Integer overflow on a cents field (`qty` × `price` wraps) shows up as a tiny or negative server total. Dual values: `amount=100&amount=1` (parser last/first), locale `"1,00"` vs `"1.00"`, and a top-level `amount` that disagrees with the line-item array. PSP vs app: if the client also sends a PaymentIntent / `client_secret`, the **order object** must match the PSP amount — a $1 intent attached to a $100 SKU is the finding.
 
 Re-read `GET /orders/{id}` (or the PSP line item). The finding is the amount the **server** will capture. Do not mass-order. If a real card would be charged or goods shipped, stop at the order-create response that already shows the wrong total unless the program told you to finish payment.
 
@@ -85,6 +88,7 @@ Impact is the order moving to paid (re-read it). A `200` that does not change th
 | `beneficiary_id` / `account_id` from the client | `hunt-idor` | Move value from B |
 | `verified` / `role` writable | `hunt-api-misconfig` | Skip KYC or become a privileged plan |
 | Email-change without re-auth | `hunt-ato` | Reset lands in the attacker's mailbox |
+| Receipt replay / self-approval | second test account | Unpaid entitlement, or an approval you granted yourself |
 | Unsigned PSP callback | `hunt-webhook` | Free goods |
 | Staff route from a bundle | `changed-js-deepdive` | Unauthenticated order API |
 

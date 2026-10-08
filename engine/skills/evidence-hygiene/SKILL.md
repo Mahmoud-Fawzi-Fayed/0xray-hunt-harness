@@ -1,6 +1,6 @@
 ---
 name: evidence-hygiene
-description: "Evidence-capture and PoC-redaction discipline for bug-bounty submissions: cookie redaction protocol (which fields to mask, Preview annotation / Burp panel hiding / DevTools workflow), PII black-bar discipline (what to mask in other-user data — names, emails, phones, faces — vs what is safe to leave — usernames, trace IDs, request bodies), HAR file sanitization (jq filters for Cookie/Set-Cookie/Authorization headers), Burp Repeater/Intruder screenshot hygiene (hide request body, show only Results table for rate-limit attacks), Chrome DevTools Console PoC patterns (credentials include so cookies are not echoed, labeled console.log), screenshot capture order, filename conventions, post-submission rotation hygiene. Use BEFORE any PoC screenshot, BEFORE attaching a HAR, or whenever preparing evidence with session cookies or other-user PII. Pairs with bugcrowd-reporting and report-writing."
+description: "Evidence-capture and PoC-redaction discipline for bug-bounty submissions: cookie redaction protocol (which fields to mask, Preview annotation / Burp panel hiding / DevTools workflow), PII black-bar discipline (what to mask in other-user data — names, emails, phones, faces — vs what is safe to leave — usernames, trace IDs, request bodies), HAR file sanitization (jq filters for Cookie/Set-Cookie/Authorization/API-key headers, query-string tokens, and the raw URL), Copy-as-cURL scrubbing, Burp Repeater/Intruder screenshot hygiene (hide request body, show only Results table for rate-limit attacks), Chrome DevTools Console PoC patterns (credentials include so cookies are not echoed, labeled console.log), screenshot capture order, filename conventions, post-submission rotation hygiene. Use BEFORE any PoC screenshot, BEFORE attaching a HAR, or whenever preparing evidence with session cookies or other-user PII. Pairs with bugcrowd-reporting and report-writing."
 ---
 
 # EVIDENCE HYGIENE — Capture, Proof, Redaction
@@ -36,22 +36,56 @@ Mask: session names (`sid`, `authn`, `JSESSIONID`, `__Host-*`, `__Secure-*`), Be
 
 Safe: `__cf_bm`, `_ga`, `Server`, `X-Frame-Options`, trace ids, test uid.
 
-**Prefer not capturing:** DevTools `fetch(..., {credentials:'include'})` so cookies never appear in the Console screenshot. Burp: drag divider to hide request; Intruder: Results table only (`#`, payload, status, length) — **small burst** evidence, not a million rows.
+**Prefer not capturing:** DevTools `fetch(..., {credentials:'include'})` so cookies never appear in the Console screenshot. Burp: drag divider to hide request; Intruder: Results table only (`#`, payload, status, length) — **small burst** evidence, not a million rows. **Copy as cURL / Copy as fetch** includes `Cookie` and `Authorization` — scrub before it enters a report, ticket, or chat. The address bar and `Location` (`code`, `access_token`, `id_token`, reset tokens) are secrets even when the header pane looks clean.
 
-**Image:** black rectangle over values; search the PNG conceptually for the first 6 chars of the cookie.
+**Image:** black rectangle over values. Then `strings -a shot.png | grep -niE 'eyJ|Bearer |cookie:'` — plaintext leaks show up; a black bar over compressed pixels will not, so still cover the glyphs.
 
 **HAR:**
 ```bash
 sanitize_har() {
-  jq '.log.entries |= map(
-    (.request.headers |= map(if (.name|ascii_downcase)|IN("cookie","authorization","x-csrf-token","x-xsrf-token") then .value="<REDACTED>" else . end)) |
-    (.response.headers |= map(if (.name|ascii_downcase)=="set-cookie" then .value="<REDACTED>" else . end)) |
-    (.request.cookies |= map(.value="<REDACTED>")) |
-    (.response.cookies |= map(.value="<REDACTED>"))
-  )' "$1" > "${1%.har}.sanitized.har"
+  jq '
+    def secret_header:
+      (.name|ascii_downcase)|IN(
+        "cookie","authorization","proxy-authorization",
+        "x-csrf-token","x-xsrf-token","x-api-key","x-auth-token","x-access-token",
+        "cf-access-jwt-assertion","x-amz-security-token"
+      );
+    def secret_query:
+      (.name|ascii_downcase)|IN(
+        "access_token","id_token","refresh_token","code","token",
+        "reset_token","session","password","otp","id_token_hint"
+      );
+    def scrub_text:
+      if . == null then . else
+        gsub("(?i)(?<k>password|passwd|otp|refresh_token|access_token|id_token|reset_token)=[^&\"\\s]+"; "\(.k)=<REDACTED>")
+        | gsub("eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*"; "<JWT_REDACTED>")
+      end;
+    .log.entries |= map(
+      (.request.headers |= map(if secret_header then .value="<REDACTED>" else . end)) |
+      (.response.headers |= map(if ((.name|ascii_downcase)=="set-cookie") or secret_header then .value="<REDACTED>" else . end)) |
+      (.request.cookies |= map(.value="<REDACTED>")) |
+      (.response.cookies |= map(.value="<REDACTED>")) |
+      (.request.queryString |= map(if secret_query then .value="<REDACTED>" else . end)) |
+      (.request.url |= gsub("(?i)(?<k>access_token|id_token|id_token_hint|refresh_token|reset_token|session|password|otp|code|token)=[^&#]+"; "\(.k)=<REDACTED>")) |
+      (if .request.postData then
+          .request.postData.text |= scrub_text
+          | if .request.postData.params then
+              .request.postData.params |= map(
+                if (.name|ascii_downcase)|test("password|otp|token|secret|authorization")
+                then .value="<REDACTED>" else . end)
+            else . end
+        else . end) |
+      (if .response.content then .response.content.text |= scrub_text else . end) |
+      (if ._webSocketMessages then ._webSocketMessages |= map(.data |= scrub_text) else . end)
+    )
+  ' "$1" > "${1%.har}.sanitized.har"
 }
 ```
-Verify with `grep -iE 'eyJ|Bearer |authn='` on the sanitized file. Strip victim PII from `response.content.text` with explicit `gsub` of **captured** values.
+`request.url` is a separate field from `queryString` — scrub both. Keep `postData` structure (that is the PoC) but run `scrub_text` on values, on `response.content.text`, and on Chrome `_webSocketMessages`. Application panel shots (Local/Session Storage, IndexedDB): leave **keys**, mask **values**. Verify:
+
+```bash
+grep -niE 'eyJ[A-Za-z0-9_-]{8,}|Bearer |authn=|access_token=[^<& ]|id_token=[^<& ]' file.sanitized.har && echo LEAK
+```
 
 ## PII in IDOR/ATO bodies
 Leave: `"email": "<REDACTED>@example.com"`, attacker uid, victim **uid**, endpoint. Mask local-part, phone, name, photo. In the write-up: say PII is masked; unredacted available **on the platform thread**.

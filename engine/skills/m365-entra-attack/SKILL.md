@@ -1,6 +1,6 @@
 ---
 name: m365-entra-attack
-description: Microsoft 365 / Entra ID red-team attack chain — current 2026 reality. AADSTS code reference, user enumeration vectors (with hardening status), Smart Lockout math, Conditional Access bypass options, ROPC + SAML SSO browser flow, Burp/Playwright templates. Built from authorized red-team work where ROPC spray surfaced pre-existing lockouts and CA-blocked credentials, plus real-time external attacker activity correlation. Use for any M365/Entra credential attack, password spray, user enumeration, CA-bypass exploration, or active-attacker-detection scenario.
+description: Microsoft 365 / Entra ID red-team attack chain — current 2026 reality. AADSTS code reference, user enumeration vectors (GetCredentialType / OneDrive — no password), Smart Lockout math, Conditional Access bypass options, one-shot ROPC + SAML SSO browser flow when RoE authorizes credential validation. Built from authorized red-team work where a single leaked-secret check surfaced pre-existing lockouts and CA-blocked credentials, plus real-time external attacker activity correlation. Use for any M365/Entra credential attack, password spray classification (do not exhaust the keyspace), user enumeration, CA-bypass exploration, or active-attacker-detection scenario.
 sources: authorized-engagement, microsoft-docs, AADInternals
 report_count: 1
 ---
@@ -46,34 +46,40 @@ Key fields in output:
 | AADSTS | Meaning | Lockout impact | What to do |
 |---|---|---|---|
 | 50034 | User does not exist | None | Skip; remove from spray list |
-| 50126 | Invalid username/password | +1 attempt counter | User exists — try alternate password later (within cap) |
+| 50126 | Invalid username or password | +1 bad-password slot | User exists. Do not submit a second pattern. A different password counts; the same wrong password does not. |
 | 50053 | Account locked (Smart Lockout) | None (already locked) | Pre-existing → flag to SOC; don't retry |
-| 53003 | CA blocked token issuance | +1 attempt counter | **PASSWORD VALID** — STOP, password is correct |
-| 50076 | MFA required | +1 attempt counter | **PASSWORD VALID** — second factor needed |
-| 50079 | Strong auth required | +1 attempt counter | **PASSWORD VALID** — same as 50076 |
-| 50158 | External auth required | +1 attempt counter | **PASSWORD VALID** — federated MFA |
-| 530003 | Device-state required | +1 attempt counter | **PASSWORD VALID** — needs compliant device |
+| 53003 | CA blocked token issuance | Does **not** increment the bad-password counter | **PASSWORD VALID** — STOP, password is correct |
+| 53000 | Device not compliant | Does **not** increment the bad-password counter | **PASSWORD VALID** — compliant-device grant |
+| 53001 | Device not hybrid-joined | Does **not** increment the bad-password counter | **PASSWORD VALID** — hybrid-join grant |
+| 530003 | "Device is required to be managed" (browser string; JSON `error_codes` is often `[53000]`) | Does **not** increment the bad-password counter | **PASSWORD VALID** — match both strings |
+| 50076 | MFA required | Does **not** increment the bad-password counter | **PASSWORD VALID** — second factor needed |
+| 50079 | Strong auth enrollment required | Does **not** increment the bad-password counter | **PASSWORD VALID** — same class as 50076 |
+| 50158 | External auth required | Does **not** increment the bad-password counter | **PASSWORD VALID** — federated MFA |
 | 65001 | Consent required | +1 attempt counter | App-consent issue, not auth |
 | 700016 | App not in tenant | None | User in different tenant — adjust target |
 | 90002 | Tenant does not exist | None | Tenant typo / dead tenant |
 
-**Critical insight:** any code in {53003, 50076, 50079, 50158, 530003} means **the password is correct** — Microsoft only returns these AFTER successful credential validation. Document as a confirmed-valid finding even if you can't get a token.
+**Critical insight:** any code in {53003, 53000, 53001, 530003, 50076, 50079, 50158} means **the password is correct** — Microsoft returns these after successful credential validation. Document as a confirmed-valid credential even if you cannot get a token. They are not failed-password attempts.
 
 ---
 
 ## Smart Lockout math (the cap discipline)
 
-**Microsoft default policy:**
-- 10 failed sign-ins in 10 minutes → 1-minute lockout
-- 20 failed sign-ins → progressively longer lockouts (exponential backoff)
-- Counter shared across **ALL auth flows** (ROPC + SAML + IMAP + EWS + SMTP + device-code)
+**Microsoft default (Azure Public and 21Vianet):** 10 failed sign-ins, then a first lockout of 60 seconds. Each later failure locks the account again and the duration grows. Microsoft does not publish the growth rate. There is no "10-minute window" in the current docs.
+
+**Azure US Government default:** threshold **3**, same 60-second initial duration. Read the tenant's actual threshold before assuming 10.
+
+**Same wrong password does not burn another slot.** Smart Lockout remembers recent bad-password hashes. A correct password (53003 / 53000 / 53001 / 530003 / 50076 / 50079 / 50158) is not a bad password.
+
+The counter is shared across ROPC, SAML, IMAP, EWS, SMTP, and device code.
 
 **Engagement discipline:**
-- Hard cap: ≤2 password attempts per user **lifetime per engagement** (some engagements: 1)
-- State file with atomic writes — never let two test runs race the counter
-- Kill switch: stop run if more than N LOCKED responses observed (suggests pre-existing attacker activity OR you miscounted; either way pause)
+- Password POSTs only when the rules of engagement explicitly authorize credential validation. Otherwise enumerate and stop.
+- Hard cap: **1** password attempt per user per engagement, unless the RoE states a higher cap that is still under the tenant threshold. Do not walk a pattern list.
+- State file with atomic writes — never let two runners race the counter. No parallel ROPC; concurrency trips IP reputation and returns false `AADSTS50053`.
+- Kill switch: stop if LOCKED responses show up on users you have not yet touched, or on a user you attempted once (you cannot have reached 10, or 3, alone).
 
-**Mathematical guarantee:** with 1 attempt per user, **you cannot cause Smart Lockout** (1 < 10). Any AADSTS50053 you see is therefore pre-existing → use this for active-attacker detection (see `mid-engagement-ir-detection` skill).
+**With 1 attempt per user you cannot cause Smart Lockout** (1 < 10 and 1 < 3). Any `AADSTS50053` you see is pre-existing → `mid-engagement-ir-detection`.
 
 ---
 
@@ -88,9 +94,19 @@ Returns identical XML for any email matching tenant's owned domain. **Tenant-lev
 
 ```http
 POST /common/GetCredentialType
-{"username":"<email>", "isOtherIdpSupported":true, ...}
+{"username":"<email>", "isOtherIdpSupported":true}
 ```
-Returns `AADSTS1659001` (missing flowToken) without proper session — can't enumerate.
+A bare body returns `AADSTS1659001` (missing flow token) and does **not** enumerate. That is not the end of the vector. Harvest `flowToken` and `originalRequest` (`sCtx`) the way the login page does — GET the `/oauth2/authorize` or `/login` document for a first-party client id, then:
+
+```http
+POST /common/GetCredentialType HTTP/1.1
+Host: login.microsoftonline.com
+Content-Type: application/json
+
+{"username":"<email>","isOtherIdpSupported":true,"flowToken":"<from login page>","originalRequest":"<sCtx>"}
+```
+
+`IfExistsResult`: `0` exists on this domain, `1` does not, `5` exists at another IdP, `6` exists in both, `2` throttled (stop; a `2` is not "user absent"). `Credentials.HasPassword` and FIDO/passkey flags are auth-method intel. This is zero password attempts and zero lockout. Re-verify per tenant; Microsoft keeps tightening it. `getuserrealm.srf` remains tenant-level only.
 
 ```http
 GET /autodiscover/autodiscover.json/v1.0/<email>?Protocol=AutodiscoverV1
@@ -104,34 +120,32 @@ Returns identical 200 + same JSON body for any address. Hardened ~2024.
 GET /personal/<user>_<domain>_com/_layouts/15/onedrive.aspx HTTP/1.1
 Host: <tenant>-my.sharepoint.com
 ```
-- **302 → user EXISTS** (auth-required redirect to Authenticate.aspx)
-- **404 → user does NOT exist** (404 FILE NOT FOUND)
-- ZERO authentication attempt → ZERO lockout impact
-- Bonus: `Sprequestduration` header faster (~40ms) for existing users vs ~600ms for non-existent — secondary timing oracle
+Do **not** follow redirects (`curl -sI` / GET without `-L`). Following redirects lands both classes on a Microsoft login page and destroys the oracle.
+- **Non-404** (302 to Authenticate.aspx, 401, 403, or 200 with a SharePoint/login body) → personal site **exists** → that UPN was licensed/provisioned.
+- **404** → no personal site. The user may still exist (shared mailbox, never signed into OneDrive).
+- ZERO password attempt → ZERO lockout impact.
+- Secondary: `Sprequestduration` is often faster for existing sites — confirm with n≥10 paired samples; do not use timing alone.
 
 **Caveats:**
-- Only works if SharePoint is provisioned for the tenant (check msftrecon `SharePoint Detected: Yes`)
-- Microsoft is hardening these endpoints over time — re-verify before relying on it
-- Some users may exist in Entra without OneDrive provisioning (license-dependent) — false negatives possible
+- Only works if SharePoint is provisioned (msftrecon `SharePoint Detected: Yes`).
+- Re-verify per tenant — Microsoft hardens these endpoints.
+- 404 is a **false negative** for unlicensed / never-provisioned users, not proof of absence.
 
-**2026-05-17 re-verification (authorized-engagement revalidation):** The OneDrive enum primitive STILL WORKS as of 2026-05-17. Calibration: licensed users return HTTP 200 with ~57KB body; nonexistent users / shared-mailbox accounts return 404 with 0 bytes. The /personal/ root path (without /_layouts/15/onedrive.aspx) returns the same differential.
+**2026-05-17 re-verification:** the primitive still works. Without `-L`, licensed users were 302/200 with a large body; nonexistent / some shared-mailbox accounts were 404 with 0 bytes. The `/personal/` root (no `/_layouts/15/onedrive.aspx`) showed the same split. A 200 you got by following redirects is not this oracle.
 
-**Killer use case: license differential = account-class signal.** Cross-reference OneDrive 200/404 with ROPC AADSTS50034/50126:
+**Account-class signal (no password):** cross-reference OneDrive with `GetCredentialType` `IfExistsResult` (Method above — still zero lockout):
 
-| OneDrive | ROPC | Classification |
+| OneDrive | GetCredentialType | Classification |
 |---|---|---|
-| 200 | AADSTS50076 (MFA req) or 50126 | **Licensed regular user** (real employee, MFA enforced) |
-| 200 | AADSTS50034 | (shouldn't happen — inconsistency, investigate) |
-| 404 | AADSTS50126 | **Shared mailbox / functional / service account** (no OneDrive license, has password) — historic MFA-exempt class, prime target for password guessing |
-| 404 | AADSTS50034 | Doesn't exist in tenant |
-| 404 | AADSTS50076 | Edge case (functional account WITH MFA enforced — rare) |
+| non-404 | `IfExistsResult=0` | **Licensed user** (real employee; check `Credentials.HasPassword` / FIDO flags) |
+| non-404 | `1` | Inconsistency — re-probe; do not classify |
+| 404 | `0` | **Exists, no OneDrive** — shared mailbox / functional / service account. Historic MFA-exempt class. Do **not** spray it; if RoE names one leaked secret for that UPN, that is the single cap-attempt |
+| 404 | `1` | Not in this tenant (for this enum path) |
+| 404 | `2` | Throttled — stop |
 
-The OneDrive-404 + ROPC-50126 combination is **the signal for "functional account that might bypass MFA"** — admins frequently exempt these from CA policies because they're used by automation that can't satisfy MFA. Discovered usefulness on authorized-engagement revalidation: identified `noreply@`, `purchase@`, `accounts@`, `postmaster@`, `transport@` as functional-account candidates (typical for any conglomerate tenant).
+`noreply@`, `purchase@`, `accounts@`, `postmaster@`, `transport@` are typical functional-account *candidates* once `IfExistsResult=0`. Existence is not a password oracle.
 
-**ROPC AADSTS50034 / AADSTS50126 differential:**
-- AADSTS50034 (user not exist) does NOT increment Smart Lockout counter
-- AADSTS50126 (wrong password) DOES increment
-- So a 1-attempt-per-user spray can be used as a coarse user-existence enumerator (each AADSTS50034 = miss, each AADSTS50126 = hit + 1 attempt burned)
+**Do not use ROPC as an enumerator.** A dummy password that returns `AADSTS50126` vs `50034` burns a Smart Lockout slot on every hit. Enumerate with GetCredentialType / OneDrive only. ROPC is the one RoE-authorized secret in the validator below.
 
 ---
 
@@ -142,7 +156,7 @@ The OneDrive-404 + ROPC-50126 combination is **the signal for "functional accoun
 | Different ROPC client_id (Microsoft Graph PowerShell vs Azure CLI vs Office) | Sometimes works | CA can be per-app; try `1b730954-1685-4b74-9bfd-dac224a7b894` (Graph PS), `04b07795-8ddb-461a-bbee-02f9e1bf7b46` (Azure CLI), `d3590ed6-52b3-4102-aeff-aad2292ab01c` (Office) |
 | Different resource (graph.microsoft.com / outlook.office.com / management.azure.com) | Sometimes works | CA scope can be per-resource |
 | EWS / IMAP / POP3 / SMTP Basic Auth | Mostly disabled | MS deprecated Basic Auth Oct 2022; per-account exceptions exist |
-| FOCI (Family of Client IDs) | Token-refresh path | Use a refresh token from one FOCI client to mint tokens for another |
+| FOCI (Family of Client IDs) | Token-refresh path (shrinking) | Jan 2026: Azure CLI (`04b07795-…`) and Azure PowerShell refresh tokens stopped being reusable — treat those two as **out of the family**. Office/Teams/Outlook Mobile/Company Portal may still mint for each other. Prove per `client_id` you actually refreshed; a `foci` claim in the token response is the membership signal. Do not claim a CLI/PS CA bypass on a 2026+ tenant without a live token |
 | Device-code phishing | Works | Requires user-side interaction (OOS for many engagements) |
 | Compliant-device emulation | Hard | Requires Intune device registration — high effort, often impossible without insider |
 | AiTM session-cookie steal | Works (with phishing) | Modern primary technique — out of scope for non-phishing engagements |
@@ -150,19 +164,21 @@ The OneDrive-404 + ROPC-50126 combination is **the signal for "functional accoun
 | SAML SSO via different SP | Sometimes | Each enterprise app has its own CA policy; an app with weaker CA = pivot |
 | Geo-bypass via VPN | Sometimes | If "trusted location" CA policy includes corp HQ IPs, use a VPN exit there |
 
-**Key insight from this engagement:** in a tenant with universal CA policy (compliant device + MFA), all the above paths return AADSTS53003 with the same flow. The cred is valid, but unusable from external. **Phishing-completed cookie steal is the only realistic adversary path.** Document this clearly so the client understands the threat model.
+On a tenant where every client id you are allowed to try returns `AADSTS53003`, the password is valid and that path will not issue a token. That was one engagement's result. Do not treat it as universal: a different client id or resource can sit outside the policy. Show the 53003 (or the token) per client id you actually sent. Phishing for a session cookie is out of scope unless the RoE allows it.
 
 ---
 
-## ROPC password validation (the canonical test)
+## ROPC password validation (one authorized attempt)
+
+Run this only when the RoE authorizes credential validation. It classifies a single secret. It is not a sprayer.
 
 **Single-attempt validator pattern (Python):**
 
 ```python
 import urllib.request, urllib.parse, ssl, time, json, os
-ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+ctx = ssl.create_default_context()
 ATTEMPT_FILE = "engagement_log/o365_attempts.json"
-HARD_CAP = 1  # or 2 — never higher
+HARD_CAP = 1  # raise only if the RoE says so and the tenant threshold is known to be higher
 
 def attempt(email, password):
     state = json.load(open(ATTEMPT_FILE)) if os.path.exists(ATTEMPT_FILE) else {}
@@ -199,6 +215,9 @@ def attempt(email, password):
             ("AADSTS50126", "INVALID_PW"),
             ("AADSTS50053", "LOCKED"),
             ("AADSTS53003", "VALID_CA_BLOCK"),
+            ("AADSTS53000", "VALID_DEVICE_CA"),
+            ("AADSTS53001", "VALID_DEVICE_CA"),
+            ("AADSTS530003", "VALID_DEVICE_CA"),
             ("AADSTS50076", "VALID_MFA"),
             ("AADSTS50079", "VALID_MFA"),
         ]:
@@ -227,10 +246,10 @@ When CA policy requires MFA and ROPC cannot satisfy it, Entra returns an error b
 
 The `claims.access_token.capolids` values are tenant-internal Conditional Access policy IDs — useful recon enrichment, but NOT a token. Document them in engagement notes as "CA policy IDs that fired" — they're a defender-side breadcrumb, not an attacker-side win.
 
-**Pace:**
-- Per-IP: ≤30 req/sec is fine; Microsoft tolerates well
-- Per-user: hard cap from state file is the only thing that matters
-- Random jitter (1-5s between attempts) for less-machine-like signature
+**Pace (only after the RoE authorizes credential checks):**
+- Serial only. Do not parallelize ROPC or other password grants — concurrent calls trip Entra IP reputation, return false `AADSTS50053`, and contaminate the lockout diff.
+- Per-user cap in the state file is the control. Do not target a request rate.
+- Jitter between authorized attempts. Enumeration (`GetCredentialType`, OneDrive HEAD/GET) is not a password attempt; still back off on `IfExistsResult` `2` or HTTP 429.
 
 ---
 
@@ -299,16 +318,16 @@ This is the **highest-impact byproduct** of any M365 spray engagement. Always tr
 
 ---
 
-## Common password patterns to spray (multi-brand enterprise targets)
+## Credential validation — one secret, not a list
 
-- `<BrandName>@<Year>` — `<Brand>@2026`, `Tata@2026`
-- `<BrandName>@123` — `<Brand>@123` (very common)
-- `<PlantCity>@<Year>` — `<City1>@2026`, `<City2>@2026` (production plant cities)
-- `<EmployeeID-as-password>` — common in legacy apps (PAN number, employee code, phone last4)
-- `Password@<year>`, `Welcome@<year>`, `Admin@<year>` — generic defaults
-- `<BrandName>@<Y2-digits>` — `<Brand>@26`
+Do **not** generate or walk a password pattern list (brand+year, season+year, city, employee-id, phone fragments, `Welcome@<year>`). That is keyspace exhaustion.
 
-**Engagement caveat:** when client provides leaked-cred dumps (stealer logs), use those FIRST. Each leaked cred is 1 cap-attempt against the strongest known guess for that user.
+When the RoE explicitly allows credential validation, the only secrets that may be submitted are:
+
+- one client-supplied leaked pair **for that user** (stealer log the client handed you), or
+- one known org/framework default, if the RoE names it.
+
+Each of those is the single cap-attempt for that user. No second pattern "while you are there". If the RoE does not authorize password attempts, do not POST `grant_type=password` at all.
 
 ---
 
@@ -337,11 +356,11 @@ These three artifacts are deliverable evidence for the report. They survive into
 
 For the report:
 
-**Finding: 261 Entra accounts in pre-existing lockout state**
+**Finding: `<N>` Entra accounts in pre-existing lockout state**
 - Subject: Active external password-spray campaign detected
-- Evidence: `o365_results.jsonl` filtered to `status=LOCKED`
-- Math: 1-attempt-per-user × 261 LOCKED ≠ our doing
-- SOC action: pull sign-in logs for these 261 accounts over last 30-60 days
+- Evidence: the engagement journal filtered to `status=LOCKED`. `<N>` comes from that file — never reuse a count from a previous engagement.
+- Math: 1 attempt per user cannot reach a threshold of 10 (public) or 3 (US Gov). Attribute only locks that were already present, or that accumulated on users this run did not attempt.
+- SOC action: pull sign-in logs for those `<N>` accounts over the last 30-60 days
 
 **Finding: Valid M365 cred — `<user>:<password>` (CA-blocked)**
 - Subject: Confirmed valid credential
@@ -355,7 +374,7 @@ For the report:
 
 - **DON'T use the leaked cred for the user across multiple resources** — burns the cap with no marginal benefit when CA blocks all paths
 - **DON'T retry after AADSTS50053** — account is locked, you'll just see lockout again
-- **DON'T spray more than ~30 attempts/sec to login.microsoftonline.com** — Microsoft can flag the IP for sustained credential-stuffing pattern
+- **DON'T run a password pattern list or parallel ROPC** — one authorized secret per user, serial. A high attempt rate is credential stuffing, not a test.
 - **DON'T forget to test ALL Entra tenants** — sister domains often have separate tenants with different password policies
 - **DON'T retract a CA-block finding** — AADSTS53003 means the password is correct; that's the whole point
 
@@ -364,7 +383,7 @@ For the report:
 ## Tooling
 
 ```bash
-pip install --break-system-packages msftrecon o365spray  # may need to clone msftrecon from GitHub
+pip install --break-system-packages msftrecon  # clone from GitHub if the package name 404s. Do not install o365spray — it is a sprayer; this skill classifies one secret.
 brew install pandoc                                       # for report generation
 go install -v github.com/projectdiscovery/...             # PD toolkit for general recon
 ```

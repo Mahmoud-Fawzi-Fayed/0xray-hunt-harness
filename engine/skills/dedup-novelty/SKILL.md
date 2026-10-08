@@ -42,6 +42,7 @@ Sources, in priority order:
 | **Public HackerOne Hacktivity** | `WebFetch` the program's hacktivity (disclosed reports) — pull title, weakness, severity, report URL | `h1-public` |
 | **Public Bugcrowd crowdstream** | `WebFetch` the program's public disclosures | `bugcrowd-public` |
 | **Public YesWeHack reports** | `WebFetch` the program's public report list, if any | `ywh-public` |
+| **Public Intigriti disclosures** | `WebFetch` the program's disclosed reports | `intigriti-public` |
 | **Your hunt-memory** | read `hunt-memory/journal.jsonl` (confirmed findings) if present | `own-memory` |
 
 Ingest (idempotent — re-running only adds new ids):
@@ -96,9 +97,10 @@ Verdicts (based on the top-match similarity score):
 
 | Verdict | Score | Meaning | Action |
 |---|---|---|---|
-| ✅ `NOVEL` | < 0.45 | No close match in corpus | Proceed to `/validate` → draft |
+| ✅ `NOVEL` | < 0.45 | No close match in a non-empty corpus | Proceed to `/validate` → draft |
 | ⚠ `REVIEW` | 0.45–0.72 | Overlaps a known issue (same class, related area) | Draft ONLY with an explicit "why this is not the known issue" paragraph citing the match link |
 | ⛔ `LIKELY_DUP` | ≥ 0.72 | Almost certainly already known | **Do NOT draft** unless you can prove a concrete differentiator (different endpoint/parameter, different impact, bypass of the deployed fix). Otherwise kill it and move on. |
+| ❔ `UNKNOWN` | n/a | Corpus for this program is empty | **Not a NOVEL.** Ingest at least one source, or run the manual three-axis check below and write that verdict. `dedup.py` returns `UNKNOWN` on an empty corpus so a missing corpus cannot look like a new bug. |
 
 The score blends vuln-class match, endpoint path/param overlap (volatile ids like `/5/` and UUIDs
 are normalized so a different victim id still matches), and title-token overlap. A reworded title
@@ -107,6 +109,11 @@ on the same endpoint still scores as a dup — that is the point.
 **An incomplete-patch bypass is NOT a dup.** If the match is `resolved` and you reproduce it
 anyway, that's a *new* finding (regression / incomplete fix) — say so in the report and link the
 original.
+
+**Sibling hosts on a wildcard program usually are a dup.** Same class + same control on
+`a.target.com` after you (or someone) already filed it on `b.target.com` scores `LIKELY_DUP`
+unless you write a differentiator (different parameter, different impact, or a fix-bypass). A
+new subdomain is novelty for *hunting*, not automatic novelty for *reporting*.
 
 **If `engine/dedup.py` is unavailable, dedup manually — never skip the gate.** Pull disclosed
 reports (H1 Hacktivity / Bugcrowd crowdstream / program changelog via WebFetch) + your own prior
@@ -153,5 +160,6 @@ the tool's.
   with a written differentiator). A `LIKELY_DUP` report wastes the slot and your reputation.
 - **`web2-recon`** / **`offensive-osint`** — produce the subdomain / host / JS / endpoint lists
   that become the `novelty.py` observation. Re-run them to generate the next delta.
-- **`hunt-source-leak`** — a `changed_js` delta is the trigger to re-diff bundles for new routes,
-  params, and secrets introduced by the redeploy.
+- **`changed-js-deepdive`** — a `changed_js` / `new_js` delta is the trigger to diff the bundle
+  (`engine/jsdiff.py`) for new routes, params, secrets, and server-action ids. `hunt-source-leak`
+  is the follow-up when that diff also names a `.map`, `.env`, or spec file.

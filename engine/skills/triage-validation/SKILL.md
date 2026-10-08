@@ -55,6 +55,15 @@ Hacktivity, changelog, API docs, prior reports. Documented-as-designed → **kil
 | JWT | Forged/replayed token **does an action** |
 | Timing | n≥10 (prefer 30) interleaved, median delta — not one sample |
 | Blind | Unique OOB / marker |
+| CMDi / SSTI / XXE | Command output, file bytes, or OOB carrying the marker — `49` or a parser error is detection only |
+| Path traversal | A file line you should not receive |
+| Cache poison | A second client receives your marker |
+| Takeover | The hostname serves a marker you placed |
+| Smuggling | The follow-up request on that connection is the path you hid |
+| LLM | A tool side-effect or another user's data — not a paragraph that agreed with you |
+| Race | Extra credit/item **once** with a unique marker — not “I sent 20 requests” |
+| Mass assignment | Privileged field **persisted** on a later GET — not echo |
+| File upload | Executed or served as attacker content-type to another user — not 200 on POST |
 
 Reflection/error/status-only → **downgrade or kill**, do not inflate.
 
@@ -77,7 +86,7 @@ Missing CSP/HSTS/SPF/DKIM/DMARC; GraphQL introspection; banner/version without w
 | Clickjacking | Sensitive action + working UI PoC | Medium |
 | CORS | Credentialed browser read of PII/token | High |
 | CSRF | Email/password/IdP/money | High+ |
-| Rate-limit gap | Reachability **math** on OTP/reset (no exhaust) | High+ |
+| Rate-limit gap | Not standalone. File the logic bug you proved (reuse, step skip, response trust). Math can explain reachability; do not exhaust a code | Severity of that logic bug |
 | SSRF DNS | Internal body / cloud metadata marker | Medium+ |
 | Host header | Reset email link is OOB | High |
 | Session survives logout/reset | Body-diff identity + theft or reset chain | Medium–High (`hunt-session`) |

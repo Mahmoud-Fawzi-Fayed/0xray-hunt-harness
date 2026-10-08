@@ -27,10 +27,11 @@ Subdomain takeover is high-value because it allows an attacker to serve content 
 ## Attack Surface Signals
 
 **DNS signals** (non-exhaustive — any dangling CNAME to a provider that re-issues names first-come is a candidate; always check the current `can-i-take-over-xyz` matrix):
-- `CNAME` pointing to `*.github.io`, `*.gitlab.io`, `*.fastly.net`, `*.herokudns.com`, `*.wordpress.com`, `*.uservoice.com`, `*.zendesk.com`, `*.s3.amazonaws.com`, `*.azurewebsites.net`, `*.cloudapp.azure.com`, `*.trafficmanager.net`, `*.netlify.app`, `cname.vercel-dns.com`, `*.ghost.io`, `*.readthedocs.io`, `*.statuspage.io`, `*.pages.dev` (Cloudflare Pages), `*.webflow.io`, `*.surge.sh`, `*.bitbucket.io`, `*.firebaseapp.com`/`*.web.app`
+- `CNAME` pointing to `*.github.io`, `*.gitlab.io`, `*.fastly.net`, `*.herokudns.com`, `*.herokuapp.com`, `*.wordpress.com`, `*.uservoice.com`, `*.zendesk.com`, `*.s3.amazonaws.com`, `*.s3.<region>.amazonaws.com`, `*.s3-website-<region>.amazonaws.com`, `*.azurewebsites.net`, `*.cloudapp.azure.com`, `*.azurefd.net`, `*.blob.core.windows.net`, `*.trafficmanager.net`, `*.elasticbeanstalk.com`, `*.netlify.app`, `cname.vercel-dns.com`, `*.onrender.com`, `*.fly.dev`, `*.up.railway.app`, `*.hs-sites.com`, `*.ghost.io`, `*.readthedocs.io`, `*.statuspage.io`, `*.pages.dev` (Cloudflare Pages), `*.webflow.io`, `*.surge.sh`, `*.bitbucket.io`, `*.firebaseapp.com`/`*.web.app`
+- A `*.cloudfront.net` CNAME with a CloudFront error is usually **not** claimable: alternate domain names require a matching TLS cert, and cross-account moves require a DNS TXT you do not control. Fingerprint ≠ takeover.
 - NXDOMAIN or `SERVFAIL` on the CNAME target while the parent record still exists
 - NS records delegating to registrars/providers where the zone is no longer registered (NS-takeover — often full-zone control, higher impact than a single CNAME)
-- Dangling A/AAAA to a released cloud IP (re-claim by cycling instances in the same region/pool) — less common but high impact
+- Dangling A/AAAA to a **name you can request** (Azure `*.cloudapp.azure.com` / `*.cloudapp.net` in the same region). AWS public IPv4 from the shared pool is not a practical claim — do not cycle instances hoping to land an IP
 
 **HTTP response signals:**
 - `"There isn't a GitHub Pages site here"`
@@ -83,7 +84,8 @@ Subdomain takeover is high-value because it allows an attacker to serve content 
    - GitLab Pages: check project namespace
    - S3: attempt `aws s3api create-bucket --bucket <bucketname>`
    - UserVoice/Zendesk/WordPress: visit registration URL
-   - Fastly: check if origin hostname is unregistered
+   - Fastly: "unknown domain" is a **lead**, not proof. Fastly often refuses the attach when the parent apex is already on another customer account. Only a successful attach that serves your marker counts
+   - NS takeover: `dig NS dangling.target.com` — if the nameserver domain is expired/unregistered, **you** register it (your registrar account), serve NS, then publish a unique TXT/A. Proof is DNS answering from your nameserver **and** the HTTP marker. Higher impact than one CNAME. Do not touch the parent's other zones
 
 6. **Claim the resource** (only enough to prove control — do NOT serve malicious content, phishing, or anything that reaches real users; this is a hard safety rail):
    - Serve a minimal, benign page containing a unique synthetic marker (your researcher handle + per-engagement nonce + UTC timestamp) so the proof is unambiguous and attributable to you.
@@ -122,10 +124,7 @@ done < subdomains.txt
 nuclei -l subdomains.txt -t ~/nuclei-templates/http/takeovers/ -severity medium,high,critical
 ```
 
-**subjack with SSL:**
-```bash
-subjack -w subdomains.txt -t 100 -timeout 30 -ssl -c $GOPATH/src/github.com/haccer/subjack/fingerprints.json -v
-```
+`subjack` and its GOPATH fingerprint file are unmaintained. A hit from any scanner is a lead. Step 4 is the proof.
 
 **Provider fingerprint grep patterns:**
 ```bash
@@ -170,7 +169,7 @@ dig CNAME sub.target.com
 
 5. **GitHub/GitLab Pages namespace not reserved** — Organization renames, user accounts deleted, or repos made private/deleted while the Pages CNAME still points to the old namespace.
 
-6. **Wildcard DNS entries** — `*.target.com` pointing to a cloud provider means *any* unclaimed subdomain potentially resolves to claimable infrastructure.
+6. **Wildcard DNS** — `*.target.com` CNAME to a multi-tenant host that selects the site by `Host` (GitHub/GitLab Pages, S3 website, Vercel, Heroku, Zendesk) can make each name claimable. A wildcard **A/AAAA to one origin** is not a takeover. Do not file every name under the wildcard.
 
 7. **Acquired/divested company DNS not cleaned** — Post-acquisition, former brand subdomains (like `oberlo.com` under Shopify) retain CNAMEs to services that are no longer paid for.
 
@@ -181,8 +180,8 @@ dig CNAME sub.target.com
 **Defense: Manual fingerprint review before publishing**
 - Bypass: Use alternative error strings — providers change their 404 pages. Maintain an up-to-date fingerprint list. Some providers show *different* errors on HTTP vs HTTPS. Test both.
 
-**Defense: Scope restrictions (only main domain in scope)**
-- Bypass: Check program's asset list carefully — `*.target.com` wildcards often include subdomains implicitly. Escalate impact to get it in scope.
+**Defense: Scope lists only the apex**
+- Check the asset list. A program wildcard `*.target.com` includes the name. If the name is not in scope, do not claim it and do not host content there. Impact does not pull an out-of-scope host into scope.
 
 **Defense: "Can't reproduce" responses due to timing**
 - Bypass: Screenshot immediately after claiming. Record a video walkthrough. The window can be short for popular subdomains.
@@ -191,7 +190,7 @@ dig CNAME sub.target.com
 - Bypass: Some providers (GitHub Pages, Netlify) auto-provision TLS for claimed domains. Others don't — show HTTP takeover and note TLS would be resolved by provider on claim.
 
 **Defense: Provider-side validation (Fastly verifying domain ownership)**
-- Bypass: Some Fastly configurations don't validate origin hostnames. Check if the CNAME target is a generic Fastly backend hostname vs. a customer-verified one. Try claiming anyway and observe behavior.
+- Fastly often blocks the attach when the parent apex is already on another account. Try the attach once; a reserved/already-claimed error is a closed lead. A generic `*.map.fastly.net` CNAME plus a successful attach that serves your marker is the only Fastly proof.
 
 **Defense: Rate limiting on subdomain enumeration**
 - Bypass: Use passive-only sources (SecurityTrails, Shodan, crt.sh, VirusTotal) to avoid triggering WAF/IDS. DNS resolution doesn't touch the web server.
@@ -204,7 +203,7 @@ dig CNAME sub.target.com
 ## Gate 0 Validation
 
 1. **What can the attacker DO right now?**
-   Can you register the unclaimed resource (GitHub repo, S3 bucket, Heroku app, UserVoice account) and serve arbitrary content — including phishing pages, credential harvesters, or malicious scripts — under the target's trusted domain name?
+   Can you register the unclaimed resource and serve **one benign marker** (handle + nonce) over `https://subdomain.target.com`? That is the proof. Do not host phishing, credential harvesters, or malware. Describe those as impact the program can infer; do not demonstrate them.
 
 2. **What does the victim LOSE?**
    Users lose trust and safety: they see a company-branded URL serving attacker content. The company loses brand integrity, potentially leaks session cookies if the subdomain is in `domain=.target.com` scope, and may have OAuth/SSO flows hijacked. Depending on CSP configuration, XSS against the main application may be possible.
@@ -256,8 +255,8 @@ The following coordinated-disclosure / writeup cases extend this skill with **mo
 
 **Fastly CDN dangling-service technique (general, not a single disclosed report):**
 - Fingerprint: subdomain returns `Fastly error: unknown domain. Please check that this domain has been added to a service`
-- Claim flow: sign up for Fastly free trial → create new CDN service → attach the dangling hostname as the service domain
-- Root cause: Fastly historically does not verify CNAME ownership on service-creation; any CNAME pointing into Fastly's anycast can be attached to a fresh service
+- Claim flow: sign up for Fastly free trial → create new CDN service → attach the dangling hostname. If Fastly returns a reserved/parent-already-claimed error, it is **not** takeover — stop
+- Root cause: some Fastly configs still allow attaching an unclaimed hostname; many do not when the apex is already on another account. Claimability is the proof, not the error string
 - Potential ATO chain: chains to CSP-bypass + JS-injection if the parent domain trusts the `assets.`/CDN host for `script-src`
 
 ---
@@ -301,9 +300,9 @@ Subdomain takeover by itself is Low-Medium / Informational on most mature progra
 ### Chain 5 — Takeover at Email DNS (DKIM / SPF / MX) → Email Spoofing → Phishing Trusted by Parent Brand
 
 - **A.** Enumerate the target's email DNS — DKIM selectors (`selector1._domainkey.target.com`), SPF includes (`include:_spf.takeover-candidate.com`), MX records (`mx.target.com → defunct-provider.example`).
-- **B.** Take over any DKIM-selector or SPF-include host. Now the attacker can publish DKIM/SPF records that authorise their own server to send mail "from" `@target.com`.
-- **C.** Send phishing email `From: support@target.com` to victim. Recipient mail server passes SPF + DKIM checks (because the takeover server is now authorised). Email lands in inbox with `target.com` brand, no security warning.
-- **Impact:** Highly-effective phishing campaign exploiting the parent brand. Victims trust the email because every authentication check passes. Credential harvesting, BEC fraud, supply-chain access.
+- **B.** Prove you control that hostname (benign TXT or the HTTP marker). Do not send mail to real users.
+- **C.** Read the parent's DMARC. `p=reject` or `p=quarantine` still blocks a spoof even if one include is yours. Impact is "this host would pass SPF/DKIM" only when you can show the include/selector is dangling **and** DMARC would accept it (a message to an inbox you own is the proof). Otherwise report the takeover, not email ATO.
+- **Impact:** Brand-trusted mail **if** that authentication result was shown. Theoretical "could phish" is not the finding.
 - **Real shape:** Multiple historical disclosures on DKIM selector takeover / SPF include chain hijacking. Cross-refs DMARC / SPF / DKIM section in `offensive-osint`.
 
 ### Operator-level pattern
@@ -334,7 +333,7 @@ Cross-references:
 - **`hunt-api-misconfig`** — CORS regexes routinely allowlist a takeoverable subdomain. Chain primitive: Subdomain takeover + CORS `*.target.com` with credentials → credentialed cross-origin API read → mass IDOR.
 - **`hunt-xss`** — A claimed subdomain is same-origin to session-cookie-domain siblings. Chain primitive: Subdomain takeover at `feedback.target.com` + cookie scope `.target.com` → JS hosted on takeover host reads main-app cookies → session hijack.
 - **`security-arsenal`** — Load the 27+ Subdomain Takeover Fingerprint Table (NoSuchBucket, "no such app", GitHub Pages 404 strings, Heroku, Shopify, Fastly) and the `subzy`/`subjack` automation patterns.
-- **`triage-validation`** — Apply the Unique-Marker gate: takeover claim is informational on its own; submit only after publishing a unique HTML marker on the claimed host AND demonstrating a downstream impact (cookie read, OAuth chain, CSP bypass).
+- **`triage-validation`** — Unique-marker gate: the marker served on `https://subdomain.target.com` is the takeover proof. File Low if none of the five chains apply; raise severity only for a chain you actually demonstrated.
 
 ## Before you report — dedup gate
 

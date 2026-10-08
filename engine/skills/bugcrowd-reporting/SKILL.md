@@ -9,6 +9,8 @@ description: "Bugcrowd-specific reporting tactics complementing report-writing: 
 
 This skill encodes patterns that apply specifically to Bugcrowd's submission flow. For the generic per-platform templates (HackerOne / Bugcrowd / Intigriti / Immunefi report bodies), use the `report-writing` skill. For the 7-Question Gate before deciding to report at all, use `triage-validation`.
 
+**Harness rail:** STOP at draft. Do not call `submit_bugcrowd` or click Submit unless the operator explicitly approves that report. Every filing-order and VRT tip below is for the draft you prepare, not an auto-submit.
+
 ---
 
 ## 1. VRT Category Selection — Search & Fallback Strategy
@@ -39,9 +41,9 @@ Never select a VRT that misrepresents the bug just to get a higher default sever
 | Password oracle without rate limit | Broken Authentication & Session Management → Authentication Bypass → Other | Server Security Misconfiguration → No Rate Limiting on Form → Login |
 | GraphQL introspection / APQ allowlist bypass | Server Security Misconfiguration → Other (justify in body) | Broken Access Control → Other |
 | Username → real name PII enumeration | Sensitive Data Exposure → PII Leakage / Disclosure of Secrets → Non-Corporate User | Broken Access Control → Other |
-| State desync on security-sensitive action | Application-Level DoS → Other (with state-desync framing) | Server Security Misconfiguration → Other |
+| State desync on security-sensitive action | Broken Access Control → Other (the security state actually changed) | Server Security Misconfiguration → Other. Do not file this as Application-Level DoS — that node is resource exhaustion, which you do not deliberately trigger |
 | Email/SMS pumping on auth-flow endpoint | Server Security Misconfiguration → No Rate Limiting on Form → Email-Triggering / SMS-Triggering | Server Security Misconfiguration → No Rate Limiting on Action |
-| Token brute-force (email-change OTP, password reset) | Broken Authentication → Authentication Bypass → Other | Server Security Misconfiguration → No Rate Limiting on Action |
+| Weak / reusable OTP on email-change or password reset | Broken Authentication → Authentication Bypass → Other | Server Security Misconfiguration → No Rate Limiting on Action. Classify the limiter; do not run the keyspace |
 
 ### 1.4 If no good VRT exists
 
@@ -103,7 +105,9 @@ The closest VRT category for this finding is "No Rate Limiting on Form → Login
 2. **The chained outcome is "Account Takeover,"** explicitly listed under the program → Focus Areas → Critical (P1) examples. This finding is one of two independent links that make that chain work; the other is submission XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX.
 3. **The two findings have independent fix surfaces.** Per the program's "one fix = one bounty" rule they should be evaluated as two separate findings whose chain raises the joint severity.
 
-The "P4 = No Rate Limiting on Login Form" default applies to ordinary login pages where brute-force is bounded by lockout policies. This endpoint has neither lockout nor throttle, and the result of brute force is the *user's actual password* (not a session) — making the impact significantly higher than the default VRT severity assumes.
+The "P4 = No Rate Limiting on Login Form" default applies to ordinary login pages where a limiter or lockout bounds guesses. This endpoint has neither, and a correct guess returns the user's durable password rather than a session — higher impact than the default node assumes.
+
+The PoC attached to a rate-limit or oracle report classifies the limiter: a handful of requests, the rate-limit headers, and whether a lockout exists. It does not include a wordlist, a keyspace run, or a victim password recovered by guessing. Reachability is the entropy of the token versus the observed window, computed, not exhausted.
 ```
 
 ### 3.3 Tone guidelines

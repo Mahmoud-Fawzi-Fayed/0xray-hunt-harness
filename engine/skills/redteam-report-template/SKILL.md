@@ -91,6 +91,10 @@ This is the field that distinguishes red-team deliverables from bug-bounty repor
 - **Suspected (1 signal)** — single indicator, not confirmed (rare — usually drop)
 - **Out-of-band** — finding from passive recon, not actively tested
 
+### Proven vs detected
+
+Ship **Confirmed** only with one of: a unique marker in the response, a true-vs-false body-diff, n≥10 interleaved timing whose ranges separate, or an OOB callback that returned the marker (file bytes or command output). A banner, a reflected string, one slow sample, or a 200 with the same body is **Suspected** and stays out of the executive summary. A DNS hit alone does not upgrade a finding to RCE or metadata theft.
+
 ---
 
 ## Mistakes to avoid (from authorized-engagement)
@@ -100,11 +104,11 @@ If a finding was confirmed and then stopped working, that is almost always a CLI
 
 ### 2. Don't hedge in the Impact section
 Bad: "An attacker could potentially be able to access user data, which may lead to..."
-Good: "An attacker reads any user's profile data. Demonstrated on test user `victim@target.com` at 14:22 IST."
+Good: "An attacker reads any user's profile data. Demonstrated on test user `victim@target.com` at 14:22 UTC."
 
 ### 3. Don't generic-CIA the impact
 Bad: "Loss of confidentiality and integrity of customer data"
-Good: "Read access to 247,000 customer records including PAN cards, addresses, GST numbers. India DPDPA Section 33 mandates 72-hour breach disclosure to DPB."
+Good: "Read access to 247,000 customer records including PAN cards, addresses, GST numbers. India's DPDP Act 2023 §8(6) requires breach intimation to the Data Protection Board and every affected user; the DPDP Rules set a 72-hour deadline for the detailed report."
 
 ### 4. Don't list every recon finding as a finding
 Recon notes (subdomains found, ports open, technologies fingerprinted) belong in a separate **Recon / Attack Surface** appendix, not the findings list. A finding must have an attacker-attainable outcome.
@@ -165,7 +169,7 @@ Each finding MUST have reproducible steps. The PoC section is what proves the fi
 
 ```bash
 # Prerequisite: pandoc installed
-brew install pandoc
+brew install pandoc   # macOS; on Debian/Ubuntu: apt-get install -y pandoc
 
 # Convert
 pandoc REPORT_FINAL.md \
@@ -300,6 +304,8 @@ Pre-delivery checklist:
 - [ ] Spell-check (especially client company name, product names)
 - [ ] All tool versions noted in methodology
 - [ ] Status field set correctly on every finding (especially patched-mid-engagement)
+- [ ] **Confirmed** only with a unique marker, true-vs-false body-diff, n≥10 interleaved timing, or an OOB callback that returned file bytes / command output (a banner or DNS-only hit stays **Suspected**)
+- [ ] Operator approved sending this draft to the client — never auto-deliver
 
 ---
 

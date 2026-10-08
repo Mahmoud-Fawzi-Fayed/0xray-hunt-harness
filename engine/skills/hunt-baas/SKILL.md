@@ -43,6 +43,21 @@ curl -s "https://firebasestorage.googleapis.com/v0/b/$BUCKET/o"
 curl -s -X POST "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=$APIKEY" \
   -H 'Content-Type: application/json' -d '{"returnSecureToken":true}'
 # Re-read Firestore/RTDB with Authorization: Bearer <idToken>
+
+# get and list are different rules. One document id you actually saw in JS/traffic:
+curl -s "https://firestore.googleapis.com/v1/projects/$PID/databases/(default)/documents/$COLLECTION/$DOCID"
+# Collection names the JS never spelled (still not a dump):
+curl -s -X POST "https://firestore.googleapis.com/v1/projects/$PID/databases/(default)/documents:listCollectionIds" \
+  -H 'Content-Type: application/json' -d '{}'
+# runQuery is a list. One foreign document, then stop — do not page the collection.
+curl -s -X POST "https://firestore.googleapis.com/v1/projects/$PID/databases/(default)/documents:runQuery" \
+  -H 'Content-Type: application/json' \
+  -d "{\"structuredQuery\":{\"from\":[{\"collectionId\":\"$COLLECTION\"}]}}"
+
+# Storage download tokens appear in JS as ?alt=media&token=. Fetch **one** object you do not own.
+# Do not brute the UUID. Encode path slashes as %2F. A world-listable prefix + leaked token is the finding.
+curl -s -o /tmp/fbobj -w "%{http_code} %{size_download}\n" \
+  "https://firebasestorage.googleapis.com/v0/b/$BUCKET/o/${PATH//\//%2F}?alt=media&token=$TOKEN"
 ```
 
 `auth != null` plus working anonymous sign-in is cross-tenant read if the documents are not scoped to `request.auth.uid`. Show B's document with A's anon token. Rules that check `request.auth.uid == resource.data.uid` and actually enforce it are closed — say so after one failed cross-read.
@@ -72,6 +87,23 @@ curl -s "https://$REF.supabase.co/storage/v1/object/public/$BUCKET/"
 curl -s -X POST "https://$REF.supabase.co/storage/v1/object/list/$BUCKET" \
   -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
   -H 'Content-Type: application/json' -d '{"prefix":"","limit":10}'
+
+# Schemas other than public. Repeat for private, storage, graphql_public,
+# and any name the OpenAPI root lists. Empty OpenAPI is "not exposed", not a leak.
+curl -s "https://$REF.supabase.co/rest/v1/" \
+  -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+  -H "Accept-Profile: private" -H "Accept: application/openapi+json"
+
+# FK embed: a parent you can read should not return another user's child rows
+curl -s "https://$REF.supabase.co/rest/v1/$TABLE?select=*,profiles(*)" \
+  -H "apikey: $ANON" -H "Authorization: Bearer $ANON"
+
+# Views: Postgres views default to owner rights and skip the base table's RLS.
+# If OpenAPI lists a view (often *_view / *_public), GET it as anon and body-diff vs the table.
+# SECURITY DEFINER RPC with a caller-controlled id is the same class — one RPC, one foreign row.
+
+# Signed URL: do not brute tokens. If JS/email embeds a createSignedUrl for another user's object, GET it once.
+# Path confusion on the signed path (../, extra prefix) only if the signature still verifies — one object you do not own.
 ```
 
 Decode every JWT in the bundle. `"role":"service_role"` on the client is the bug even before you call the API — then prove it with one `select=*` the anon key is denied. GraphQL, if enabled, is `POST /graphql/v1` with the same headers. Realtime subscriptions that deliver other tenants' rows are the same bug on `wss://$REF.supabase.co/realtime/v1/websocket`.
@@ -82,15 +114,17 @@ Write probe (authorized engagements only): one `POST /rest/v1/$TABLE` with a mar
 
 | Product | First reads | Open-rule signal |
 |---|---|---|
-| PocketBase | `GET /api/collections` then `GET /api/collections/users/records` | Collection API rule empty / "Public" and records return |
-| Appwrite | `GET /v1/databases` with `X-Appwrite-Project` | `any` / guest role can `documents` list |
-| Nhost / Hasura | `POST /v1/graphql` `{"query":"{ __schema { queryType { name } } }"}` | Anonymous role returns user tables; `x-hasura-admin-secret` in the client bypasses everything |
+| PocketBase | `GET /api/collections` then `GET /api/collections/users/records` (older servers: `GET /api/records/users`) | Collection API rule empty / "Public" and records return |
+| Appwrite | `GET /v1/databases/{db}/collections/{col}/documents` with `X-Appwrite-Project` (ids from the JS, not guessed) | `any` / guest role returns another user's documents |
+| Nhost / Hasura | `POST /v1/graphql` `{"query":"{ __schema { queryType { name } } }"}`. If the client already sends `x-hasura-role`, retry one query with a higher role (`user`, then `admin`). | A row the anon role cannot read. `x-hasura-admin-secret` in the client is the bug once one forbidden query succeeds. A role header the server ignores is not a finding |
 
 Same proof standard: another principal's row, or an admin secret that returns one.
 
+AWS Amplify / AppSync: `aws-exports.js` or `amplifyconfiguration.json` carries `aws_appsync_graphqlEndpoint` and `aws_appsync_apiKey`. The key is supposed to be public. Send **one** query the client already issues, with header `x-api-key`. Another user's row is the finding. An empty public `__schema` is not.
+
 ## Validation
 
-- Show the **other** account's data (redact in the write-up per `evidence-hygiene`). Your own row after you inserted it only proves a write — say which.
+- Show the **other** account's data (redact in the write-up per `evidence-hygiene`). Your own row after you inserted it only proves a write — say which. A view that returns the same foreign row the table RLS hid is the finding — quote the view name.
 - Admin/service key: paste the decoded `role` claim and one forbidden read that succeeded. Do not keep using the key.
 - Open write: one marker, re-read, stop. A `201` you did not re-read is weaker but acceptable if the body echoes a server id.
 - Predictable storage URLs: fetch one object you do not own (`/avatars/1.jpg`, `/uid/passport.pdf`). Listing plus a private object is High; a full PII or credential dump is Critical. "Anon key in JS" with no readable foreign data is not a finding.

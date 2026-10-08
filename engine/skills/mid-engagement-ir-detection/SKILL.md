@@ -16,10 +16,9 @@ Trigger when:
 - Lockout / error rates change between test windows (especially LOCKED count for credential attacks)
 - Engagement is "assume breach" or "white box" — client knows you're testing
 
-DO NOT use for:
-- Bug bounty (client doesn't know you're there; no real-time IR)
-- Pure recon (no state-change happening)
-- One-off vulnerability scanning (no temporal dimension)
+The don't-retract rule applies to **every** authorized test, including bug bounty: if a confirmed signal disappears, keep the original PoC and record the new state. Do **not** file "the SOC patched us" as a bounty submission — that writeup is a red-team deliverable for a client who hired you to observe their response.
+
+Skip the skill only when there is no second sample (pure recon, a one-shot request with nothing to diff).
 
 ---
 
@@ -83,7 +82,10 @@ If any delta is significant — **investigate, don't retract**.
 - Original payloads return identical response → no signal at all on recheck
 - Body size identical to baseline (login page reflection)
 - Timing reverts to baseline regardless of payload
-- New cookie or header in responses (e.g., `cf-bm`, `__cf_bm`, `awselb`)
+- New cookie or header in responses (e.g., `cf-bm`, `__cf_bm`, `awselb`, `cf-mitigated`)
+- Challenge widget appearing mid-session (Cloudflare Turnstile, hCaptcha, `Server: cloudflare` where it was origin)
+- TLS handshake fails or RST only from **your** client hello (JA3/JA4 fingerprint block) while a second browser/stack still connects
+- New `Content-Security-Policy` / nonce that was absent at T0
 - Specific keyword in URL/body now triggers different response code (403, 406, 429)
 
 **Confirmation:** retry with WAF-evasion variants:
@@ -126,17 +128,19 @@ Recommendation:
 
 ### Observation 2 — Active concurrent attacker
 
+Works on any IdP/login you are authorized to classify. Entra `AADSTS50053` is the usual tell; same math on Okta `LOCKED_OUT` / `E0000119`, a generic `/login` that returns "locked" / 423, or a sudden jump in 401s on users you have not touched.
+
 **Symptoms:**
-- Many `AADSTS50053` (LOCKED) responses despite your 1-attempt-per-user discipline
+- Many lockout-class responses despite 1-attempt-per-user (or zero-password enum)
 - Lockouts cluster alphabetically or by some other sort key
 - New lockouts appear DURING your engagement (diff before/after)
-- LOCKED rate exceeds expected baseline (in our engagement: 11% of all attempts → red flag)
+- Lockout count exceeds **this session's** pre-test baseline — do not reuse a percentage from an earlier engagement
 
 **Math check:**
-- Your discipline: 1 attempt per user lifetime
-- Smart Lockout default: lockout after 10 failed attempts; lockout duration starts at 60 seconds and grows with each subsequent lockout (not a flat 10-minute window)
-- Therefore: IF tool logs confirm exactly 1 attempt/user (no burst retries, no parallel-goroutine duplicate sends, no tool misconfiguration), you cannot mathematically cause Smart Lockout — verify `journal.jsonl` shows 1 attempt/user before asserting this
-- Therefore: every NEW AADSTS50053 accumulating during the window (per before/after diff) was caused by someone else; pre-existing locks may stem from the legitimate user's own failures or a prior test run, so attribute only the newly-accumulating locks to an external party
+- Your discipline: 1 password attempt per user, serial, no pattern list (`m365-entra-attack`, `okta-attack`). Enumeration that does not POST a password cannot cause Smart Lockout / Okta lockout.
+- Entra default: Azure Public threshold 10, Azure US Government threshold 3; first lockout 60 seconds, then longer. Not a 10-minute window. Okta orgs often use 3–10 — treat 3 as the planning number if you cannot read it.
+- Confirm the journal shows 1 attempt/user and no parallel duplicate sends before you assert you cannot have caused the lock.
+- Attribute only NEW lockouts that accumulated during the window on users this run did not attempt. Pre-existing locks may be the user's own failures or an earlier test.
 
 **Confirmation:**
 - Sort locked accounts alphabetically; if they cluster, attacker is using sorted username list
@@ -160,10 +164,10 @@ Description: The pattern (alphabetical clustering, real-time accumulation,
 including system mailboxes) is consistent with an external attacker performing
 a username-list-driven password spray attack against the tenant.
 
-Impact: An external adversary is actively attempting to compromise corporate
-M365 accounts. The attacker has knowledge of the user-email schema and a
-password-guess wordlist. <List of locked accounts is now in attacker's hands>
-(Smart Lockout differentiates valid from invalid usernames).
+Impact: Principals that return AADSTS50053 exist in the tenant (invalid users
+get 50034, not a lock). The new locks during this window are consistent with
+someone else submitting passwords. Do not write that "the attacker possesses
+the list" — you observed the lock responses, not their wordlist.
 
 Recommendation (CRITICAL — within 24h):
 1. Open a P1 incident with the SOC. Pull Entra sign-in logs for the <N> locked
@@ -334,7 +338,7 @@ This is a more valuable deliverable than "I confirmed SQLi" alone, because it ca
 - `m365-entra-attack` — specific case for M365 / Smart Lockout differential
 - `evidence-hygiene` — how to capture and redact PoC evidence properly
 - `report-writing` — finding template for IR observations
-- `bb-methodology` — note that this skill is INAPPROPRIATE for bug bounty (no real-time IR there)
+- `bb-methodology` — on a bounty, use this skill only for the don't-retract diff. Do not submit the SOC-responsiveness writeup; the program did not hire you to grade their IR.
 
 ---
 
@@ -348,6 +352,6 @@ This is a more valuable deliverable than "I confirmed SQLi" alone, because it ca
 
 - **`redteam-mindset`** — This skill is a specific application of the broader red-team discipline. Engagement flow: `redteam-mindset` loaded at engagement start → baseline-capture habit built in → when response patterns shift mid-test, `mid-engagement-ir-detection` activates to capture the SOC-patch state as a NEW finding (defensive-action observed = client capability metric, not "the bug got fixed so we lose the finding").
 - **`evidence-hygiene`** — Mid-engagement IR detection produces TWO states (pre-patch and post-patch); both need disciplined evidence capture or the second finding can't be defended. Engagement flow: baseline screenshots + timestamped request/response dumps at session start → response shift detected → second capture set with explicit timestamp delta → both packaged together.
-- **`m365-entra-attack`** — The single richest source of mid-engagement IR signal in modern engagements. Engagement flow: M365 spray triggers AADSTS50053 lockout → baseline lockout policy captured → if lockout window changes mid-test (e.g., from 60min to 24hr) → `mid-engagement-ir-detection` captures the policy change as a finding ("CA policy hardened mid-engagement; defensive response measured").
+- **`m365-entra-attack`** — The usual source of a lockout diff. Engagement flow: one authorized password attempt per user → baseline `AADSTS50053` count captured → if new locks accumulate on users you did not attempt, or the tenant's lockout duration jumps from the 60-second default to a much longer custom value mid-test → this skill records that as a separate observation. Do not treat the lockout diff as proof you should spray further.
 - **`enterprise-vpn-attack`** + **`vmware-vcenter-attack`** — Critical-infrastructure CVE exploitation is the highest-noise activity; expect SOC to patch within hours. Engagement flow: confirmed VPN/vCenter CVE → baseline capture BEFORE exploitation attempt → if appliance updates mid-test, capture as defensive-action finding → report both the original CVE AND the IR-response.
 - **`redteam-report-template`** — IR-observation findings get their own Subject in the deliverable, framed differently from technical-vuln findings. Engagement flow: `mid-engagement-ir-detection` captures behavior-change event → `triage-validation` 7-Question Gate (specifically: "is the behavior-change attributable to my activity?") → `redteam-report-template` packages as a "client capability observation" with explicit timeline and detection-latency metric.

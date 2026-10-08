@@ -18,7 +18,7 @@ One unauthenticated Type-1 message. The Type-2 challenge's AV_PAIRS name the com
 
 ## Decision tree
 
-1. **Offer.** `GET` the URL. `WWW-Authenticate: NTLM` or `Negotiate` on an anonymous response means continue. Paths that often do this on IIS, SharePoint, Exchange, ADFS, RD Web, WSUS: `/_api/web/CurrentUser`, `/_vti_bin/`, `/EWS/Exchange.asmx`, `/Autodiscover/Autodiscover.xml`, `/owa/`, `/Microsoft-Server-ActiveSync`, `/rpc/rpcproxy.dll`, `/RDWeb/`, `/certsrv/`, `/PowerShell`. Any in-scope URL that sends the header is enough — do not scrape a wordlist.
+1. **Offer.** `GET` the URL. `WWW-Authenticate: NTLM` or `Negotiate` on an anonymous response means continue. Paths that often do this on IIS, SharePoint, Exchange, ADFS, RD Web, WSUS: `/_api/web/CurrentUser`, `/_vti_bin/`, `/EWS/Exchange.asmx`, `/Autodiscover/Autodiscover.xml`, `/owa/`, `/Microsoft-Server-ActiveSync`, `/rpc/rpcproxy.dll`, `/RDWeb/`, `/certsrv/`, `/PowerShell`. Any in-scope URL that sends the header is enough — do not scrape a wordlist. Off-HTTP, the same anonymous Type-2 leak exists on RDP, MSSQL, SMTP/IMAP/POP3, and Telnet: nmap's `rdp-ntlm-info`, `ms-sql-ntlm-info`, `smtp-ntlm-info` (and sibling) scripts, or a null-session `nxc smb <host>`, print the same AV_PAIRS. In-scope hosts only; the decode below is identical.
 2. **Type-1.** Send the negotiate message below on a **keep-alive** HTTP/1.1 connection. Many stacks put the Type-2 in the `401` to this same request; some close the socket first. If curl shows only the scheme name, repeat with a raw socket or Burp Repeater (`Connection: keep-alive`).
 3. **Decode AV_PAIRS** from `WWW-Authenticate: NTLM <base64>`. If the blob does not start with `NTLMSSP\0` and message type 2, it is not a capture.
 4. **Write down** NetBIOS computer, NetBIOS domain, DNS computer, DNS domain, DNS tree, and timestamp. Those strings are the finding.
@@ -34,9 +34,15 @@ AV_PAIR ids: `1` computer (NetBIOS), `2` domain (NetBIOS), `3` DNS computer, `4`
 ## Capture
 
 ```bash
-curl -sk --http1.1 -D - -o /dev/null \
-  -H "Authorization: NTLM TlRMTVNTUAABAAAAB4IIogAAAAAAAAAAAAAAAAAAAAAGAbEdAAAADw==" \
-  "https://TARGET/PATH" | tr -d '\r' | grep -i "^WWW-Authenticate:"
+# IIS/ADFS sometimes return a Type-2 blob only for Negotiate, not the scheme word NTLM.
+# A bare "NTLM" or "Negotiate" with no base64 means the server has not answered yet —
+# resend this Type-1 on the same keep-alive connection. Do not stop at the scheme name.
+for SCHEME in NTLM Negotiate; do
+  echo "== $SCHEME"
+  curl -sk --http1.1 -D - -o /dev/null \
+    -H "Authorization: $SCHEME TlRMTVNTUAABAAAAB4IIogAAAAAAAAAAAAAAAAAAAAAGAbEdAAAADw==" \
+    "https://TARGET/PATH" | tr -d '\r' | grep -i "^WWW-Authenticate:"
+done
 ```
 
 ```python
@@ -49,12 +55,19 @@ s = ctx.wrap_socket(socket.create_connection((HOST, 443)), server_hostname=HOST)
 s.sendall(
     f"GET {PATH} HTTP/1.1\r\nHost: {HOST}\r\n"
     "Authorization: NTLM TlRMTVNTUAABAAAAB4IIogAAAAAAAAAAAAAAAAAAAAAGAbEdAAAADw==\r\n"
-    "Connection: close\r\n\r\n".encode()
+    "Connection: keep-alive\r\n\r\n".encode()
 )
 data = b"".join(iter(lambda: s.recv(8192), b""))
-m = re.search(rb"WWW-Authenticate:\s*NTLM\s+([A-Za-z0-9+/=]{20,})", data, re.I)
+m = re.search(rb"WWW-Authenticate:\s*(?:NTLM|Negotiate)\s+([A-Za-z0-9+/=]{20,})", data, re.I)
 b = base64.b64decode(m.group(1))
-assert b[:8] == b"NTLMSSP\x00" and b[8] == 2
+# Negotiate often wraps NTLMSSP in SPNEGO. A raw NTLM Type-2 starts at offset 0;
+# a SPNEGO blob does not — search instead of assuming the first 8 bytes.
+if not b.startswith(b"NTLMSSP\x00"):
+    i = b.find(b"NTLMSSP\x00")
+    if i < 0:
+        raise SystemExit("no NTLMSSP in blob")
+    b = b[i:]
+assert b[8] == 2 and len(b) >= 48
 tn_len, _, tn_off = struct.unpack_from("<HHI", b, 12)
 ti_len, _, ti_off = struct.unpack_from("<HHI", b, 40)
 names = {1: "NetBIOS computer", 2: "NetBIOS domain", 3: "DNS computer",

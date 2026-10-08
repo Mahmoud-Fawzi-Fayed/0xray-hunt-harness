@@ -44,7 +44,7 @@ Before touching any tool:
 
 1. **Confidentiality** -- steal data the attacker shouldn't see
 2. **Integrity** -- modify data the attacker shouldn't change
-3. **Availability** -- disrupt service (app-level DoS only)
+3. **Availability** -- do not deliberately degrade the service. If a bug has a denial-of-service side effect, prove the primitive once with a non-destructive oracle and stop.
 4. **Account Takeover** -- control another user's account
 5. **RCE** -- execute commands on the server
 
@@ -114,7 +114,7 @@ Before touching any tool:
 
 ### Anti-Patterns (Stop Doing These)
 
-- **Program hopping**: Stick with one target minimum 2 weeks / 30 hours
+- **Program hopping**: Do not leave a live in-scope target after one quiet hour. Rotate vuln class or endpoint first. Switch programs only when scope is exhausted or the operator says so.
 - **Tool-only hunting**: Automation finds duplicates. Manual testing finds unique bugs.
 - **Rabbit hole**: Max 45 min per parameter. Set a timer. If stuck, sleep on it.
 - **No goal**: "Just looking around" = wasted time. Always Define first.
@@ -182,7 +182,7 @@ Google Dorks -> JS file download -> Hidden param discovery -> API mapping
 | Live subdomains with tech stack | Phase 2 (Mapping) |
 | Known software (WordPress, Jira) | Check CVEs + defaults immediately |
 | Cloud resources (S3, Firebase) | Test permissions (read/write/list) |
-| Nothing after 5 min on a host | Skip, try next host (5-minute rule) |
+| Only 401/403/404 | Not empty. Fingerprint the stack and queue one bypass pass (headers, verb, path normalization). Skip only when the host is out of scope or has no DNS/TLS. |
 
 **Command**: `/recon target.com`
 
@@ -262,7 +262,7 @@ What did you find?
 |   +-- Cookie is HttpOnly? -> Force email change via XHR -> ATO
 |   +-- Self-XSS only? -> Find CSRF to trigger it
 +-- IDOR
-|   +-- Can read PII? -> Automate scraping, show scale
+|   +-- Can read PII? -> Prove ONE foreign record, estimate scale from the ID scheme, stop. Do not scrape.
 |   +-- Can change password/email? -> Direct ATO
 |   +-- UUID only? -> Find UUID leak source, then retry
 +-- SSRF
@@ -453,6 +453,18 @@ For any iteration that runs more than 5 times, **use Python (with try/except per
 
 **Lesson from an authorized engagement:** A zsh array-iteration verb-tampering test silently produced no curl invocations across 20+ iterations (zsh ate the array). Output looked like "HIT [GET] /_api/web → " repeated for every probe but the actual response was missing. ~50 probes worth of testing lost. Switching the test to Python with explicit per-iteration logging surfaced the real results.
 
+### OOB Gate
+
+A DNS callback alone is detection. Proven means the callback's unique label identifies the sink AND you have one of: response data that left the server, a follow-on request that reached metadata or an internal service, or a state change. DNS-only stays informational.
+
+### Server-Policy-vs-State
+
+A header, IAM statement, CSP, or config that *says* an action is allowed is not the bug. Show the server did it: the other user's object is in the body, the role actually changed, the file bytes came back. Policy without that state is a lead.
+
+### Pre-Severity Gate
+
+Do not label a finding Critical or High until the multi-tool reproduction bar above is met and the impact sentence is an action you performed. "Could allow" is not a severity.
+
 ---
 
 ## Related Skills & Chains
@@ -461,6 +473,7 @@ For any iteration that runs more than 5 times, **use Python (with try/except per
 - **`bug-bounty`** — When the user asks a generic "what should I do" or starts a new target. Workflow primitive: `bug-bounty` is the orchestrator that names which `hunt-*` skills to load by topic; this skill (`bb-methodology`) provides the 5-phase workflow that orchestrator runs against.
 - **`triage-validation`** — When a finding completes Phase 4 and is about to be written up. Workflow primitive: Phase 5 explicitly calls `/validate` (the 7-Question Gate); only findings that pass all 7 questions get handed off to `report-writing`.
 - **`offensive-osint`** + **`web2-recon`** — When Phase 1 (Recon) is active. Workflow primitive: Phase 1's "Wide approach" delegates to `offensive-osint` for asset arsenal and `web2-recon` for the live-host + URL pipeline.
+- **`evidence-hygiene`** — When Phase 5 is collecting PoC screenshots / HARs. Workflow primitive: before any cookie / PII appears in a screenshot, hand off to `evidence-hygiene` for the redaction protocol.
 
 ---
 
@@ -509,4 +522,3 @@ The same applies in reverse: if you've been hunting a candidate for 4+ hours and
 The discipline rules in this file — OOB Gate, Marker Discipline, Body-Diff Rule, Statistical-Sample Rule, Server-Policy-vs-State, Pre-Severity Gate, Shell-Loop Ban — are not methodology. They are quality gates. Methodology is the order of operations; these are the validation guarantees at each step.
 
 Verified across Phase 2D's hardened-lab campaign: 8/8 discipline rules fired correctly against fake-bug-shaped behavior (URL echo dressed as XSS, word collision dressed as reflection, status-code-only "bypasses" with byte-identical bodies, 200-OK leak-claims with no actual leak data). Validation rates fall sharply when these rules get skipped. The friction is the feature — if a rule feels obstructive, that's it doing its job. The findings it kills are the half that would have come back N/A anyway.
-- **`evidence-hygiene`** — When Phase 5 is collecting PoC screenshots / HARs. Workflow primitive: before any cookie / PII appears in a screenshot, hand off to `evidence-hygiene` for the redaction protocol.

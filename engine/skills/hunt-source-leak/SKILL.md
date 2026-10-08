@@ -23,17 +23,23 @@ Probe this set (targeted names, not a giant brute). Record hits that differ from
 
 ```text
 /.env  /.env.local  /.env.production  /.env.bak  /.env.old
-/.git/HEAD  /.git/config  /.svn/entries  /.hg/requires
+/.git/HEAD  /.git/config  /.git/logs/HEAD  /.svn/entries  /.svn/wc.db  /.hg/requires
 /swagger.json  /v3/api-docs  /openapi.json  /api/openapi.json  /swagger/v1/swagger.json
 /api-docs  /graphql  /graphiql
 /actuator/env  /actuator/heapdump  /actuator/mappings
-/serverless.yml  /terraform.tfstate  /appsettings.json  /local.settings.json  /web.config
+/serverless.yml  /terraform.tfstate  /appsettings.json  /appsettings.Development.json  /appsettings.Production.json  /local.settings.json  /web.config
 /package.json  /composer.json  /composer.lock  /Gemfile
 /asset-manifest.json  /manifest.json  /_next/static/<buildId>/_buildManifest.js
 /robots.txt  /.well-known/security.txt  /sitemap.xml
 /phpinfo.php  /server-status  /info.php
+/.npmrc  /.pypirc  /.docker/config.json  /.dockercfg
+/.gitlab-ci.yml  /Jenkinsfile  /.github/workflows/build.yml
+/.vscode/sftp.json  /sftp-config.json
+/application.properties  /application.yml
 /backup.zip  /www.zip  /site.tar.gz   (only the obvious names tied to the hostname)
 ```
+
+HTML env dumps (not a path probe): `curl -sL "https://$TARGET/"` and look for `__NEXT_DATA__`, `window.__ENV__`, `runtimeConfig`. `NEXT_PUBLIC_*` / Firebase `apiKey` are designed to ship — hunt the rule (`hunt-baas`), do not file the key. A non-`NEXT_PUBLIC_` secret that authenticates is the finding.
 
 `robots.txt` and `security.txt` are recon. Report them only when they point at a real exposure.
 
@@ -47,7 +53,9 @@ curl -sL "$JS_URL" | tail -c 200
 curl -sL "${JS_URL}.map" -o /tmp/app.js.map
 ```
 
-Next.js: build id is in the HTML (`/_next/static/<id>/`). Vite emits `/assets/index-<hash>.js`. Webpack manifests live at `asset-manifest.json`.
+Next.js: build id is in the HTML (`/_next/static/<id>/`). Vite emits `/assets/index-<hash>.js`. Webpack manifests live at `asset-manifest.json`. Also request the `SourceMap` / `X-SourceMap` response header — it is the map URL when the `//# sourceMappingURL` comment was stripped. Do this for `.js`, `.mjs`, and `.css`.
+
+SVN 1.7+ stores the file list in `/.svn/wc.db` (SQLite), not `/.svn/entries` (that file is the pre-1.7 working copy). Confirm with `file` (SQLite) before parsing. A HEAD you cannot follow, or an HTML body, is not the leak.
 
 ```python
 import json, os

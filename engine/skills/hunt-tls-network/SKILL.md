@@ -1,6 +1,6 @@
 ---
 name: hunt-tls-network
-description: "Hunt TLS/SSL and DNS misconfigurations — missing HSTS (downgrade attack), weak cipher suites, expired/invalid certificates, mTLS bypass, missing SPF/DKIM/DMARC (email spoofing), DNS Zone Transfer (AXFR), dangling CNAME subdomain takeover, CAA records. Most of these are Info/Low on their own — this skill is opinionated about which findings actually pay (spoofable DMARC with delivered-to-inbox proof, AXFR returning internal hosts, dangling-CNAME takeover) versus which get rejected as best-practice noise (missing CAA, missing HSTS with no MitM position). Use during recon to find infrastructure weaknesses, and to TRIAGE them honestly before reporting."
+description: "Hunt TLS/SSL and DNS misconfigurations — missing HSTS (downgrade attack), weak cipher suites, expired/invalid certificates, mTLS bypass, missing SPF/DKIM/DMARC (email spoofing), dangling SPF include/redirect/MX takeover (aligned dmarc=pass), DNS Zone Transfer (AXFR), dangling CNAME subdomain takeover, CAA records. Most of these are Info/Low on their own — this skill is opinionated about which findings actually pay (spoofable DMARC with delivered-to-inbox proof, dangling SPF include with aligned pass, AXFR returning internal hosts, dangling-CNAME takeover) versus which get rejected as best-practice noise (missing CAA, missing HSTS with no MitM position). Use during recon to find infrastructure weaknesses, and to TRIAGE them honestly before reporting."
 sources: portswigger_research, ssl_labs_research, hstspreload_org
 ---
 
@@ -16,6 +16,7 @@ Most findings in this class are **Info/Low and routinely rejected** as "best-pra
 **What actually pays in this class (in order):**
 - **Dangling-CNAME / dangling-A subdomain takeover** — you control content on `target.com` subdomain. Real impact, real bounty. (Owned in depth by `hunt-subdomain`; covered here for the TLS/DNS recon angle.)
 - **Spoofable DMARC, proven by delivered-to-inbox email** — not "p=none exists" but an actual mail from `ceo@target.com` landing in a real inbox with a passing/none DMARC verdict in the headers.
+- **Dangling SPF `include`/`redirect` or MX you claimed** — you are now an authorized sender (or you receive @target mail). Inbox + `dmarc=pass` is the proof; a dead `include:` in `dig` is not.
 - **DNS AXFR returning internal hosts** — full internal hostname/IP map. Concrete recon value, often Medium.
 - **mTLS / client-cert bypass on an internal service** — reaching authenticated-only functionality without the cert. Real auth bypass = High.
 - **Exploited TLS weakness with a working decrypt/MitM PoC** — almost never achievable remotely in 2024-2026 against a patched stack; see Phase 1 caveats.
@@ -40,7 +41,9 @@ cat /tmp/sslyze_$TARGET.json | python3 -m json.tool | grep -i "vulnerability\|in
 echo | openssl s_client -connect $TARGET:443 -servername $TARGET 2>/dev/null | \
   openssl x509 -noout -dates -subject -issuer 2>/dev/null
 
-# Check for weak ciphers manually (a successful handshake = the cipher is OFFERED, not exploitable)
+# Check for weak ciphers manually (a successful handshake = the cipher is OFFERED, not exploitable).
+# OpenSSL 3.x often ships without RC4/3DES. A local "no cipher match" is the client, not proof the
+# server disabled the suite. Offered-cipher results come from testssl.sh / sslyze.
 openssl s_client -connect $TARGET:443 -cipher RC4-SHA 2>/dev/null | grep -i "cipher\|handshake"
 openssl s_client -connect $TARGET:443 -cipher DES-CBC3-SHA 2>/dev/null | grep -i "cipher\|handshake"
 
@@ -56,6 +59,7 @@ openssl s_client -connect $TARGET:443 -tls1_1 2>/dev/null | grep -E "Protocol|Ci
 - **POODLE (CVE-2014-3566)** — SSLv3 CBC padding oracle. Needs **SSLv3 actually enabled**; almost no modern stack offers it. Confirm with `testssl.sh --poodle` (or `nmap --script ssl-poodle`) — modern OpenSSL 3.x dropped the `-ssl3` flag. If SSLv3 won't negotiate, there is no POODLE.
 - **FREAK (CVE-2015-0204)** and **DROWN (CVE-2016-0800)** — require export-grade RSA / a shared SSLv2 endpoint respectively. Both are pre-conditions you must *prove present*, not assume. DROWN needs SSLv2 reachable on *some* host sharing the cert/key — scan for SSLv2 with `testssl.sh --drown` (or `nmap --script sslv2-drown`) across the cert's SAN list before claiming it; modern OpenSSL has no `-ssl2` flag.
 - **Heartbleed (CVE-2014-0160)** — if you genuinely find an unpatched OpenSSL 1.0.1 leaking memory, that *is* High/Critical with a real PoC (dump containing keys/cookies). Verify with `testssl.sh --heartbleed` and capture leaked bytes; this is the rare TLS bug worth a full report.
+- **TLS 1.3 0-RTT / early data** — a scanner flag that early data is enabled is Info. It is a finding only if you replay one captured early-data flight and a **second** state change persists (duplicate order, credit, or session action). One replay, then stop. No duplicate side effect → do not file.
 
 ---
 
@@ -98,13 +102,38 @@ for NS in $(dig NS $TARGET +short); do
   dig AXFR $TARGET @$NS 2>/dev/null | grep -v "^;" | head -30
 done
 
-# Zone transfer via alternative tools
+# Zone transfer via alternative tools. AXFR is against the *nameserver*, not the apex A record.
+# nmap -sn skips ports — dns-zone-transfer will not run unless 53 is in the scan.
 host -t AXFR $TARGET $(dig NS $TARGET +short | head -1) 2>/dev/null | head -30
-nmap -sn --script dns-zone-transfer $TARGET 2>/dev/null | head -30
+NS=$(dig NS $TARGET +short | head -1)
+nmap -Pn -p 53 --script dns-zone-transfer --script-args dns-zone-transfer.domain=$TARGET "$NS" 2>/dev/null | head -30
 
 # If AXFR succeeds → full internal hostname map
 # Look for: internal IPs, staging servers, admin hostnames, CI/CD servers
 ```
+
+AXFR denied is not the end of zone disclosure. If the zone is DNSSEC-signed with **NSEC** (no `NSEC3PARAM`), walk the chain (`ldns-walk $TARGET`, or follow `NSEC` records from `dig +dnssec`). Recovered names are the proof. `NSEC3PARAM` present → stop; do not brute NSEC3 hashes.
+
+### Lame / dangling NS (zone takeover)
+
+A child whose NS set points at a DNS host or a provider zone you can register is a takeover of **every name under that delegation**, not one CNAME.
+
+```bash
+dig NS $TARGET +short
+# Delegated children, not only CNAMEs. Pull candidates from the CT list.
+for sub in dev staging admin vpn mail intranet test uat; do
+  echo "== $sub.$TARGET =="
+  dig NS "$sub.$TARGET" +short
+done
+```
+
+**Validation — SERVFAIL is not a takeover:**
+1. The parent still delegates to those NS.
+2. Those NS do not serve the zone (REFUSED, SERVFAIL, or the NS hostname itself is dead).
+3. You create the zone at that provider **and** the NS you were assigned are exactly the delegated set, **or** you control the NS hostname (expired nameserver domain you registered). Route 53 and similar providers hand out a random NS set — do not claim a match you did not receive.
+4. Publish one TXT canary, resolve it from a public resolver, screenshot, delete the zone.
+
+Until step 4 this is lame delegation (recon note). Do not file it as a takeover.
 
 ---
 
@@ -143,7 +172,46 @@ else
   echo "$POLICY" | grep -qi "p=none" && echo "  -> p=none: monitors only, does NOT block spoofed mail"
   echo "$POLICY" | grep -qiE "p=(quarantine|reject)" && echo "  -> enforcing policy: spoofing likely blocked at receiver"
 fi
+
+# A child that publishes its own record OVERRIDES the org domain.
+# Apex p=reject does not cover mail.example or any subdomain that publishes p=none.
+for sub in mail email marketing news info support; do
+  dig +short TXT "_dmarc.$sub.$TARGET" | tr -d '"' | grep -i "v=DMARC1"
+done
+
+# SPF with >10 DNS-lookup mechanisms (include/a/mx/redirect/exists) evaluates as permerror.
+# That breaks legitimate mail. It does NOT prove a spoof will be delivered.
+echo "$SPF" | grep -q "?all" && echo "[INFO] SPF neutral (?all) — not an enforcement"
 ```
+
+### Dangling SPF `include` / `redirect` / MX (authorized-sender takeover)
+
+Apex `p=reject` does **not** block this. If you become an IP the target already authorizes, SPF (and often DMARC) **pass**. This is the email analogue of subdomain takeover — it pays when proven.
+
+```bash
+# Every include: and redirect= is a trust delegation. Resolve it; WHOIS it.
+echo "$SPF" | grep -oE '(include|redirect)[:=][^ ]+'
+for tok in $(echo "$SPF" | grep -oE '(include|redirect)[:=][^ ]+'); do
+  d="${tok#*=}"; d="${d#:}"
+  echo "== $d =="
+  dig +short TXT "$d"
+  dig +short NS "$d"
+  dig +short A "$d"
+  # NXDOMAIN / expired registrant / unclaimed ESP subdomain on $d → you can publish
+  # v=spf1 ip4:<your-smtp> -all and become an authorized sender for $TARGET.
+done
+
+# Dangling MX: mail for @target lands wherever that hostname now points
+dig MX $TARGET +short
+# Dangling DKIM selector CNAME → vanished ESP (same claim-and-sign path)
+```
+
+**Validation — do not file from `dig` of a dead include:**
+1. You control the include/redirect/MX/DKIM target (registered the lapsed domain, claimed the ESP hostname, or the NS is yours).
+2. You send **one** message `From: @target` through an IP/selector that now aligns.
+3. Inbox (not Spam) + raw headers show `spf=pass` and/or `dkim=pass` **and** `dmarc=pass`. Tear the claimed DNS down after the screenshot.
+
+`p=none` spoofing without alignment is Medium at best (often OOS). **Aligned** mail via a dangling include/MX is **High** (password-reset interception if you also receive MX). Same claim-then-canary gate as Phase 6.5.
 
 **Why the original `dig ... | wc -c | grep '^1$'` check was broken:** empty `dig +short` output is a zero-length string; piped through `wc -c` it usually yields `0`, and the surrounding newline handling is shell-dependent, so the `^1$` match misfires both ways. Always capture into a variable and test `[ -z "$VAR" ]`.
 
@@ -303,9 +371,12 @@ Severities below are calibrated to what triage actually accepts. They are delibe
 | TLS/DNS finding | Realistic standalone severity | Notes / what raises it |
 |----------------|------|------|
 | Dangling-CNAME subdomain takeover (claimed + canary served) | **High** | Critical if at OAuth `redirect_uri`/SSO or sharing `.target.com` session cookies |
+| Dangling-NS zone takeover (canary TXT resolves) | **High** | Every name under the delegation, including MX and ACME; lame NS with no claim is not a finding |
+| TLS 1.3 0-RTT replay with a second persisted side effect | **Medium–High** | Early-data negotiated, no duplicate state change = Info |
 | mTLS / client-cert bypass reaching authed functionality | **High** | Must show privileged data/action, not just a 200 |
 | AXFR returning internal hosts/IPs | **Medium** | Recon value; pairs with internal-service findings |
 | Spoofable DMARC, **delivered to a real inbox** (PoC headers) | **Medium** | Often OOS — check scope; Inbox (not Spam) + delivered required. *Reading `p=none` from `dig` alone = Info, do not file* |
+| Dangling SPF include/redirect or MX you claimed; mail **dmarc=pass** in Inbox | **High** | You are an authorized sender (or you receive @target mail). Tear down after PoC |
 | Heartbleed / live memory leak with captured secrets | **High–Critical** | Only with an actual dump containing keys/cookies |
 | Missing HSTS on auth subdomain | **Low / Info** | NOT High — exploitation needs an active MitM position you cannot demonstrate remotely; report only with a working downgrade-capture PoC |
 | Weak cipher *support* (RC4/3DES/SWEET32) with no decrypt PoC | **Info / Low** | Hardening only; frequently OOS |
@@ -336,9 +407,12 @@ curl -s "https://dmarcian.com/dmarc-inspector/?domain=$TARGET" 2>/dev/null
 Each finding ships only with the proof listed — never the `dig`/header output alone.
 
 - **Subdomain takeover:** you registered the dangling resource and served a unique canary over `https://sub.target.com/` with valid TLS. Screenshot + canary string. (Tear down after.)
+- **NS takeover:** delegated NS match a zone or nameserver hostname you control, and a public resolver returns your TXT canary. Tear the zone down after.
+- **0-RTT:** one replayed early-data request created a second persisted side effect. The extension alone is not the finding.
 - **mTLS bypass:** spoofed client-verify header returns *privileged* data/action that the cert-required path otherwise denies. Burp request/response pair.
 - **AXFR:** zone transfer returns internal hostnames/IPs from an authoritative NS. Full transcript.
 - **DMARC spoof:** swaks-sent mail with `From: @target.com` **delivered to a real Inbox** (not Spam), raw `Authentication-Results` headers attached. A bounce or Spam landing = no finding.
+- **SPF include / MX takeover:** you control the delegated include/MX/DKIM host and a delivered message shows `spf=pass`/`dkim=pass` **and** `dmarc=pass`. Dead `include:` in `dig` is not the finding.
 - **HSTS missing:** only reportable with a working downgrade PoC capturing a victim cookie over plaintext — otherwise it is best-practice noise.
 
 **Severity (conservative — matches the Chain Table):**

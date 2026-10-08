@@ -18,6 +18,8 @@ Attacker origin performs a **credentialed** cross-origin **read of sensitive aut
 Hard browser rules:
 - `ACAO: *` **cannot** pair with credentials — browser blocks `credentials: include`. Wildcard-only = Info/Low unless the data is secret **without** a session (rare).
 - `ACAC: true` alone is meaningless. Need **your** origin in `ACAO` **and** a readable body.
+- **Cookies must actually attach.** Read `Set-Cookie`. Cross-site `fetch(..., {credentials:"include"})` from `https://evil.com` sends the session cookie only if it is `SameSite=None; Secure` (and the browser is still sending third-party cookies). Default `Lax`/`Strict` → the request is anonymous; a 200 JSON body is the logged-out response, **not** a High. Confirm in DevTools that the request includes the session cookie **and** the body contains an authed marker. If the cookie is Lax/Strict, the remaining High path is a **same-site** attacker origin (sibling XSS / takeover) — do not drop the bug, chain it.
+- **Bearer-in-JS is not cookie CORS.** If the app attaches `Authorization: Bearer` from `localStorage`, an attacker origin cannot read that storage or steal the victim's header. Reflecting `Origin` on a Bearer-only API is not session theft.
 
 ## Decision tree
 1. Find endpoints that emit `Access-Control-*` **and** return authed PII/tokens (profile, CSRF token, dumps).
@@ -65,7 +67,7 @@ curl -sD - -o /dev/null -X OPTIONS "https://$TARGET/api/account/email" \
   -H "Access-Control-Request-Headers: content-type, x-csrf" | grep -i access-control
 ```
 
-**Private Network / Local Network Access (Chrome 2024+):** preflight may include `Access-Control-Request-Private-Network: true`. If an internal app reflects attacker origin + `Access-Control-Allow-Private-Network: true`, a public page can hit RFC1918/localhost APIs. Browser PoC from a public origin; do not scan the LAN beyond one proof.
+**Private Network Access (Chrome):** a private-network request from a secure public context triggers a preflight carrying `Access-Control-Request-Private-Network: true`. If an internal app reflects attacker origin + returns `Access-Control-Allow-Private-Network: true` (with a non-wildcard `ACAO` and `ACAC: true` for credentialed reach), a public page can reach RFC1918/localhost APIs. Note PNA **preflight enforcement is on hold** (paused Oct 2024) — only the secure-context restriction is live, so Chrome does not yet *block* on a missing allow header; the server reflecting the allow header is still the proof of intended cross-network exposure. Browser PoC from a public origin; do not scan the LAN beyond one proof.
 
 ## Phase 5 — Browser PoCs (mandatory for High)
 ```html
@@ -90,7 +92,9 @@ grep -rEn "addEventListener\\(['\"]message" --include='*.js' .
 Weak: `indexOf("target.com")`, `endsWith("target.com")`, `startsWith("https://target")`, no check. Impact is DOM (`hunt-dom`), not ACAO.
 
 ## Validation
-- Browser: authed **body** readable (screenshot/console) **or** OOB with unique marker. `BLOCKED` = no finding.
+- Browser: authed **body** readable (screenshot/console) **or** OOB with unique marker. DevTools must show the **session cookie on the cross-origin request**. `BLOCKED` or a logged-out body = no finding.
+- A secret that exists only in a response header is readable in the browser only if `Access-Control-Expose-Headers` lists it. curl showing the header is not the bug.
+- `Cross-Origin-Resource-Policy: same-origin` (or COEP) can block the read even when `ACAO` reflects your origin. Browser failure means it is not High.
 - Sensitive data (PII, session, CSRF, funds) — not `/api/health`.
 - Match regex class to payload.
 - `ACAO: *` + creds = not exploitable.
@@ -104,9 +108,10 @@ Weak: `indexOf("target.com")`, `endsWith("target.com")`, `startsWith("https://ta
 | Trusted sibling XSS | Host PoC there | Reliable read |
 | Dangling trusted host | `hunt-subdomain` | Full read |
 | PNA allow | Internal admin API | Intranet pivot |
+| ACAO reflects + no `Vary: Origin` | `hunt-cache-poison` | Cached authed body served to others |
 | postMessage loose | `hunt-dom` | XSS / client auth |
 
-Cross-refs: `hunt-csrf`, `hunt-subdomain`, `hunt-xss`, `hunt-dom`, `triage-validation`.
+Cross-refs: `hunt-csrf`, `hunt-subdomain`, `hunt-xss`, `hunt-dom`, `hunt-cache-poison`, `triage-validation`.
 
 ## Dedup gate
 ```bash

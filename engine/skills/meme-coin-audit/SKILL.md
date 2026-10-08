@@ -1,6 +1,6 @@
 ---
 name: meme-coin-audit
-description: Meme coin and token security audit — rug pull detection (honeypot, hidden mint, fee manipulation, LP lock bypass), Solana SPL token analysis (freeze authority, mint authority, metadata mutability), Token-2022 extension risks (transfer hooks, permanent delegate), DEX liquidity pool attacks (sandwich amplification, LP drain, bonding curve exploits), pump.fun/Raydium/Jupiter integration risks, and real exploit examples from 2024-2025. Use for any token audit, rug pull assessment, meme coin security review, or pre-investment due diligence.
+description: Meme coin and token security audit — rug pull detection (honeypot, hidden mint, fee manipulation, LP lock bypass), Solana SPL token analysis (freeze authority, mint authority, metadata mutability), Token-2022 extension risks (transfer hooks, permanent delegate, pausable, non-transferable), DEX liquidity pool attacks (sandwich amplification, LP drain, bonding curve exploits), pump.fun/Raydium/Jupiter integration risks, and real exploit examples from 2024-2026. Use for any token audit, rug pull assessment, meme coin security review, or pre-investment due diligence.
 ---
 
 # MEME COIN & TOKEN SECURITY AUDIT
@@ -11,16 +11,21 @@ Fast-kill rug pull detection and deep token security analysis for EVM and Solana
 
 ## PRE-DIVE KILL SIGNALS
 
-Check these BEFORE reading a single line of code. If any are true, skip the audit — the token is likely a rug or not worth the time.
+Check these before a line-by-line review. They are findings or confidence signals, not reasons to abandon the audit. Record the on-chain evidence, then keep looking for a second independent path.
 
-### Hard Kills (Skip Immediately)
-- **Contract not verified** on Etherscan/Solscan → Cannot audit source = cannot trust
-- **Deployer wallet** has history of rug pulls (check Etherscan deployer page)
-- **Token age < 1 hour** AND no known team → Too early, wait for more data
-- **Mint authority retained** (Solana) AND no cap → Infinite mint = certain rug
-- **Freeze authority retained** (Solana) on meme coin → Honeypot confirmed
-- **Transfer hook present** (Token-2022) with mutable hook program → Honeypot vector
-- **Permanent delegate** extension (Token-2022) → Can steal all holder tokens
+### Rug-class (report, then continue)
+- **Contract not verified** → decompile and continue. Unverified is a confidence downgrade, not a stop.
+- **Deployer wallet** has prior rug pulls → cite those token addresses as prior-history context. It is not, by itself, a bug in this contract.
+- **Mint authority retained** (Solana or EVM `mint`/`_mint` still callable by a hot key) with no on-chain cap → infinite mint.
+- **Freeze authority retained** on a tradable mint → honeypot capability.
+- **Token-2022 `DefaultAccountState = Frozen`** → new token accounts cannot move. Honeypot.
+- **Token-2022 transfer fee** already near 100% on sells, or a fee authority that can set it there with no on-chain max.
+- **Transfer hook** whose authority is non-null → hook can pause, tax, or block later.
+- **Permanent delegate** → that key can move any holder's tokens.
+- **Token-2022 `Pausable` authority non-null** → that key can halt all transfers/mints/burns.
+- **Token-2022 `NonTransferable`** on a token marketed as tradable → holders cannot sell. Honeypot.
+
+"The deployer could add a hook later" is informational. The authority or extension must be present **now**. Age under an hour is a reason to re-check after liquidity arrives, not a reason to skip.
 
 ### Soft Kills (Proceed with Extreme Caution)
 - Top holder > 20% of supply (excluding DEX pools)
@@ -54,7 +59,7 @@ grep -rn "function mint\|_mint(\|_balances\[.*\] +=" src/ --include="*.sol" | gr
 grep -rn "MintTo\|mint_to\|mint_authority" src/ --include="*.rs" | grep -v "test\|target"
 ```
 
-**Kill if:** MAX_SUPPLY enforced in every mint path, or mint function removed entirely.
+**Ruled out if:** MAX_SUPPLY enforced in every mint path, or mint function removed entirely.
 
 ### 2. HONEYPOT / TRANSFER RESTRICTION
 > Common scam pattern. Buy works, sell blocked.
@@ -69,7 +74,7 @@ grep -rn "blacklist\|isBlacklisted\|_bots\|maxTxAmount\|approve.*override\|tradi
 grep -rn "freeze_authority\|transfer_hook\|TransferHook\|permanent_delegate" src/ --include="*.rs"
 ```
 
-**Kill if:** No blacklist mapping, no transfer hooks, no freeze authority.
+**Ruled out if:** No blacklist mapping, no transfer hooks, no freeze authority.
 
 ### 3. FEE MANIPULATION
 > Common rug pattern. Sell fee set to 99% after initial buys.
@@ -80,7 +85,7 @@ grep -rn "setFee\|setSellFee\|_taxFee\|_sellFee" src/ --include="*.sol"
 grep -rn "function set.*Fee" -A5 src/ --include="*.sol" | grep -v "require\|MAX\|<="
 ```
 
-**Kill if:** Fee setter has `require(fee <= MAX_FEE)` with MAX_FEE <= 10%.
+**Ruled out if:** Fee setter has `require(fee <= MAX_FEE)` with MAX_FEE <= 10%.
 
 ### 4. LIQUIDITY POOL DRAIN
 > LP removal, migration, or manipulation to crash price.
@@ -90,7 +95,7 @@ grep -rn "function set.*Fee" -A5 src/ --include="*.sol" | grep -v "require\|MAX\
 grep -rn "migrateLP\|emergencyWithdraw\|\.sync()\|setPair\|setRouter" src/ --include="*.sol"
 ```
 
-**Kill if:** LP tokens burned to dead address, no migration function, no pair setter.
+**Ruled out if:** LP tokens burned to dead address, no migration function, no pair setter.
 
 ### 5. BONDING CURVE MANIPULATION
 > Exploits in pump.fun-style bonding curves.
@@ -100,7 +105,7 @@ grep -rn "migrateLP\|emergencyWithdraw\|\.sync()\|setPair\|setRouter" src/ --inc
 grep -rn "virtualReserve\|setCurve\|graduate\|bonding_curve" src/ --include="*.sol" --include="*.rs"
 ```
 
-**Kill if:** Curve parameters immutable, graduation permissionless.
+**Ruled out if:** Curve parameters immutable, graduation permissionless.
 
 ### 6. AUTHORITY RETENTION (SOLANA)
 > Retained mint/freeze/update authorities on Solana tokens.
@@ -111,7 +116,7 @@ grep -rn "mint_authority\|freeze_authority\|update_authority\|close_authority" s
 grep -rn "set_authority.*None" src/ --include="*.rs"  # Good sign: revocation
 ```
 
-**Kill if:** All authorities = None, verified on-chain.
+**Ruled out if:** All authorities = None, verified on-chain.
 
 ### 7. FAKE RENOUNCE / HIDDEN OWNERSHIP
 > Ownership appears renounced but backdoor control retained.
@@ -121,7 +126,7 @@ grep -rn "set_authority.*None" src/ --include="*.rs"  # Good sign: revocation
 grep -rn "renounceOwnership.*override\|_shadowAdmin\|_backupOwner\|selfdestruct" src/ --include="*.sol"
 ```
 
-**Kill if:** renounceOwnership NOT overridden, no second admin role, no selfdestruct.
+**Ruled out if:** renounceOwnership NOT overridden, no second admin role, no selfdestruct.
 
 ### 8. SANDWICH AMPLIFICATION BY DESIGN
 > Contract makes holders maximally sandwichable.
@@ -132,7 +137,7 @@ grep -rn "swapExactTokensForETH" -A5 src/ --include="*.sol" | grep "0,"
 grep -rn "swapThreshold\|_rebase\|mandatoryPool" src/ --include="*.sol"
 ```
 
-**Kill if:** Auto-swap has proper slippage, no rebase mechanics.
+**Ruled out if:** Auto-swap has proper slippage, no rebase mechanics.
 
 ---
 
@@ -253,10 +258,10 @@ When you don't have source code, check on-chain:
    - Should be null
    - If Some(pubkey) → CRITICAL: honeypot
 
-3. LP STATUS → Check Raydium/Orca pool
-   - LP burned? (tokens sent to 1111...1111)
-   - LP locked? (in verified locker with no backdoor)
-   - LP held by deployer? → CRITICAL: instant rug
+3. LP STATUS → Check Raydium/Orca/Uniswap pool
+   - LP burned only if the recipient is a known unspendable address (`0x000…0000` or `0x000…dEaD` on EVM; Solana incinerator / a closed account). A lookalike vanity is the deployer's wallet
+   - LP locked? Read the locker bytecode and the unlock timestamp. A badge is not a lock. Owner-shortenable locks are an exit.
+   - LP held by deployer? → instant rug capability
 
 4. TOP HOLDERS → Birdeye/Solscan holders tab
    - Top 10 < 30% of supply (excluding pools)
@@ -266,9 +271,13 @@ When you don't have source code, check on-chain:
    - Is the program upgradeable? → can change any logic
    - Upgrade authority should be None for immutable programs
 
-6. TOKEN-2022 EXTENSIONS
-   - Any transfer hook? → potential honeypot
-   - Permanent delegate? → CRITICAL
+6. TOKEN-2022 EXTENSIONS (`spl-token display <MINT> --program-id TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`)
+   - Transfer hook authority non-null → honeypot / tax capability
+   - Permanent delegate non-null → confiscation
+   - DefaultAccountState Frozen → honeypot
+   - Pausable authority non-null → can halt all transfers (rug / freeze-the-chart)
+   - NonTransferable present on a "tradable" mint → holders cannot sell
+   - TransferFee: quote the current fee and the maximum the authority can set
 ```
 
 ---
@@ -297,10 +306,10 @@ Token-2022 transfer hooks are the new rug-pull vector. Hook authority can be set
 ```bash
 # get mint extensions for a Token-2022 mint
 spl-token display <MINT_ADDRESS> --program-id TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
-# look for: TransferHook { authority: ... }, PermanentDelegate { delegate: ... }
+# look for: TransferHook, PermanentDelegate, Pausable, NonTransferable, DefaultAccountState, TransferFee
 ```
 
-If TransferHook authority is non-null → the holder of that key can revoke transfer rights mid-trade. If PermanentDelegate is non-null → that delegate can move any holder's tokens at any time (effectively a built-in confiscation). Either alone is rug-class.
+If TransferHook authority is non-null → the holder of that key can revoke transfer rights mid-trade. If PermanentDelegate is non-null → that delegate can move any holder's tokens at any time (effectively a built-in confiscation). Pausable authority → halt every transfer. NonTransferable on a meme that still has a DEX pool → nobody can sell into it. Any one of these is rug-class.
 
 pump.fun bonding curves can be manipulated via the curve's K-parameter; mint authority retained beyond bonding-curve completion is the classic exit-scam shape. Check `mintAuthority` AFTER the curve completes — legitimate launches null it, scams retain it for the post-graduation dump.
 
@@ -341,7 +350,19 @@ The 6-question fast filter:
 5. Top 10 holders concentration < 30% (excluding pools/burn addresses)?
 6. Bonding curve completed (for pump.fun) AND post-completion mint authority null?
 
-Five "no"s = walk away. Three "no"s = high risk, only enter with size you'd walk away from. Two "no"s with strong narrative + thin liquidity = the canonical retail trap.
+For a buyer, several "no" answers means do not trade size. For an audit or bounty, do not stop: each "no" that is a live authority or a callable function is a finding. Prove it with the gate below, then draft.
+
+### Validation — capability vs. story
+
+| Claim | Proven | Not proven |
+|---|---|---|
+| Infinite mint | Mint authority is non-null **or** a fork shows `mint` increasing `totalSupply` from a non-team caller the function allows | "Owner could deploy a new contract" |
+| Honeypot | A fresh wallet's sell (or transfer) reverts or loses the stated fee, while a control path the authority allows still succeeds | Buy simulation alone; a rug-checker badge |
+| Fee rug | `setFee` (or the Token-2022 fee authority) is callable now and the new fee is enforced on a sell | A fee variable that nothing can change |
+| LP rug | Deployer holds the LP position, or the lock contract's unlock time / owner-shorten function is in the verified bytecode | DexScreener "locked" badge, LP sent to a vanity burn |
+| Pause / non-transfer | Token-2022 Pausable authority is non-null **or** NonTransferable is set on a mint that still has a DEX pool; a fresh wallet cannot sell | "They could add Pausable later"; a soul-bound NFT that was never meant to trade |
+
+"Could rug if the owner wants" with a retained privileged function is the finding for a token audit. Do not upgrade it to "funds already stolen" unless that transaction exists. One fork proof, then stop — no mainnet drain.
 
 ### MEV / sandwich amplification on illiquid mints
 

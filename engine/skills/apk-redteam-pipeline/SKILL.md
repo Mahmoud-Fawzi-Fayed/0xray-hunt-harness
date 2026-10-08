@@ -9,7 +9,7 @@ report_count: 1
 
 Trigger when:
 - Recon surfaces 1+ mobile apps under the target's developer name (Play Store dev page)
-- A web app hosts `*.apk` files directly (e.g. `Recruitz.apk` found on a subdomain during one engagement)
+- A web app hosts `*.apk` files directly (careers, helpdesk, MDM, or a sidecar installer on an in-scope host)
 - APK package IDs leaked via stealer logs (e.g. `com.<brand>.app`, `com.<brand>.<sub-brand>` patterns in stealer dump format)
 - Customer-facing app, dealer/partner portal, or employee mobile companion app is in scope
 - Bug bounty program lists Android in scope
@@ -25,11 +25,14 @@ DO NOT use for:
 
 ### Play Store developer-page scrape
 ```bash
-# Find developer page from the target's brand name
+# Name-style developer page (spaces become +)
 curl -sk -A "Mozilla/5.0" "https://play.google.com/store/apps/developer?id=<Brand+Name>" -o /tmp/dev.html
+# Numeric developer id — this is the common form now; name URLs often 404
+# Hop: app listing → "More by <dev>" → /store/apps/dev?id=<digits>
+curl -sk -A "Mozilla/5.0" "https://play.google.com/store/apps/dev?id=<DEV_ID>" -o /tmp/dev.html
 
-# Extract package IDs
-grep -oE 'id=[a-zA-Z0-9._]+' /tmp/dev.html | sort -u
+# Extract package IDs from the details links (the page also contains unrelated id= values)
+grep -oE '/store/apps/details\?id=[a-zA-Z0-9._]+' /tmp/dev.html | sort -u
 ```
 
 Example output (anonymized — 7 packages typical for a multi-brand conglomerate):
@@ -105,10 +108,8 @@ done
 ## Stage 2 — DEX decompilation (jadx)
 
 ```bash
-# Install
-brew install jadx          # macOS
-# or
-wget https://github.com/skylot/jadx/releases/latest/download/jadx-1.5.x.zip
+# Install. There is no asset named jadx-1.5.x.zip — that URL 404s.
+# Use the distro package, or the latest GitHub release zip whose name is jadx-<version>.zip.
 
 # Decompile
 jadx -d decompiled_<package>/ <package>.apk
@@ -119,9 +120,11 @@ for inner in extracted_<package>/*.apk; do
 done
 ```
 
-For a fast "strings only" pass without full decompilation:
+For a fast "strings only" pass without full decompilation. Flutter and React Native hide the interesting strings outside `classes.dex`:
 ```bash
-find extracted_<package> -name "classes*.dex" -exec strings -8 {} \; > strings_<package>.txt
+find extracted_<package> \( -name "classes*.dex" -o -name "libapp.so" -o -name "libflutter.so" \
+  -o -name "index.android.bundle" -o -name "*.jsbundle" \) \
+  -exec strings -8 {} \; > strings_<package>.txt
 ```
 
 ---
@@ -129,8 +132,11 @@ find extracted_<package> -name "classes*.dex" -exec strings -8 {} \; > strings_<
 ## Stage 3 — Secret grep (the 60-pattern catalog)
 
 ```bash
-# URL grep — owned-domain references
-grep -oE 'https?://[a-zA-Z0-9.-]+\.(target1|target2|target3)\.(com|io|net|in)[a-zA-Z0-9./_?=&%-]*' strings_<package>.txt | sort -u
+# URL grep — in-scope apexes, dots escaped, joined by |
+APEX_RE='example\.com|corp\.io'
+grep -oE "https?://[a-zA-Z0-9.-]+(${APEX_RE})[a-zA-Z0-9./_?=&%-]*" strings_<package>.txt | sort -u
+# Also keep non-apex hosts: internal DNS, link-local, and cloud API hosts the app calls
+grep -oE 'https?://[a-zA-Z0-9.-]+(:[0-9]+)?/[a-zA-Z0-9./_?=&%-]*' strings_<package>.txt | sort -u | head -200
 
 # Internal IP / port URLs
 grep -oE 'https?://(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.)[0-9.]+(:[0-9]+)?[a-zA-Z0-9./_?=&-]*' strings_<package>.txt
@@ -139,12 +145,15 @@ grep -oE 'https?://(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.)[0-9.]+(:
 grep -oE 'AKIA[A-Z0-9]{16}'                            # AWS Access Key
 grep -oE 'aws_secret_access_key[\s:=]+[A-Za-z0-9/+=]{40}' # AWS Secret
 grep -oE 'AIza[A-Za-z0-9_-]{35}'                       # Google API key
-grep -oE 'ya29\.[A-Za-z0-9_-]+'                        # Google OAuth refresh token
-grep -oE 'gh[ps]_[A-Za-z0-9]{36}'                      # GitHub PAT
+grep -oE 'ya29\.[A-Za-z0-9_-]+'                        # Google OAuth *access* token (short-lived)
+grep -oE '1//[0-9A-Za-z_-]+'                           # Google OAuth refresh token
+grep -oE 'gh[pousr]_[A-Za-z0-9]{36}'                  # GitHub classic PAT
+grep -oE 'github_pat_[A-Za-z0-9_]{20,}'                # GitHub fine-grained PAT
+grep -oE 'ASIA[A-Z0-9]{16}'                            # AWS STS temporary key
 grep -oE 'glpat-[A-Za-z0-9_-]{20}'                     # GitLab PAT
-grep -oE 'xox[pbar]-[A-Za-z0-9-]+'                     # Slack token
-grep -oE 'sk-[A-Za-z0-9]{48}'                          # OpenAI API key
-grep -oE 'sk-ant-[A-Za-z0-9_-]{90,}'                   # Anthropic API key
+grep -oE 'xox[baprs]-[A-Za-z0-9-]+'                    # Slack token
+grep -oE 'sk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}'  # OpenAI — proj/svcacct/admin keys carry NO fixed marker (anchor on prefix + length); T3BlbkFJ ("OpenAI" b64) discriminates legacy sk- keys only
+grep -oE 'sk-ant-(api0[34]|admin01)-[A-Za-z0-9_-]{80,120}'  # Anthropic API key (api03-/api04-/admin01- + ~93-char body)
 grep -oE 'AC[a-f0-9]{32}'                              # Twilio Account SID
 grep -oE 'sk_live_[A-Za-z0-9]{24}'                     # Stripe live key
 grep -oE 'pk_live_[A-Za-z0-9]{24}'                     # Stripe publishable
@@ -202,7 +211,12 @@ A customer-facing APK from an authorized engagement contained `assets/api_<servi
 
 ## Stage 5 — Exported component enumeration
 
-AndroidManifest.xml lists components. Exported ones (especially with `android:exported="true"` or implicit-export via intent-filter) can be triggered by other apps — potential intent-injection attack surface.
+AndroidManifest.xml lists components. Exported ones (`android:exported="true"`, or an intent-filter on `targetSdkVersion` ≤ 30) can be triggered by another app. On targetSdk 31+ the platform requires an explicit `android:exported`; a missing attribute means the app does not install, not that it is implicitly exported.
+
+Also check, per exported component:
+- `FileProvider` / `content://` with a `<root-path` or overly wide `<external-path` and `grantUriPermissions="true"` — one `content://` read of a file you should not see is the proof
+- A deep link whose host is not in `assetlinks.json` (`autoVerify` absent or false) and that forwards a URL into a WebView
+- `JavascriptInterface` methods annotated on a WebView that loads that URL
 
 ```bash
 # Decode binary AndroidManifest if needed
@@ -213,12 +227,22 @@ cat decompiled_<package>/resources/AndroidManifest.xml | grep -E '<(activity|ser
 
 # Filter exported
 grep -E 'android:exported="true"' decompiled_<package>/resources/AndroidManifest.xml
+
+# High-yield flags — the attribute is recon; prove with one read
+grep -E 'allowBackup|debuggable|usesCleartextTraffic' decompiled_<package>/resources/AndroidManifest.xml
 ```
+
+| Flag | Proof (one shot) |
+|---|---|
+| `allowBackup="true"` (default true if omitted on older targetSdk) | `adb backup` / `run-as` yields a session token or file that is not yours. The flag alone is not a finding. |
+| `debuggable="true"` on a store/production build | `adb shell run-as <pkg> cat` of a private file. |
+| `usesCleartextTraffic="true"` | One HTTP capture through mitmproxy containing a unique marker or token. |
 
 For each exported component, check:
 - Does it accept extras that flow into a WebView (intent → WebView → XSS / file://)
 - Does it accept URI extras (potential SSRF via deep link)
 - Does it pass extras to other Activities (intent redirection)
+- Exported `ContentProvider`: one `content://` query for a row/file you should not see (SQL/`../` in the URI). A 200 empty cursor is not proof.
 
 ---
 
@@ -233,13 +257,20 @@ find extracted_<package> -name "google-services.json" -exec cat {} \; | python3 
 #   storage_bucket → can guess GCS bucket: gs://<bucket>
 #   web_api_key  → can use to enumerate Firebase tenant config
 
-# Test if Firestore is publicly readable
-curl -s "https://firestore.googleapis.com/v1/projects/<project_id>/databases/(default)/documents/users"
+# Firestore collection guess is detection only. A 200 with documents is the read proof.
+# Do not PUT a marker unless the engagement allows a write; if it does, write one
+# unique key and DELETE it. An open write you leave behind is not a clean proof.
 
-# Test if Realtime DB is publicly readable
+# Realtime DB — try all host shapes. Legacy projects: <project_id>.firebaseio.com.
+# Projects created since ~2021 default to a "-default-rtdb" instance name, on
+# firebasedatabase.app (or a regional host like ...europe-west1.firebasedatabase.app).
 curl -s "https://<project_id>.firebaseio.com/.json"
+curl -s "https://<project_id>-default-rtdb.firebasedatabase.app/.json"
 
-# Test if Storage Bucket is publicly listable
+# Firestore without the web API key often 403s even when rules are open.
+curl -s "https://firestore.googleapis.com/v1/projects/<project_id>/databases/(default)/documents?key=<web_api_key>"
+
+# Storage listing
 curl -s "https://firebasestorage.googleapis.com/v0/b/<bucket>/o"
 ```
 
@@ -263,10 +294,12 @@ Java.perform(function() {
     // OkHttp
     try {
         var CertificatePinner = Java.use('okhttp3.CertificatePinner');
-        CertificatePinner.check.overload('java.lang.String', 'java.util.List').implementation = function() {
-            console.log('[+] OkHttp pinning bypassed for: ' + arguments[0]);
-            return;
-        };
+        // OkHttp 4+ has more than the (String, List) overload. Hook all of them.
+        CertificatePinner.check.overloads.forEach(function (ov) {
+            ov.implementation = function () {
+                console.log('[+] OkHttp pin bypass ' + arguments[0]);
+            };
+        });
     } catch (e) {}
     // HttpsURLConnection
     try {
@@ -279,7 +312,11 @@ Java.perform(function() {
 });
 ```
 ```bash
-frida -U -l frida-script-pinning-bypass.js -f <package_id> --no-pause
+frida -U -l frida-script-pinning-bypass.js -f <package_id>
+# Frida 16+ resumes on spawn. --no-pause was removed and errors.
+# Flutter/BoringSSL never hits these Java hooks. For those builds, string-scan
+# libapp.so and hook ssl_verify_peer_cert. objection's android sslpinning disable
+# covers the Java stack only.
 ```
 
 ### Hook HTTP requests
@@ -340,9 +377,18 @@ mitmproxy --listen-port 8080
 | Pinned cert for internal host | New asset discovery — that host is real |
 | Exported Activity with WebView | Test intent-injection → URL-loading abuse |
 | Stack-trace artifacts (Stack Overflow URLs) | Identify the developer's questions → infer architecture |
-| Hardcoded credentials | Spray immediately (respect any caps from related skills) |
+| Hardcoded credential (one known value) | Try that value once, read-only (`sts get-caller-identity` or one GET). No spray, no wordlist. |
 
 ---
+
+## Detected vs proven
+
+A string in the APK is detected, not a finding.
+
+- Credential: proven only when it still authenticates and you name the resource a read-only call returned.
+- Exported component: proven when `adb shell am start` (or a second app) with a unique marker changes a security outcome — WebView loads your URL, or a provider returns a file you should not have. The manifest line alone is recon.
+- Firebase/cloud URL: proven when an unauthenticated GET returns data that is not yours, or an authorized one-key write succeeds and you delete it.
+- Expired JWT, path list, pinned cert CN: recon. A forged token the API accepts is the finding.
 
 ## Anti-patterns
 

@@ -75,9 +75,10 @@ triggers:
 - Producing client-facing deliverables (exec summaries, technical reports, reproduction packages) from offensive engagements.
 
 **Do NOT use this skill when:**
-- The user is asking for active exploitation, post-exploitation, lateral movement, AD privilege escalation, malware development, or anything beyond reconnaissance — those are out of scope.
-- The user is asking for blue-team / defensive content (SIEM rules, detection engineering) — different domain.
-- The target's authorization is unclear and the user is asking you to act against a third-party asset they don't own — see §1 below; gently surface the scope question before proceeding.
+- The work is blue-team / defensive (SIEM rules, detection engineering) — different domain.
+- The target's authorization is unclear and the user is asking you to act against a third-party asset they don't own — see §1 below; surface the scope question once before proceeding.
+
+This skill is recon and attack-surface mapping. When recon produces an exploitable primitive, **hand off** to the matching `hunt-*` / platform skill — do not refuse authorized in-scope testing from here.
 
 ---
 
@@ -93,7 +94,7 @@ Once authorization is asserted, proceed without re-asking. If the user explicitl
 
 **Always-on guardrails (regardless of authorization):**
 - Never weaken auth, rate limits, banners, or any safety control that enforces scope on the target side.
-- Never run destructive probes (true SYN scans on production, masscan at line rate, fuzzing/brute-force) outside an explicit DEEP / `--aggressive` mode.
+- Never run destructive probes: line-rate masscan, SYN floods, DoS, brute-force / password-cracking / credential-stuffing. Targeted directory or API fuzz (`ffuf` on a sensible wordlist) and in-scope `nuclei` (non-`fuzzing/*`) are normal authorized testing, not DEEP-only.
 - Never paste real PII, valid credentials, session tokens, API keys, or other secrets into cloud-hosted LLMs or third-party services.
 - Never take action against assets outside the documented scope, even if "obviously related" (subsidiaries, vendors, employees' personal accounts, etc.).
 
@@ -182,7 +183,7 @@ When citing a source in your output, prefer durable references (CVE, vendor advi
 - DO NOT assume vendor labels are ground truth. Cross-label sanity: TRM, Chainalysis, Arkham can disagree. Treat every label as a hypothesis.
 - DO NOT assume 1:1 bridge flows. Bridges/mixers/wrappers introduce mint/burn semantics; validate with on-chain proofs.
 - DO NOT assert ownership from a single signal. Favicon-hash overlap, shared CT issuer, shared NS — each is a hypothesis. Need rule-of-three.
-- DO NOT run fuzzing, SYN scans, masscan, or `nuclei fuzzing/*` templates outside an explicit DEEP / `--aggressive` mode.
+- DO NOT run line-rate masscan, unthrottled SYN floods, or brute-force / password-cracking. Skip destructive `nuclei fuzzing/*` templates. Targeted ffuf/nuclei on in-scope hosts is authorized testing.
 - DO NOT use a credential validator to do anything except read-only verification (no create/delete/send).
 - DO NOT mirror-image (assume the target thinks like you do). Separate capability from intent and sponsorship.
 - DO NOT confuse correlation with control.
@@ -376,9 +377,9 @@ Stage and asset count drive how long a recon takes. Rough estimates (single oper
 - **Ongoing monitoring (weekly diff)** — re-run Stages 1–3 weekly; diff against baseline; alert on new asset / new finding / asset disappeared.
 
 **When to abort early:**
-- After Stage 1 if scope is wrong (target turns out to be subsidiary of unrelated corp; rules of engagement need clarification).
-- After Stage 2 if attack surface is below threshold (no public webapps + no exposed services + no leaked emails → little to find externally).
-- During any stage if you hit the WAF / detection signs in §6.4.
+- After Stage 1 if scope is wrong (target turns out to be a subsidiary of an unrelated corp; rules of engagement need clarification). Stop and ask once, then resume on the corrected scope.
+- Do **not** abort because the public surface looks small. A marketing homepage is not "nothing to find" — still run JS, mobile, GitHub, buckets, identity fabric, sister TLDs, and alt ports (`redteam-mindset`). A thin surface changes *depth per host*, not whether you finish the pipeline.
+- Detection signs in §6.4 mean back off, rotate persona/class, and keep covering remaining surfaces — not "engagement over."
 
 ---
 
@@ -483,16 +484,15 @@ Examples:
 - Listable S3 / GCS / Azure bucket containing user data.
 - Unauthenticated POST/PUT/DELETE to a write endpoint that mutates state.
 - Open Firebase Realtime Database (`https://{project}.firebaseio.com/.json` returns data).
-- `android:debuggable=true` in a production Android app.
 - Live-validated credential (PMAK, AWS key, Anthropic/OpenAI key) with broad scope.
-- ≥10 employees compromised in a breach corpus + their tenant identified (SSO_EXPOSURE).
+- Live-validated SSO secret for a breached employee (read-only `/me` or equivalent succeeded). Corpus text alone is not this row — see §22.2.
 - Open Elasticsearch cluster (`/_cat/indices` returns data).
 - Open Docker API (`/v1.40/containers/json` returns containers).
-- Open Redis (no AUTH; can write `authorized_keys`).
+- Open Redis (no AUTH; one `INFO` or non-destructive `GET`). Do not `FLUSHALL`, `SLAVEOF`, or write `authorized_keys`.
 - Open Kubernetes API server with anonymous-auth enabled.
 - Open kubelet on 10250 (pod exec without auth).
 - Open etcd on 2379 (cluster state and secrets).
-- BlueKeep-vulnerable RDP, EternalBlue-vulnerable SMB.
+- BlueKeep-era RDP or EternalBlue-era SMB **banner** is a candidate, not proven RCE. Do not send crash or worm payloads. Map the banner to KEV and stop unless the rules of engagement allow one non-destructive version check.
 - Citrix Netscaler / F5 BIG-IP with version-specific RCE CVE.
 
 ### 9.2 HIGH
@@ -509,6 +509,7 @@ Examples:
 - Missing HSTS on a sensitive path (`/login`, `/sso`, `/admin`, `/auth`) — escalated from MED.
 - Exposed Jenkins/Tomcat-Manager/phpMyAdmin admin UI (no auth or default creds).
 - Telnet (port 23) reachable.
+- `android:debuggable=true` in a production Android app (not pre-auth RCE; HIGH until you prove a reachable debug surface).
 - WebView with JS bridge in a mobile app (XSS → RCE potential).
 - Sensitive deep-link handler in a mobile app.
 - DMARC policy `p=none` on production sending domain (spoof-feasible).
@@ -565,8 +566,8 @@ Examples:
 - Wildcard CORS + credentials → **MED → HIGH**.
 - Wildcard CORS + sensitive endpoint → **LOW → MED**.
 - API endpoint with score ≥70 on the interest rubric (companion skill §20) → at least **HIGH**.
-- Domain breach severity ≥10 employees → **CRITICAL** regardless of stale-data caveats.
-- Vendor product version matches CISA KEV entry → **CRITICAL**.
+- ≥10 employee accounts in a breach corpus → **HIGH candidate** until a read-only validator proves a live secret. Corpus text is not account takeover.
+- Vendor product version matches a CISA KEV entry → **candidate**. CRITICAL only after the safe proof for that CVE (unique canary or body-diff). A banner is not the exploit.
 - DMARC `p=reject` + SPF strict + DKIM rotated → no escalation; well-postured.
 
 ---
@@ -651,14 +652,14 @@ Plus generic OIDC discovery on every alive subdomain:
 
 - **OIDC metadata + tenant GUID extraction** — fetch `https://login.microsoftonline.com/{tenant-or-domain}/.well-known/openid-configuration`. The `issuer` field returns a URL containing the tenant GUID (8-4-4-4-12 hex format). Tenant GUID + domain = stable tenant fingerprint.
 - **getuserrealm.srf** — `https://login.microsoftonline.com/getuserrealm.srf?login=<user>@<domain>` returns NameSpaceType: `Managed` (cloud-native), `Federated` (on-prem ADFS / external IdP), or `Unknown`. Detectability: low.
-- **Autodiscover v2** — `https://autodiscover-s.outlook.com/autodiscover/metadata/json/1` POST with email; detects tenant membership.
-- **GetCredentialType** (deep-mode user-enum) — `https://login.microsoftonline.com/common/GetCredentialType` POST `{"username": "<email>"}`. Response indicates whether email exists in tenant. Detectability: medium. Cap attempts at 20 per tenant.
+- **Autodiscover** — `GET https://outlook.office365.com/autodiscover/autodiscover.json/v1.0/<email>?Protocol=Autodiscoverv1`. A 302 to `autodiscover-s.outlook.com` means the domain is an M365 tenant. The same body for a known mailbox and a nonsense address means the oracle is closed.
+- **GetCredentialType** — POST `https://login.microsoftonline.com/common/GetCredentialType` with `{"Username":"<email>"}`. Diff `IfExistsResult` and `ThrottleStatus` on one known-good mailbox and one known-bad address you already harvested (`0` often exists, `1` does not, `5` other tenant, `6` throttled). Many tenants now return the same body for both — that is a closed oracle, not "user absent". Detectability: medium. Back off on 429. Do not invent local-parts.
 
 ### 11.3 Okta
 
 - **Org slug derivation** — derive candidate slugs from subdomains + root domain stem; Okta tenants live at `<slug>.okta.com` (or `<slug>.oktapreview.com`).
 - **OIDC fingerprint** — `https://<slug>.okta.com/.well-known/openid-configuration`.
-- **/api/v1/authn user-enum** (deep-mode) — POST `{"username": "<email>", "password": "invalid"}`. 400 vs 401 response code indicates user existence. Detectability: medium. Cap at 20 per tenant.
+- **/api/v1/authn user-enum** — POST `{"username":"<email>","password":"invalid"}` with that same invalid password every time. A stable status or error-code difference between one known-good and one known-bad address is the oracle. Identical bodies mean it is closed. Detectability: medium. Harvested addresses only; back off on 429. Do not guess passwords.
 
 ### 11.4 ADFS
 
@@ -723,7 +724,7 @@ Beyond plain Entra fingerprinting, M365 exposes a wider attack surface that's wo
 
 - Per-user OneDrive URL: `https://<target-stem>-my.sharepoint.com/personal/<user_email_with_underscore>/Documents/`.
 - Replace `@` with `_` and `.` with `_` in the email (e.g., `alice@acme.com` → `alice_acme_com`).
-- Authenticated probe; useful for confirming whether the OneDrive personal site has been provisioned (which itself is a presence indicator).
+- Unauthenticated check: compare status and body length for a known mailbox versus a nonsense user on `GET https://<stem>-my.sharepoint.com/personal/<user_underscore>/`. A login redirect on both is not an oracle. Do not treat a single 401 as "user exists".
 
 **M365 OAuth client_id discovery:**
 
@@ -825,10 +826,7 @@ When an extracted endpoint ends in `/graphql` or `/graphiql`, POST the standard 
 
 ### 13.8 Budget guidelines
 
-- Cap webapps analyzed per engagement: 40 default, 120 with `--deep`.
-- Cap JS files per webapp: 40 default, 80 with `--deep`.
-- Cap individual JS file size: 2 MiB.
-- Per-file timeout: 10 seconds.
+Prioritize auth, admin, and dev hosts first (§8.5). Do not stop while in-scope hosts remain and the window is open. Skip a file over ~2 MiB or that times out (~10s) and record it as unparsed — an unparsed bundle is not "no secrets".
 
 ---
 
@@ -863,7 +861,7 @@ Every discovered hostname becomes a `subdomain` asset. Write sidecar `mobile_end
 
 | Manifest attribute | Severity |
 |---|---|
-| `android:debuggable="true"` | CRITICAL |
+| `android:debuggable="true"` | HIGH (CRITICAL only if you prove a reachable debug/JDWP surface) |
 | `android:allowBackup="true"` (without whitelist) | MEDIUM |
 | `android:usesCleartextTraffic="true"` | MEDIUM |
 | Exported activity/service/receiver without `android:permission` | MEDIUM |
@@ -1099,14 +1097,15 @@ This is the highest-ROI single technique for external red teams. Execute it on e
 
 | Stat | Severity |
 |---|---|
-| ≥10 employees compromised | CRITICAL |
-| 1–9 employees compromised | HIGH |
-| ≥1 end-user (non-employee) compromised | MEDIUM |
+| ≥10 employees in corpus, secret not validated | HIGH candidate (not ATO) |
+| 1–9 employees in corpus, secret not validated | MEDIUM candidate |
+| ≥1 end-user (non-employee) in corpus | LOW candidate |
 | Domain seen in breach with 0 named accounts | INFO |
+| Read-only validator returns the account id for a corpus secret | CRITICAL (proven) |
 
 ### 22.3 SSO_EXPOSURE correlation
 
-After Stage 3 has run identity-fabric mapping AND breach lookups have completed: for every discovered IdP tenant, intersect with breach corpus on the tenant's domain. Non-empty intersection → `SSO_EXPOSURE` finding, severity **CRITICAL**. Evidence: tenant ID + product + employee count + per-account source attribution.
+After Stage 3 has run identity-fabric mapping AND breach lookups have completed: for every discovered IdP tenant, intersect with breach corpus on the tenant's domain. Non-empty intersection → `SSO_EXPOSURE` **candidate** at the §22.2 row. It becomes CRITICAL only when a read-only validator proves a live credential. Evidence: tenant ID + product + employee count + per-account source + validator result (or `validation_skipped_by_policy`).
 
 ### 22.4 Operational handling of stealer logs
 

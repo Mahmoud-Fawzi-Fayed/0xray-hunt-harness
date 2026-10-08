@@ -1,6 +1,6 @@
 ---
 name: hunt-http-smuggling
-description: "Hunt HTTP request smuggling (CL.TE, TE.CL, H2.CL, H2.TE, CL.0, client-side desync). Cause: front-end proxy and back-end server disagree on where one request ends and the next begins (Content-Length vs Transfer-Encoding header parsing inconsistency). CL.TE: front-end uses CL, back uses TE. TE.CL: opposite. H2.CL / H2.TE: HTTP/2 downgrade into an HTTP/1.1 back-end. Detection tools: Burp HTTP Request Smuggler extension, smuggler.py, h2csmuggler. Confirm with a unique path on a second request you send (not a victim) plus n>=3 timing against a fast baseline. Validate: cache poisoning only on a cache-buster you own, auth bypass only if the smuggled internal path returns data, credential mixing only between two sessions you control. Use when hunting CDN+origin stacks, load balancer / WAF bypass, or any front-end that downgrades HTTP/2."
+description: "Hunt HTTP request smuggling (CL.TE, TE.CL, H2.CL, H2.TE, CL.0, 0.CL, TE.0, HTTP/2-downgrade header splitting, client-side desync). Cause: front-end proxy and back-end server disagree on where one request ends and the next begins (Content-Length vs Transfer-Encoding header parsing inconsistency). CL.TE: front-end uses CL, back uses TE. TE.CL: opposite. H2.CL / H2.TE: HTTP/2 downgrade into an HTTP/1.1 back-end. TE.0: front-end honors chunked TE, back-end treats the request as body-less (often method-sensitive: OPTIONS). Detection tools: Burp HTTP Request Smuggler extension, smuggler.py, h2csmuggler. Confirm with a unique path on a second request you send (not a victim) plus n>=10 timing against a fast baseline. Validate: cache poisoning only on a cache-buster you own, auth bypass only if the smuggled internal path returns data, credential mixing only between two sessions you control. Use when hunting CDN+origin stacks, load balancer / WAF bypass, or any front-end that downgrades HTTP/2."
 ---
 
 # HUNT-HTTP-SMUGGLING — Request smuggling
@@ -20,8 +20,22 @@ Strict proxies answer the classic dual `Content-Length` + `Transfer-Encoding` pr
 
 1. **See the hop.** `Via`, `Server`, `CF-Ray`, `X-Served-By`, `X-Cache`, ALB/Akamai/Fastly/Cloudflare headers. HTTP/2 to you and HTTP/1.1 to the origin is the common 2024–2026 shape (H2.CL / H2.TE). Classic CL.TE still shows up on older HAProxy, F5, Citrix ADC, Squid, ATS, and custom proxies — do not decide from the `Server` banner alone.
 2. **Baseline.** A normal `POST` with a correct `Content-Length` and no `Transfer-Encoding` returns fast. A correct chunked body `0\r\n\r\n` returns fast. Note the time.
-3. **CL.TE timing.** Front-end honors `Content-Length`, back-end honors `Transfer-Encoding`. `Content-Length: 4` and body bytes `1\r\nA\r\nX` — the front-end forwards only `1\r\nA`. The back-end reads a chunk of size 1 (`A`) and waits for the next chunk. Timeout **only** on this shape, not on the baseline. Repeat ≥3, interleaved with the baseline. Then confirm with step 6.
-4. **TE.CL timing.** Opposite parser. Front-end consumes the chunked framing and treats the message as finished; back-end still waits for `Content-Length` bytes that never arrive (or eats the next request). Same rule: delay must be absent on the baseline. ≥3 interleaved pairs.
+3. **CL.TE timing.** Front-end honors `Content-Length`, back-end honors `Transfer-Encoding`. Send this shape (the CL parser accepts exactly `1\r\nA`, four bytes; the TE parser has read chunk `A` and waits). A client that never finishes the body is not this test — the request below is complete.
+
+```
+POST / HTTP/1.1
+Host: TARGET
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 4
+Transfer-Encoding: chunked
+
+1
+A
+X
+```
+
+Copy it with CRLF. The four body bytes the CL parser keeps are `1` CR LF `A`; the next CRLF and `X` are what the TE parser is still waiting on. LF-only is a different probe. Timeout **only** on this shape, not on the baseline. Repeat **≥10**, interleaved with the baseline (probe, baseline, probe, baseline). Then confirm with step 6.
+4. **TE.CL timing.** Opposite parser. Front-end consumes the chunked framing and treats the message as finished; back-end still waits for `Content-Length` bytes that never arrive (or eats the next request). Same rule: delay must be absent on the baseline. **≥10** interleaved pairs.
 5. **If both classic probes return 400,** obfuscate **one** header and retry once each, then move to H2 and CL.0. Do not send the whole matrix at high rate.
    - `Transfer-Encoding: chunked` plus a second `Transfer-Encoding: x`
    - `Transfer-Encoding: chunked` (trailing space), `Transfer-Encoding:\tchunked`, `Transfer-Encoding : chunked`
@@ -34,8 +48,25 @@ Strict proxies answer the classic dual `Content-Length` + `Transfer-Encoding` pr
    X: x
    ```
    The next response is a 404 (or a reflection) for `/smug-UNIQ`, not for the path you asked. That body-diff is the proof. CL must count the exact bytes the CL-parser will accept, including CRLFs. If the prefix is off by two bytes, fix the count; do not call it confirmed.
-7. **H2.CL / H2.TE.** You speak HTTP/2; the origin speaks HTTP/1.1. A `content-length` the front-end ignores (it trusts the frame) but the origin honors, or a `transfer-encoding` that appears only after downgrade, produces the same prefix effect. Need a client that can send raw H2 frames (Burp HTTP Request Smuggler, `h2csmuggler`). curl's HTTP/1.1 probe does not test this path. Confirmation is still the unique path on the **next** request.
-8. **CL.0 / early response.** The back-end answers without reading the body (`Content-Length` ignored, or a request line it treats as body-less). Leftover bytes prefix the next request on a keep-alive connection. Same unique-path confirmation. This is also the shape behind browser-powered (client-side) desync when a browser will actually send the request — prove it with a browser you control, one navigation, not a campaign.
+7. **H2.CL / H2.TE, and downgrade splitting.** You speak HTTP/2; the origin speaks HTTP/1.1. A `content-length` the front-end ignores (it trusts the frame) but the origin honors, or a `transfer-encoding` that appears only after downgrade, produces the same prefix effect. Need a client that can send raw H2 frames (Burp HTTP Request Smuggler, `h2csmuggler`). curl's HTTP/1.1 probe does not test this path. Separately, one header value that contains `\r\n` (so the HTTP/1.1 translation splits a second request line `GET /smug-UNIQ`). Many edges strip CR/LF; a `400` retires **that** variant only. Confirmation is still the unique path on the **next** request.
+8. **CL.0 / 0.CL / TE.0.** Names are front-end parser, then back-end parser.
+   - **CL.0:** the back-end answers without reading the body (`Content-Length` ignored, or a request line it treats as body-less). Leftover bytes prefix the next request on a keep-alive connection.
+   - **0.CL:** the front-end treats the message as finished with **no** body (early response, or it ignores `Content-Length`) while the back-end still honors `Content-Length` and swallows the next request as that body. Request 2 disappears or its response is for your prefix. A timeout on request 1 is the wrong oracle here.
+   - **TE.0 (2024):** front-end honors `Transfer-Encoding: chunked`; back-end treats the request as body-less (ignores TE, or the method is defined with no body). Chunk bytes prefix the next request. Often **method-sensitive**: `OPTIONS` (sometimes `PUT`) desyncs when `POST` does not. Seen on HTTP/1.1 GCP LBs (`Via: 1.1 google`) — the *class* is not GCP-only. Disable auto `Content-Length`. Chunk size is **hex**. Two CRLFs after the final `0`. Unique-path confirm, then stop.
+   ```
+   OPTIONS / HTTP/1.1
+   Host: TARGET
+   Transfer-Encoding: chunked
+   Connection: keep-alive
+
+   <hex length of the GET below, including its trailing CRLF>
+   GET /smug-UNIQ HTTP/1.1
+   Host: TARGET
+
+   0
+
+   ```
+   Same unique-path confirmation for all three. Client-side desync is the browser-shaped 0.CL/CL.0 case: one navigation you control, not a campaign. Set `Content-Length` (CL.0/0.CL) or the chunk length (TE.0) to the exact byte length of the smuggled request, including its final CRLF.
 9. **Hop-by-hop.** `Connection: Content-Length` (or `Transfer-Encoding`) asks a proxy to strip that header before the next hop. If an edge strips it and the next proxy still split on it, you get a desync. One probe. Akamai-style edge cache poisoning from this primitive is `hunt-cache-poison` and must be proven on a cache-buster you own.
 
 ## What to do with a confirmed prefix
@@ -47,7 +78,7 @@ Use it once, against yourself:
 
 ## Validation
 - **Confirmed:** on a reused connection, request 2's response is determined by the prefix in request 1 (unique path visible), and a control connection without the desync headers returns request 2's real path.
-- **Timing alone:** ≥3 delays on the probe and ≥3 fast baselines. Say "timeout desync" and still try the unique-path confirm. If the path confirm fails, do not claim cache poison or ATO.
+- **Timing alone:** ≥10 delays on the probe and ≥10 fast baselines, interleaved. Say "timeout desync" and still try the unique-path confirm. If the path confirm fails, do not claim cache poison or ATO.
 - **Not a finding:** your POST hung because the client never sent the body; a 400; HTTP/2 settings the tool could not negotiate; a delay that also appears on the baseline.
 
 ## Chains

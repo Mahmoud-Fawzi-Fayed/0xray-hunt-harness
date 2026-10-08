@@ -15,10 +15,9 @@ Trigger when:
 - You're about to spend time on IDOR/CSRF/XSS instead of access-yielding bugs
 - You found a vuln on app A and there are sister apps B, C, D you haven't touched
 
-DO NOT use for:
-- Bug bounty programs (use bug-bounty skill — different scope rules)
-- WAPT/PCI-style assessments (use OWASP-aligned skills)
-- Pure compliance audits
+Also load this on an authorized bug-bounty hunt. The coverage rules below (do not stop early, do not retract on one failed recheck, finish every live host) apply there too. Payout, OOS, and the draft-only stop live in `triage-validation` / `report-writing`.
+
+WAPT/PCI checklist audits and pure compliance reviews are a different job — they score headers. This skill does not.
 
 ---
 
@@ -135,31 +134,29 @@ The authorized-engagement case: SQLi confirmed on one sub-app (`<app-A>`); four 
 
 ## Mindset correction #3 — WAPT vs Red Team scope discipline
 
-**Skip these in red team scope (they don't yield access):**
-- IDOR (cross-user read/write *without* an ATO / privilege-escalation / sensitive-data-exfil chain — WAPT class). NOTE: IDOR is NOT a blanket-skip. IDOR on admin/role-assignment endpoints yields privilege escalation; on password-reset or session objects yields ATO; on file-download or PII handlers yields exfil; on token/key endpoints yields credential capture. Pursue those per the decision rule below.
-- CSRF (state-change-via-tricked-user — WAPT class)
-- Reflected XSS (without account-takeover chain — WAPT class)
-- Missing security headers (WAPT class)
-- Cookie hardening flags (WAPT class)
-- Verbose error messages without sensitive data (WAPT class)
-- DoS (out of scope per engagement rules typically)
-- Username enumeration (intel-gathering, not access)
+**This is a time-allocation rule, not a skip list.** Loading this skill on a bug-bounty hunt does **not** mean drop IDOR/CSRF/XSS.
 
-**Pursue these (they DO yield access):**
+| Mode | Where time goes | What you still do |
+|---|---|---|
+| **Red-team / access-first** | Classes that yield a session, token, foothold, or sensitive exfil | One-line the hygiene findings (headers, cookie flags, reflected XSS with no ATO chain) and keep moving. **Do not skip** IDOR/CSRF/XSS when they chain to ATO, priv-esc, or PII exfil. |
+| **Bug bounty** | Every in-scope class the program pays for — IDOR, CSRF, XSS, logic, authz | Hygiene-only (missing headers, logout CSRF, self-XSS) still dies at `triage-validation`. Do **not** skip the paying classes because a red-team skill is loaded. |
+
+**Always pursue (access-yielding):**
 - SQL injection (data exfil → DB creds → lateral)
 - Command injection / RCE (foothold)
-- File upload → webshell (foothold)
+- File upload → webshell (foothold) — prove execution once, then stop
 - LFI/RFI (config reads → DB creds → access)
 - SSRF (cloud metadata → IAM → cloud access)
 - Authentication bypass (parameter manipulation, JWT alg=none, header injection)
-- Hardcoded credentials in mobile/JS bundles
-- Default credentials on admin panels
+- Hardcoded / leaked credentials in mobile/JS bundles (read-only validate)
+- Framework-default credentials on admin panels (one or two known defaults — no wordlist)
 - SAML XSW / signature stripping (session hijack)
 - Cisco ASA / Citrix / Pulse / Fortinet SSL VPN CVEs (network foothold)
 - ManageEngine / Confluence / Atlassian RCE CVEs (foothold)
-- Kerberoasting / AS-REP roasting (post-foothold, but enumerate from outside if possible)
 
-**Decision rule:** if the bug, exploited fully, doesn't lead to a session/token/foothold or sensitive data exfil, it's WAPT-class — note it briefly but don't burn time on it.
+**Never pursue:** DoS / crash PoCs / keyspace exhaustion. Username enumeration is intel, not access — log it, don't burn the window on it unless it is the oracle for an IDOR/ATO chain you are already proving.
+
+**Decision rule (red-team clock):** if the bug, exploited fully, doesn't lead to a session/token/foothold or sensitive data exfil, note it and spend the remaining time on access-yielding classes. **Decision rule (bug bounty):** the program's paid list wins; run those classes to completion.
 
 ---
 
@@ -213,18 +210,18 @@ captcha weakness (replayable/absent/client-only) as the finding; don't turn it i
 7. Probe origin server directly (find via certificate transparency)
 
 **Rate limit:**
-1. IP rotation (multiple cloud regions)
+Classify the limiter (`hunt-brute-force`) — absence of a limit is not permission to guess secrets.
+1. Slower pace + jitter
 2. User-Agent rotation
-3. Slower pace + jitter
-4. Distribute across multiple TLS sessions
+3. Distribute across multiple TLS sessions on the **same** egress
+4. New egress only to continue *other in-scope hosts/classes*, never to brute a login or to evade an explicit block (that is out of RoE)
 
-**Slow target (timing-based exfil too slow):**
-1. Different injection point (avoid per-row SLEEP context)
-2. BENCHMARK or GET_LOCK as alternate timing oracle
-3. Error-based extraction
-4. OOB DNS callback (interactsh)
-5. Faster network (cloud VM in same region as target)
-6. Run dumper unattended overnight; deliver partial results
+**Slow target (timing oracle too slow):**
+1. Different injection point (avoid a per-row SLEEP)
+2. Error-based extraction of one cell
+3. One OOB hostname (interactsh) — a DNS hit is a lookup; file bytes or command output are the stronger claim
+4. A closer vantage point only if the rules of engagement allow it
+Prove one cell or one callback, then stop. Do not dump the table. Do not leave an extraction job running.
 
 **Rule:** when one path fails, the next move is "another vector to the same goal", not "documented as not vulnerable". A real adversary doesn't have an engagement window.
 
@@ -284,7 +281,7 @@ Why:
 ## Mindset correction #9 — Time is the constraint, not skill
 
 A real adversary has months. You have an engagement window (weeks). Decisions:
-- **Don't pre-judge feasibility** — if a dumper would take 6 hours, run it overnight; deliver partial results in the morning.
+- **Don't pre-judge a short proof.** A separated n≥10 timing pair or one OOB callback confirms the class. A multi-hour row dump is not the proof.
 - **Parallelize.** Run multi-target tests concurrently. Burn CPU, not wall-clock.
 - **State persistence.** Engagements span multiple sessions. State files (`engagement_log/`) make Wednesday's work usable on Friday.
 - **Background long-running jobs** — kick them off, set monitors for events, do other work in parallel.
@@ -348,7 +345,7 @@ If you catch yourself thinking any of these, STOP and reconsider:
 - "Mobile app is years old, probably nothing useful" (hardcoded URLs and tokens often outlive the engineering team's memory)
 - "SaaS, so nothing to test" (vendor patches centrally — usually true, but tenant config gaps are NOT central)
 - "We've tested enough" (use the during-engagement checklist; if any answer is "no", keep going)
-- "The exfil would take too long" (run it unattended; deliver partials)
+- "The full dump would take too long" (one proven cell is the finding; do not start the dump)
 
 ---
 

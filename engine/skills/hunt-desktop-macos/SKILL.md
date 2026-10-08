@@ -66,7 +66,7 @@ lsof -iTCP -sTCP:LISTEN -P        → localhost/0.0.0.0 listeners before vs afte
 
 3. **Electron audit.** Identical class to the Windows skill: extract `Contents/Resources/app.asar`, grep `webPreferences`, audit preload bridges and `ipcMain` sinks, check `setAsDefaultProtocolClient` + `open-url` handling. macOS-specific: deep links arrive via the `open-url` event — check whether the handler validates the URL before acting (fund transfers, account linking, file opens). **Electron Fuses** (2024-2026): dump with `npx @electron/fuses read --app /Applications/App.app` — `RunAsNode` enabled + `ELECTRON_RUN_AS_NODE=1` = arbitrary Node exec in the app's TCC/entitlement context (a code-injection + TCC-grant-theft primitive on its own); `EnableNodeCliInspectArguments` on = attach a debugger via `--inspect`; `EnableEmbeddedAsarIntegrityValidation` / `OnlyLoadAppFromAsar` off = plant a modified ASAR. Each off-fuse is a concrete finding when it unlocks reachable impact.
 
-4. **URL-scheme audit.** For each `CFBundleURLTypes` entry, find the handler (`application:openURL:` / `onOpenURL` / Electron `open-url`). Test injection: `open 'scheme://x" --flag="y'`, metacharacters if the value reaches `osascript`/`NSTask`/`Process` with string interpolation, and second-order flows (open URL → fetches remote config → acts). Drive from a browser PoC page — Safari navigates custom schemes with one prompt.
+4. **URL-scheme audit.** For each `CFBundleURLTypes` entry, find the handler (`application:openURL:` / `onOpenURL` / Electron `open-url`). On macOS the OS delivers the URL via Apple Event / `open-url` — it is **not** Chromium argv (the Windows `--gpu-launcher` break). Primary tests: the URL string reaches `osascript` / `NSTask` / `Process` with interpolation, a fund-move / file-open action with no confirm, or a second-order fetch. Try argv injection once anyway (some wrappers forward the URL on `process.argv`); failure there is not "no scheme bug". Drive from a browser PoC page — Safari navigates custom schemes with one prompt.
 
 5. **XPC / privileged-helper audit (highest privesc yield).**
    - Enumerate: `launchctl list`, `launchctl print system/<label>`, read the LaunchDaemon plist's `MachServices`.
@@ -76,7 +76,7 @@ lsof -iTCP -sTCP:LISTEN -P        → localhost/0.0.0.0 listeners before vs afte
 
 6. **Dylib hijacking.** `otool -l App.app/Contents/MacOS/App | grep -A3 LC_RPATH` and `otool -L` for `@rpath` imports. Hijackable when: an `LC_RPATH` entry points to a writable/missing location searched **before** the real one, or the app has `disable-library-validation` + a writable `Contents/Frameworks`. Objective-See's Dylib Hijack Scanner automates the sweep. Impact: code exec inside the app's TCC/entitlement context.
 
-7. **Sparkle updater.** Read `SUFeedURL` (HTTP = finding), confirm `SUPublicEDKey` exists (absent = unsigned updates). Tests: spoof the appcast via `hosts`/proxy — does TLS validation hold? Serve a valid-signature **older** version (rollback); serve a delta with a path-traversal payload; check whether the feed URL is user/defaults-overridable (`defaults write <bundle> SUFeedURL ...`).
+7. **Sparkle updater.** Read `SUFeedURL` and `SUPublicEDKey` / `SUPublicDSAKey` (Sparkle 1). HTTP is MITM of the *feed*, not automatic RCE: with **no** public key, a MITM appcast+archive installs (RCE). **With** a public key, Sparkle still requires a valid EdDSA/DSA signature — claim rollback to an older *signed* build, or `defaults write` feed override if honored, not "unsigned item accepted because HTTP". Tests: spoof via `hosts`/proxy; serve a valid-signature older version; delta path traversal.
 
 8. **Localhost servers + WebSocket bridges.** `lsof -iTCP -sTCP:LISTEN -P` before/after launch and sign-in. Same gates as Windows: bind address, Host-header validation (DNS rebinding), WebSocket `Origin` check, auth model. macOS flavor: many apps bridge browser→app via `ws://127.0.0.1` with a token in the URL — check whether the token is guessable, logged (`log show`), or leaked via `ps`.
 
@@ -103,13 +103,18 @@ grep -A5 MachServices /Library/LaunchDaemons/com.vendor.helper.plist
 launchctl print system/com.vendor.helper
 ```
 ```python
-# pyobjc probe: connect to the Mach service as a standard user
+# pyobjc probe: connect as a standard user. LaunchDaemon helpers usually need the
+# privileged option; 0 alone often invalidates and looks like "not vulnerable".
 import objc
 from Foundation import NSXPCConnection
-c = NSXPCConnection.alloc().initWithMachServiceName_options_("com.vendor.helper", 0)
-c.setRemoteObjectInterface_(...)   # protocol from class-dump of the helper binary
-c.resume()
-# connection accepted → validation is the only gate; enumerate protocol methods
+NSXPCConnectionPrivileged = 1 << 12
+name = "com.vendor.helper"
+for opts in (0, NSXPCConnectionPrivileged):
+    c = NSXPCConnection.alloc().initWithMachServiceName_options_(name, opts)
+    c.setInvalidationHandler_(lambda opts=opts: print(f"INVALIDATED opts={opts}"))
+    c.resume()
+# Set the remote interface from class-dump before calling a method.
+# Accepted connection is not root. A method you invoked that writes or execs as root is the proof.
 ```
 
 **Dylib-hijack sweep:**
@@ -124,14 +129,18 @@ otool -L App.app/Contents/MacOS/App | grep '@rpath'
 ```bash
 /usr/libexec/PlistBuddy -c 'Print :SUFeedURL' App.app/Contents/Info.plist
 /usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' App.app/Contents/Info.plist 2>&1
-# http:// feed → MITM finding; missing key → unsigned-update finding
+/usr/libexec/PlistBuddy -c 'Print :SUPublicDSAKey' App.app/Contents/Info.plist 2>&1
+# HTTP + no key → MITM RCE; HTTP + key → rollback of a signed build, not a forged archive
 defaults read <bundle-id> SUFeedURL 2>/dev/null   # user-overridable feed?
 ```
 
 **URL-scheme injection probe:**
 ```bash
-open 'targetscheme://x" --gpu-launcher="open -a Calculator'   # Electron argv re-parse
-open 'targetscheme://action?path=$(touch /tmp/pwned)'         # interpolation into shell
+# Primary (macOS): Apple Event / open-url. Interpolation and unconfirmed actions.
+open 'targetscheme://action?path=$(touch /tmp/pwned-UNIQ)'
+open 'targetscheme://send?to=attacker&amount=1'
+# Secondary: some wrappers still forward the URL on argv — try once, ignore if it no-ops
+open 'targetscheme://x" --gpu-launcher="open -a Calculator'
 ```
 
 **Runtime attach when `get-task-allow` is present:**
@@ -151,9 +160,9 @@ curl -s http://127.0.0.1:PORT/api/status -H 'Host: attacker.example' -w '\n%{htt
 
 1. **XPC helper with no or PID-only client validation.** Root daemon exposes file/process verbs to any local process; PID checks lose to spawn races. The canonical macOS privesc class.
 
-2. **Sparkle misconfig: HTTP `SUFeedURL` or missing `SUPublicEDKey`.** MITM serves a malicious appcast → silent replacement of the app. Affects the entire install base from one network position.
+2. **Sparkle misconfig: HTTP `SUFeedURL` with no `SUPublicEDKey`/`SUPublicDSAKey`.** MITM serves a malicious appcast+archive → silent replacement. HTTP **with** a public key is not arbitrary RCE (signature still required) — rollback of a signed-but-vulnerable build, or a `defaults write` feed override, is the remaining path.
 
-3. **URL-scheme handlers that trust input.** Deep link reaches `NSTask`/`osascript`/file-write without validation; browser navigation is the remote trigger. Electron builds re-parse the URL into argv.
+3. **URL-scheme handlers that trust input.** Deep link reaches `NSTask`/`osascript`/file-write without validation; browser navigation is the remote trigger. On macOS the URL arrives via `open-url` / Apple Event — do not require a Chromium argv break to call it a bug.
 
 4. **`disable-library-validation` + writable `Contents/Frameworks`.** Plant a dylib → code exec in the app's entitlement/TCC context (inherits Full Disk Access, Screen Recording, etc.).
 
@@ -207,9 +216,9 @@ Before writing the report, confirm:
 
 `/Library/LaunchDaemons/com.vendor.helper.plist` exposes `MachServices: com.vendor.helper`. A standard-user pyobjc client connects unchallenged; the protocol exposes `installPackageAtPath:` which runs `installer` as root on a caller-controlled path. Dropped `.pkg` → root. Reported severity: **High** (local privesc; program scope confirmed local privesc in-bounds).
 
-### Scenario B — Sparkle `SUFeedURL` over HTTP → MITM RCE
+### Scenario B — Sparkle HTTP feed with no public key → MITM RCE
 
-Info.plist: `SUFeedURL = http://updates.vendor.example/appcast.xml`, `SUPublicEDKey` present but the appcast signature check is bypassed by serving an unsigned `<item>` when the feed is HTTP (parser accepted items without `sparkle:edSignature`). Hostile network → malicious app bundle replaces the app at next update check. Reported severity: **High**.
+Info.plist: `SUFeedURL = http://updates.vendor.example/appcast.xml`, **no** `SUPublicEDKey` / `SUPublicDSAKey`. Hostile network serves a malicious appcast + archive; Sparkle installs it at the next check. If a public key **is** present, an unsigned `<item>` is rejected — then prove rollback of an older signed build, or that `defaults write <bundle> SUFeedURL` is honored, before claiming RCE. Reported severity: **High** (network position).
 
 ### Scenario C — Electron wallet: `open-url` handler without confirmation → fund theft
 

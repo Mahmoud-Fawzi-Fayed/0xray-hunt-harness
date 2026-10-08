@@ -48,8 +48,9 @@ for guess in $TARGET "${TARGET}-tech" "${TARGET}corp" "${TARGET}-io" "${TARGET}-
   curl -sI "https://github.com/$guess" | grep -E "HTTP|status" | head -1
 done
 
-# Via WHOIS / email-domain → GitHub search
-gh search users --owner-affiliations=organization --query "$TARGET" --limit 10
+# Via WHOIS / email-domain → GitHub search (no --owner-affiliations flag)
+gh search users "$TARGET" type:org --limit 10
+gh search repos "$TARGET" --limit 10 --json fullName,description,url
 
 # Via employees → reverse from social media + GitHub profile
 # Many employees list their employer org on their GitHub profile
@@ -134,14 +135,20 @@ curl -sI "https://rubygems.org/api/v1/gems/$NAME.json" | head -1
 # Go modules — slightly different, since module names are URLs
 # Check if module path is reachable
 curl -sI "https://proxy.golang.org/github.com/$ORG/$NAME/@latest" | head -1
+
+# Maven Central — numFound 0 means the artifactId is unclaimed (candidate only)
+curl -s "https://search.maven.org/solrsearch/select?q=a:${NAME}&rows=0&wt=json" | jq '.response.numFound'
+
+# NuGet — 404 on the flat container means the id is unclaimed (candidate only)
+curl -s -o /dev/null -w "%{http_code}\n" "https://api.nuget.org/v3-flatcontainer/${NAME}/index.json"
 ```
 
 **Severity calibration:** Just because a name is unclaimed doesn't mean it's exploitable. You also need:
 1. Evidence the target's BUILD SYSTEM resolves names from public registries (not just their internal one)
-2. OR evidence the target's package manager is configured insecurely (e.g., `.npmrc` without `@scope:registry=` mapping)
-3. OR the package would be installed by their builds (it's actually in package.json, not just referenced in dead code)
+2. OR evidence the target's package manager is configured insecurely (e.g., `.npmrc` without `@scope:registry=` mapping; pip `extra-index-url` alongside an internal index — pip searches **both** and takes the highest version)
+3. OR the package would be installed by their builds (it's actually in package.json / requirements.txt / go.mod, not just referenced in dead code)
 
-A 404 on registry without supporting context is INFORMATIONAL only.
+A 404 on registry without supporting context is INFORMATIONAL only. Do **not** publish a placeholder package to prove the name is registerable.
 
 ---
 
@@ -225,6 +232,15 @@ done
 | Self-hosted runner reachable from public repo workflows | **High** — persistent attacker pivot |
 | Issue-comment-triggered workflow that runs `gh` with token | **High** |
 | Workflow downloads from URL that target controls | **Medium** |
+| `workflow_run` or `issue_comment` interpolates `github.event.*` / `toJSON(github.event)` into `run:` | **Critical** — same script injection as a PR title |
+| `actions/cache` key writable from a fork PR and restored on a privileged workflow | **High candidate** — report the workflow text unless CI tests are in scope; do not poison a shared cache |
+
+### 2025–2026 deltas
+
+- Grep for `reviewdog/action-setup`, `reviewdog/action-shellcheck`, `reviewdog/action-typos`, and `tj-actions/changed-files`. `reviewdog/action-setup@v1` (CVE-2025-30154, 2025-03-11) is the compromise that led to `tj-actions/changed-files` (CVE-2025-30066). A mutable tag is the finding; a pinned 40-char SHA is not.
+- A public 404 is still only a candidate when the build can fall through to the public registry. It is not exploitable when you can show all three of: a scope `registry=` (or pip `--index-url` only), `ignore-scripts=true`, and npm trusted publishing or `min-release-age`. Record which of the three you actually saw.
+- Check lockfiles and workflow history for a dependency whose OSV advisory is a malicious `postinstall` in the window the org's CI ran. The finding is a leaked token you can point at, or the unpinned action. Do not publish a package.
+- **2025 npm worm chain:** Nx s1ngularity (`CVE-2025-10894`, `pull_request_target` → stolen npm token) then Shai-Hulud (Sept 2025) — `postinstall` harvests tokens and republishes any package the token can push. Query OSV against the lockfile for that window. Also search GitHub for org-member repos named `Shai-Hulud` or `*-migration` (the worm's exfil pattern). Mutable `uses: …@vN` plus a leaked `_authToken` is the reportable pair — still do not publish.
 
 ---
 
@@ -300,8 +316,11 @@ grep -r "url.*\(.*nexus" .
 # Some orgs maintain a public npm scope mirroring their brand
 curl -s "https://registry.npmjs.org/-/v1/search?text=scope:$ORG&size=50" | jq '.objects[].package.name'
 
-# Public PyPI presence
-curl -s "https://pypi.org/simple/" | grep "$ORG" | head -20
+# Public PyPI presence — do not download https://pypi.org/simple/ (the full index).
+# 200 = name claimed, 404 = unclaimed. Check names you already extracted.
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Accept: application/vnd.pypi.simple.v1+json" \
+  "https://pypi.org/simple/${NAME}/"
 
 # Check if scope is taken — if it's NOT, an attacker could register
 # (relevant for any internal package using that scope)
@@ -346,7 +365,7 @@ curl -sI "https://registry.npmjs.org/-/org/$ORG"
 - **DO NOT submit PRs to client repos as part of testing without specific OK** — workflow injection PoCs may be needed but they touch CI/CD and other developers
 - **DO NOT scrape entire npm/PyPI for typosquat candidates** — irresponsible and noisy
 - **DO NOT confuse "name is unclaimed" with "exploitable dependency confusion"** — the build system matters; many orgs use proper scope-mapping that prevents the attack
-- **DO NOT touch GitHub Actions self-hosted runners** — they may be inside the client network and outside the external scope
+- **DO NOT dispatch jobs onto self-hosted runners** — executing attacker-controlled workflow code on a runner may be internal infra. Reading `.github/workflows/*.yml` and flagging `runs-on: self-hosted` is recon and in-scope. If a runner URL itself is in scope, fingerprint only.
 - **DO NOT pull large Docker images blindly** — image bandwidth can be 5-50GB; review tags first
 
 ---
@@ -508,7 +527,7 @@ Twelve well-documented public cases, mapped to the recon surface above. Each ent
 - **Root cause:** PyPI permits visually-confusable names; pip resolves names by exact string match. No human-review gate on new package publication.
 - **Impact:** Each campaign typically <10K installs before takedown, but `jeIlyfish` lived 1 year (Dec 2018 → Dec 2019). Cumulative: dozens of campaigns documented annually by Snyk/Phylum/Sonatype/ReversingLabs.
 - **References:**
-  - ReversingLabs jeIlyfish/python3-dateutil: https://www.reversinglabs.com/blog/mining-for-malicious-ruby-gems
+  - ReversingLabs on the same typosquat class in RubyGems (not the PyPI `jeIlyfish` campaign): https://www.reversinglabs.com/blog/mining-for-malicious-ruby-gems
   - Snyk colourama / pytagora analysis: https://snyk.io/blog/malicious-packages-found-to-be-typo-squatting-in-pypi/
   - Phylum 2024 typosquat report: https://blog.phylum.io/the-state-of-the-software-supply-chain/
   - Sonatype 2024 State of the Software Supply Chain (>700K malicious packages found): https://www.sonatype.com/state-of-the-software-supply-chain/
@@ -554,6 +573,7 @@ Twelve well-documented public cases, mapped to the recon surface above. Each ent
 | Step 8 — SBOM / artefact metadata | Log4Shell 2021, MOVEit 2023 |
 | Step 9 — Internal registry URL leakage | Birsan 2021, SolarWinds 2020 |
 | Step 10 — npm/PyPI org presence | ua-parser-js 2021, event-stream 2018 |
+| Step 6 + lockfile / OSV | Nx s1ngularity `CVE-2025-10894` (2025), Shai-Hulud npm worm (2025) |
 
 ### Patterns across all 12 cases
 

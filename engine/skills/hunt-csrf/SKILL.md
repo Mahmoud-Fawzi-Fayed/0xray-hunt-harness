@@ -27,12 +27,13 @@ Session cookie without `SameSite=Strict`; `SameSite=None`; no token in POST; JSO
 
 ## Cookie / SameSite (modern Chrome)
 Default Lax since ~2020. **Lax sends cookies on top-level GET navigations**, not on `fetch`/XHR/form-POST from foreign origins — **except**:
-- `SameSite=None; Secure` or **no SameSite** on old clients
-- **Sibling subdomain** attacker (`marketing.target.com` → `app.target.com`) — often treated as schemeful-same-site / parent-domain; Lax may still send (Argo CD CVE-2024-22424 class)
+- `SameSite=None; Secure` or **no SameSite** on old clients. `SameSite=None` **without** `Secure` is dropped by current Chrome — that cookie is not a CSRF primitive.
+- **Sibling subdomain** (`https://marketing.target.com` → `https://app.target.com`) is schemeful **same-site** (same registrable domain). Both `Lax` and `Strict` are sent on that POST. Strict only withholds the cookie on **cross-site** requests. A sibling you control (XSS, takeover) is CSRF against Lax and Strict (Argo CD CVE-2024-22424 class).
 - Top-level POST via 307/meta from a **same-site** hop
+- **Strict bypass via on-site redirect (GET state changes):** navigate the victim to an open redirect on the target that bounces to the state-changing GET — the redirect hop is same-site, so `Strict` cookies attach on the second request. Pair with `hunt-open-redirect`.
 - Login CSRF / GET-state-change (`<img>`, `<form method=GET>`)
 
-Always read the real `Set-Cookie`. Do not assume “Lax = safe” or “Lax = always CSRF”.
+Always read the real `Set-Cookie`. Do not assume “Lax = safe”, “Strict = safe”, or “Lax = always CSRF”. A `Partitioned` (CHIPS) cookie is not sent on a foreign-site PoC — treat it like Strict for this skill. If CORS already reflects your origin with `ACAC: true`, skip the text/plain trick and POST real `application/json` (`hunt-cors`).
 
 ## Tests
 | Test | How | Hit |
@@ -41,10 +42,15 @@ Always read the real `Set-Cookie`. Do not assume “Lax = safe” or “Lax = al
 | Token swap | A’s token on B’s cookie (and vice versa) | Token not bound to session |
 | Static token | Same value across pages/users | Leakable |
 | JSON simple | `enctype=text/plain` or urlencoded POST to JSON API | No preflight, cookies sent |
+| Multipart simple | `enctype=multipart/form-data` POST to a JSON API | Also a no-preflight simple request; many frameworks (Rails/Laravel/Spring/Express+multer) bind multipart fields into the same model |
+| CORS-gated JSON | If `hunt-cors` already allows your origin + ACAC, POST real `Content-Type: application/json` | Preflight succeeds; text/plain not required |
+| Token in query | Sensitive GET; attacker page reads `document.referrer` or a logging beacon | Token value, then one state-changing POST |
 | GET mutation | GraphQL `?query=mutation…`, `_method=DELETE`, `<img src>` | Lax cookies send |
 | Path confusion | `/safe/../admin/users` — router vs CSRF middleware path (GHES CVE-2022-23732) | Protected handler, skipped check |
 | Origin omit / null | Sandboxed iframe; HTTPS→HTTP Referer strip; some servers allow missing Origin | Check skipped |
 | Weak Origin match | `target.com.evil.com` `eviltarget.com` | Naive `contains` |
+| Double-submit toss | From a sibling you control, set `csrf=<your value>; Domain=.target.com`, submit that same value | Check compares cookie to body and is not session-bound. A `__Host-` cookie cannot be overwritten this way |
+| OAuth `state` | empty `state`, `state=%00`, `state=<expected>%00.attacker` | Link completes (`hunt-oauth`). A rejected state is not a bug |
 | Fetch Metadata | If server requires `Sec-Fetch-Site: same-origin`, try top-level nav / `<form>` (`same-site` vs `cross-site`) | Policy bypass |
 | Login CSRF | Attacker’s creds posted from victim browser | Victim logged into attacker account (session fixation sibling) |
 | OAuth/SAML state | Missing `state`/`RelayState` bind | Account-link ATO (`hunt-oauth`) |
