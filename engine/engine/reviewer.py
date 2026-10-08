@@ -293,6 +293,9 @@ def apply_fixes(base, snap):
                 if r.get("ok") and r.get("ident") == "B":
                     applied.append({"action": "provision_b", "target": slug,
                                     "result": "second account (B) provisioned -> cross-account IDOR now testable"})
+                elif r.get("error") and "cooldown" not in r["error"]:   # can't auto-make B -> tell the operator
+                    needs_op.append(f"{slug}: couldn't auto-provision account B ({r['error']}) — "
+                                    "raise HUNT_MAX_ACCOUNTS or paste a B login (panel) to unlock cross-account IDOR")
             except Exception:  # noqa: BLE001
                 pass
         # 3) NEEDS OPERATOR — no auth session but auth-dependent classes are the gap (often captcha-walled):
