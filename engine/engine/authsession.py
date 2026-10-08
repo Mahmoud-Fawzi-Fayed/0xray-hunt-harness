@@ -246,6 +246,56 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
             "headers": list(hdrs.keys()), "user": sess["user"], "requeued": requeued}
 
 
+def provision_b(program, base=DEFAULT_BASE, scope=None, host=None, timeout=None):
+    """Provision a SECOND in-scope account and store it as authn identity 'B' (the cross-account IDOR/BOLA
+    victim). Hard-gated: needs a valid primary session, no existing B, a self-register host, the guardrail
+    account-cap, and a cooldown marker so an unattended caller NEVER spams signups. Best-effort; returns
+    {'ok':True} or {'error':...}. Picked up by the next hunt round — no restart needed."""
+    import authn
+    slug = G._slug(program)
+    if "B" in authn.identities(slug, base):
+        return {"ok": True, "note": "B already present"}
+    if not valid(load(program, base)):
+        return {"error": "no valid primary (A) session — provision A first"}
+    # cooldown: don't re-attempt B signup within the retry window (avoids unattended signup spam)
+    mk = os.path.join(os.path.expanduser(base), "_identity", f"{slug}-B.attempt")
+    cool = int(os.environ.get("HUNT_PROVISION_RETRY", "21600"))
+    try:
+        if os.path.isfile(mk) and (time.time() - os.path.getmtime(mk)) < cool:
+            return {"error": "cooldown: B provisioning attempted recently"}
+    except OSError:
+        pass
+    if scope is None:
+        scope = G._load_scope(program, base)
+    host = host or pick_auth_host(scope)
+    if not host:
+        return {"error": "no in-scope auth host to register on"}
+    ok, why = G.check(program, "register", url="https://" + host, scope=scope, base=base, log=False)
+    if not ok:
+        return {"error": why}
+    os.makedirs(os.path.dirname(mk), exist_ok=True)
+    open(mk, "w").write(str(time.time()))               # stamp BEFORE the attempt -> at most one try per window
+    ident = I.new_identity(program, base=base, scope=scope)
+    if ident.get("error"):
+        return {"error": "identity: " + ident["error"]}
+    if timeout is None:
+        timeout = int(os.environ.get("HUNT_PROVISION_TIMEOUT", "600"))
+    r = A.run_agent(_provision_task(program, host, ident), timeout=timeout, attempts=1)
+    if r.get("error"):
+        return {"error": "agent: " + r["error"]}
+    data = A.extract_json(r.get("result", "")) or {}
+    if not isinstance(data, dict) or not data.get("success"):
+        return {"error": "signup did not complete", "notes": (data or {}).get("notes", "")}
+    cookies = data.get("cookies") or {}
+    cstr = "; ".join(f"{k}={v}" for k, v in cookies.items()) if isinstance(cookies, dict) else str(cookies)
+    bearer = (data.get("headers") or {}).get("Authorization") or (data.get("headers") or {}).get("authorization")
+    authn.save(slug, "B", cookie=cstr or None,
+               bearer=re.sub(r"(?i)^bearer\s+", "", str(bearer or "")).strip() or None, base=base)
+    G.audit(program, "login", True, "second account (B) captured for cross-account IDOR",
+            url="https://" + host, base=base)
+    return {"ok": True, "program": slug, "ident": "B", "user": data.get("user") or ident.get("email")}
+
+
 def clear_manual(program, base=DEFAULT_BASE):
     """Remove the stored session for a program."""
     try:

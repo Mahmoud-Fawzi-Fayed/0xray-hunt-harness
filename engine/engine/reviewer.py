@@ -214,7 +214,16 @@ def _render_md(snap, rev):
              f"**Score:** {rev.get('score_0_10','?')}/10 · "
              f"confirmed={y['confirmed_total']} (valuable={y['valuable_total']}) · "
              f"by_class={y['by_class']} · load={snap['box']['load_1_5_15']}", "",
-             f"## Top priority\n{rev.get('top_priority','(none)')}", "", "## Weaknesses"]
+             f"## Top priority\n{rev.get('top_priority','(none)')}", ""]
+    if rev.get("applied"):
+        lines.append("## Auto-applied (by the reviewer)")
+        lines += [f"- **{a['action']}** @ {a['target']} — {a['result']}" for a in rev["applied"]]
+        lines.append("")
+    if rev.get("needs_operator"):
+        lines.append("## Needs you (can't auto-fix safely)")
+        lines += [f"- {m}" for m in rev["needs_operator"]]
+        lines.append("")
+    lines += ["## Weaknesses"]
     lines += [f"- {w}" for w in (rev.get("weaknesses") or [])] or ["- (none)"]
     lines += ["", "## Missing / gaps"]
     lines += [f"- {m}" for m in (rev.get("missing") or [])] or ["- (none)"]
@@ -248,6 +257,52 @@ def _persist(base, snap, rev):
         pass
 
 
+def apply_fixes(base, snap):
+    """DIRECTLY apply the safe, deterministic remediations the telemetry implies — not just recommend them.
+    Every action is bounded, guardrail-gated, and NON-DISRUPTIVE: it writes a flag file / authn account the
+    NEXT hunt round picks up, never restarts or heavies a running hunt. Risky changes (engine/skill code)
+    stay recommendations for the operator. Returns (applied[], needs_operator[])."""
+    applied, needs_op = [], []
+    if os.environ.get("REVIEW_AUTOAPPLY", "1") != "1":
+        return applied, needs_op
+    cap_surface = int(os.environ.get("REVIEW_RECON_CAP_SURFACE", "1500"))
+    hi_classes = ("idor", "bola", "auth-bypass", "sqli", "ssrf")
+    for t in snap.get("targets", []):
+        slug = t["slug"]
+        tdir = os.path.join(os.path.expanduser(base), slug)
+        auth = t.get("auth") or {}
+        zero = t.get("high_surface_zero_yield_classes") or []
+        # 1) RECON CAP — a starved huge-surface target still crawling recon: hunt the ranked slice NOW
+        try:
+            flag = os.path.join(tdir, ".recon_capped")
+            if (t.get("phase") == "recon" and (t.get("surface") or 0) > cap_surface
+                    and (t.get("coverage_pct") or 0) < 25 and not os.path.exists(flag)):
+                open(flag, "w").write(snap["ts"])
+                applied.append({"action": "recon_cap", "target": slug,
+                                "result": f"capped recon ({t.get('surface')} surface, {t.get('coverage_pct')}% "
+                                          "done) -> hunt the ranked slice now"})
+        except OSError:
+            pass
+        # 2) PROVISION ACCOUNT B — IDOR/BOLA is untestable without a 2nd account. Mint one (hard-gated:
+        #    needs a live A, no existing B, self-register host, account-cap, + an internal cooldown).
+        if (os.environ.get("REVIEW_AUTO_PROVISION_B", "1") == "1" and auth.get("session_valid")
+                and not auth.get("two_account") and "idor" in zero):
+            try:
+                import authsession as AS
+                r = AS.provision_b(slug, base=base)
+                if r.get("ok") and r.get("ident") == "B":
+                    applied.append({"action": "provision_b", "target": slug,
+                                    "result": "second account (B) provisioned -> cross-account IDOR now testable"})
+            except Exception:  # noqa: BLE001
+                pass
+        # 3) NEEDS OPERATOR — no auth session but auth-dependent classes are the gap (often captcha-walled):
+        #    can't safely auto-fix; surface it loudly so the operator pastes a login in the panel.
+        if not auth.get("session_valid") and any(c in zero for c in hi_classes):
+            needs_op.append(f"{slug}: no auth session — paste a test login in the panel to unlock "
+                            f"{', '.join(c for c in hi_classes if c in zero)}")
+    return applied, needs_op
+
+
 def review(base=BASE, quiet=False, dry=False):
     try:
         import notify
@@ -274,17 +329,23 @@ def review(base=BASE, quiet=False, dry=False):
                "weaknesses": [], "missing": [], "recommendations": [],
                "top_priority": "(agent produced no structured review this pass)", "score_0_10": None}
     rev["_model"] = r.get("model")
+    applied, needs_op = apply_fixes(base, snap)         # DIRECTLY apply the safe fixes — not just recommend
+    rev["applied"] = applied
+    rev["needs_operator"] = needs_op
     _persist(base, snap, rev)
     if notify:
         tp = rev.get("top_priority") or "review complete"
-        notify.site_alert("reviewer",
-                          [f"workflow review (score {rev.get('score_0_10','?')}/10): {tp}",
-                           f"confirmed={snap['yield']['confirmed_total']} valuable={snap['yield']['valuable_total']}"],
-                          base=base, kind="review")
+        lines = [f"workflow review (score {rev.get('score_0_10','?')}/10): {tp}",
+                 f"confirmed={snap['yield']['confirmed_total']} valuable={snap['yield']['valuable_total']}"]
+        if applied:
+            lines.append("AUTO-APPLIED: " + "; ".join(f"{a['action']}@{a['target']}" for a in applied))
+        if needs_op:
+            lines.append("NEEDS YOU: " + "; ".join(needs_op[:3]))
+        notify.site_alert("reviewer", lines, base=base, kind="review")
     if not quiet:
         print(_render_md(snap, rev))
     return {"ok": True, "score": rev.get("score_0_10"), "recs": len(rev.get("recommendations") or []),
-            "model": r.get("model")}
+            "applied": len(applied), "needs_operator": len(needs_op), "model": r.get("model")}
 
 
 def _main(argv=None):

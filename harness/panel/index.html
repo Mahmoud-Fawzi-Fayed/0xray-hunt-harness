@@ -575,9 +575,13 @@ async function loadReview(){try{const j=await api("/review/latest");const el=doc
   const sc=(r.score_0_10==null?"?":r.score_0_10);const when=((j.snapshot&&j.snapshot.ts)||"").slice(0,16).replace("T"," ");
   const recs=(r.recommendations||[]).slice(0,6).map(x=>`<div style="padding:6px 0;border-bottom:1px solid #141a25"><b>[${esc(x.where||"?")}·${esc(x.effort||"?")}]</b> ${esc(x.action||"")} <span class="dim">— ${esc(x.why||"")} → ${esc(x.impact||"")}</span></div>`).join("");
   const weak=(r.weaknesses||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");const miss=(r.missing||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");
-  el.innerHTML=`<div style="margin-bottom:8px"><span class="tag" style="font-size:13px">score ${sc}/10</span> <span class="dim">${esc(when)} · ${esc(r._model||"")}</span></div>`+
+  const appl=(r.applied||[]).map(x=>`<li><b>${esc(x.action)}</b> @ ${esc(x.target)} — ${esc(x.result)}</li>`).join("");
+  const need=(r.needs_operator||[]).map(x=>`<li>${esc(x)}</li>`).join("");
+  el.innerHTML=`<div style="margin-bottom:8px"><span class="tag" style="font-size:13px">score ${sc}/10</span> <span class="dim">${esc(when)} · ${esc(r._model||"")}</span>${(r.applied||[]).length?` <span class="tag" style="color:var(--grn,#38d39f)">${(r.applied||[]).length} auto-fixed</span>`:""}</div>`+
     `<div style="margin-bottom:8px">${esc(r.assessment||"")}</div>`+
     `<div style="margin-bottom:8px"><b>Top priority:</b> ${esc(r.top_priority||"")}</div>`+
+    (appl?`<div class="dim" style="margin:6px 0 2px">Auto-applied by the reviewer</div><ul style="margin:0 0 8px 18px;color:var(--grn,#38d39f)">${appl}</ul>`:"")+
+    (need?`<div class="dim" style="margin:6px 0 2px">Needs you (can't auto-fix safely)</div><ul style="margin:0 0 8px 18px;color:var(--amb)">${need}</ul>`:"")+
     (weak?`<div class="dim" style="margin:6px 0 2px">Weaknesses</div><ul style="margin:0 0 8px 18px">${weak}</ul>`:"")+
     (miss?`<div class="dim" style="margin:6px 0 2px">Missing / gaps</div><ul style="margin:0 0 8px 18px">${miss}</ul>`:"")+
     (recs?`<div class="dim" style="margin:6px 0 2px">Recommendations</div>${recs}`:"");

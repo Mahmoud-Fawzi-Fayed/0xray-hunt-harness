@@ -230,6 +230,18 @@ class Engine:
             self.eng.log(f"recon: cached ({int((time.time()-last)/60)}m old) + {queued} item(s) queued "
                          f">= {self.max_hunts} — SKIPPING heavy recon, straight to HUNT (cores -> vuln-finding)")
             return
+        # RECON CAP (a .recon_capped flag file dropped by the workflow-reviewer's auto-apply on a starved
+        # huge-surface target). A flag FILE (not state) so it can't race the running hunt's own state saves.
+        # There's already a worklist, so stop crawling toward full enumeration and HUNT the ranked slice now.
+        _capf = os.path.join(self.eng.dir, ".recon_capped")
+        try:
+            _capfresh = os.path.exists(_capf) and (time.time() - os.path.getmtime(_capf)) < ttl
+        except OSError:
+            _capfresh = False
+        if queued >= self.max_hunts and _capfresh:       # self-expires after the TTL so new surface is still caught
+            self.eng.log(f"recon: CAPPED by reviewer + {queued} item(s) queued — straight to HUNT "
+                         "(stop crawling the long tail, hunt the ranked slice)")
+            return
         if self.expand:
             self._expand_scope()
         # AUTHENTICATED recon: when a session exists for this target, run the WHOLE recon as the logged-in
