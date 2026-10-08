@@ -286,6 +286,20 @@ class Engine:
         expanded = [e for e in expanded
                     if e.get("source") == "secret" or R.is_concrete_target(e.get("url", ""))]
         dropped = before - len(expanded)
+        if os.environ.get("HUNT_DEEP", "1") == "1":   # ONE analysis-driven pentest agent per endpoint
+            seen, deep = set(), []                    # (not N mechanical per-class hunts) — the agent views
+            for e in expanded:                       # source, reasons about the endpoint, then exploits what fits
+                if e.get("source") == "secret":
+                    deep.append(e)                    # a leaked-secret item IS the finding — keep as-is
+                    continue
+                u = e.get("url", "")
+                if u and u not in seen:
+                    seen.add(u)
+                    d = dict(e)
+                    d["vuln_class"] = "deep"
+                    d.pop("vuln_classes", None)
+                    deep.append(d)
+            expanded = deep
         added = self.eng.add_surface(expanded)
         if dropped:
             self.eng.log(f"recon: dropped {dropped} non-curlable target(s) (glob/static) before worklist")
@@ -506,7 +520,8 @@ class Engine:
                 self.eng.log("hunt: ⚠ model usage limit hit — remaining results may be partial")
             if f and f.get("vulnerable"):
                 oos = self._scope_audit(f)
-                cand = {"url": it["url"], "param": it.get("param", ""), "vuln_class": it.get("vuln_class"),
+                cand = {"url": it["url"], "param": it.get("param", ""),
+                        "vuln_class": f.get("vuln_class") or it.get("vuln_class"),
                         "severity": f.get("severity", "unknown"), "evidence": f.get("evidence", ""),
                         "request": f.get("request", ""), "proof_note": f.get("proof_note", ""),
                         "attacker_holds": f.get("attacker_holds", ""),
@@ -521,6 +536,63 @@ class Engine:
                 self.eng.log(f"hunt: skipped {it.get('vuln_class')}@{it['url']} — {f['skipped']}")
             else:
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}")
+
+    def _hunt_deep(self, it, model=None, timeout=None):
+        """ANALYSIS-DRIVEN per-endpoint pentest: the agent reads the endpoint's source/JS, reasons about what
+        it actually is, decides which vuln classes are PLAUSIBLE, then exploits only those — a thinking
+        pentester, not a payload-sprayer. One smart agent per endpoint (not N mechanical per-class hunts)."""
+        import agent as A
+        import skill_map as SM
+        url = it["url"]
+        tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
+        idx = "; ".join(f"{c}->{','.join(s)}" for c, s in SM.CLASS_SKILL.items())   # class -> which skill to read
+        p, e = self.scope.name, ENGINE_DIR
+        task = (self._roe() + "\n"
+                f"PENTEST THIS ONE ENDPOINT like a senior researcher — THINK FIRST, do NOT blind-spray payloads.\n"
+                f"URL: {url}   method: {it.get('method','GET')}   known param(s): {it.get('param','')}   "
+                f"tech: {', '.join(tech) or 'unknown'}\n\n"
+                "STEP 1 — ANALYSE (VIEW SOURCE FIRST): curl the endpoint and READ the response body, status, "
+                "headers, Set-Cookie and any error/stack text. Fetch and READ the linked JS bundles, inline "
+                "scripts and any .map. Work out the framework/stack, EVERY input (query, body, path, header, "
+                "cookie), what the endpoint actually DOES, and any hidden routes / params / tokens / secrets "
+                "revealed in the source.\n"
+                "STEP 2 — REASON: from what you ACTUALLY SEE, decide which vuln classes are plausible HERE and "
+                "why — e.g. search/filter -> sqli/nosqli/xss/ssti; object id -> idor/bola; redirect/url param -> "
+                "open-redirect/ssrf; file/path -> lfi/xxe; template/render -> ssti; auth/login/token -> "
+                "auth-bypass/jwt/oauth; upload -> file-upload/xxe; graphql -> introspection/bola; reflected input "
+                "-> xss. Do NOT test classes this endpoint cannot have.\n"
+                "STEP 3 — EXPLOIT only the plausible ones: `cat` the matching skill for its exact methodology + "
+                f"payloads, then try REAL, targeted exploitation with curl.  skills dir: {SM.SKILLS_DIR}\n  "
+                f"class->skill: {idx}\n"
+                f"  authed fetch: `python3 {e}/netget.py GET \"<url>\" --as A` (second account: --as B).  "
+                f"IDOR: list as A, request A's object as B, or `python3 {e}/authz.py diff --slug {p} "
+                "--url \"<A-object-url>\"`.  Chain primitives into higher severity.\n"
+                "STEP 4 — PROVE: claim a vuln ONLY with demonstrated, exploitable impact (never reflection, an "
+                "error, or a permissive header) using in-scope, read-only actions.\n"
+                "End with a fenced ```json``` object: "
+                '{"vulnerable":true|false,"vuln_class":"<class you PROVED>","severity":"low|medium|high|critical",'
+                '"analysis":"<what the source/responses told you this endpoint is + does>",'
+                '"classes_considered":["<plausible classes you reasoned about>"],'
+                '"evidence":"<what proves it>","request":"<the winning request>",'
+                '"hosts_contacted":["every host you hit"],"attacker_holds":"nothing|own_session|'
+                'link_issued_by_product|foreign_id_shown","id_source":"not_required|enumerated|product_link|'
+                'archive|in_scope_oracle|own_only|asserted_leak",'
+                '"discovered":["<new in-scope endpoints/params/secrets you saw in the source>"],'
+                '"proof_note":"<empty, or why proof was limited>"}'
+                + self._capabilities_note())
+        sess = getattr(self, "_auth_session", None)
+        if sess:
+            _AS = _authmod()
+            if _AS:
+                task += _AS.auth_block(sess, url)
+        self.eng.log(f"hunt: deep-pentest {url} (analysis-driven) model={model or 'pool'}")
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns,
+                        timeout=timeout or self.timeout, model=model)
+        if r.get("error"):
+            return {"error": r["error"], "model": r.get("model")}
+        f = A.extract_json(r.get("result", "")) or {"vulnerable": False}
+        f["_model"] = r.get("model")
+        return f
 
     def _capabilities_note(self):
         """Tell the agent about the harness tools it may drive mid-hunt (all guardrail-gated)."""
@@ -577,6 +649,8 @@ class Engine:
                     return {"vulnerable": False, "skipped": f"host walled (HTTP {_st})"}
             except Exception:  # noqa: BLE001
                 pass
+        if cls == "deep":                          # analysis-driven per-endpoint pentest (think, then exploit)
+            return self._hunt_deep(it, model, timeout)
         # DETERMINISTIC 2-account IDOR/BOLA — the #1 missing paying class. 2025 IDOR attempts produced 0
         # candidates because the LLM alone rarely runs the cross-account diff. When TWO identities exist and
         # the URL bears an object id, run authz.diff ourselves: if B reaches A's id-bearing object (2xx,
