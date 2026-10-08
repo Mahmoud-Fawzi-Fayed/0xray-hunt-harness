@@ -517,6 +517,8 @@ class Engine:
                 self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
                               f"host(s): {', '.join(oos)} (flagged)") if oos
                              else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
+            elif f and f.get("skipped"):
+                self.eng.log(f"hunt: skipped {it.get('vuln_class')}@{it['url']} — {f['skipped']}")
             else:
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}")
 
@@ -564,6 +566,17 @@ class Engine:
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
         cls = (it.get("vuln_class") or "").lower()
+        # DEAD-SURFACE PRE-PROBE: don't burn a ~2-min LLM hunt on an endpoint whose host is WAF/staging-walled.
+        # (paysafe's 2fa-staging.* was 8.8k endpoints that ALL return 403 — 96% of the budget wasted on a wall.)
+        # Probe once with the authed session; a 403 or 5xx means walled/dead -> skip + mark tested (won't requeue).
+        if os.environ.get("HUNT_SKIP_WALLED", "1") == "1" and str(it.get("url", "")).startswith("http"):
+            try:
+                import netget as _ng
+                _st, _, _ = _ng.get(it["url"], ident="A", slug=self.scope.name)
+                if _st == 403 or (_st and _st >= 500):
+                    return {"vulnerable": False, "skipped": f"host walled (HTTP {_st})"}
+            except Exception:  # noqa: BLE001
+                pass
         # DETERMINISTIC 2-account IDOR/BOLA — the #1 missing paying class. 2025 IDOR attempts produced 0
         # candidates because the LLM alone rarely runs the cross-account diff. When TWO identities exist and
         # the URL bears an object id, run authz.diff ourselves: if B reaches A's id-bearing object (2xx,
