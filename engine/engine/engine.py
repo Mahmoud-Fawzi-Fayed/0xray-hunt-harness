@@ -300,6 +300,22 @@ class Engine:
                     d.pop("vuln_classes", None)
                     deep.append(d)
             expanded = deep
+        # SURFACE QUALITY: stop any ONE host from flooding the worklist (e.g. a staging host enumerated into
+        # thousands of URLs). Keep the top slice per host by priority — generous + env-tunable, so it trims junk
+        # domination without capping the AI's reach on real hosts. (Dead endpoints are also skipped at hunt time.)
+        cap = int(os.environ.get("HUNT_MAX_PER_HOST", "500"))
+        if cap > 0 and expanded:
+            from urllib.parse import urlparse as _up
+            byh = {}
+            for e in expanded:
+                byh.setdefault(_up(e.get("url", "")).netloc, []).append(e)
+            capped = []
+            for h, items in byh.items():
+                if len(items) > cap:
+                    self.eng.log(f"recon: per-host cap — {h} had {len(items)} endpoints, kept top {cap} by priority")
+                    items = sorted(items, key=lambda x: -(x.get("priority") or 0))[:cap]
+                capped += items
+            expanded = capped
         added = self.eng.add_surface(expanded)
         if dropped:
             self.eng.log(f"recon: dropped {dropped} non-curlable target(s) (glob/static) before worklist")
@@ -502,12 +518,19 @@ class Engine:
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
         for it, f in self._run_parallel(self._hunt_agent, todo):
             if f and f.get("error") == "timeout":
-                # MODEL-FAILOVER: a timeout (often an overloaded box or a stuck model) usually clears on a
-                # DIFFERENT model with a tighter budget — try ONCE more now before deferring to next round.
+                # MODEL-FAILOVER: a timeout usually clears on a DIFFERENT model — try ONCE more with a generous
+                # budget. If it times out AGAIN, the endpoint is too heavy: mark it tested (INCONCLUSIVE) and move
+                # on, so it can't starve the queue by re-timing-out every round forever.
                 alt = self._alt_model(f.get("model"))
+                fbt = int(os.environ.get("HUNT_FAILOVER_TIMEOUT", "900"))
                 self.eng.log(f"hunt: timeout on {it.get('vuln_class')}@{it['url']} (model {f.get('model')}) "
-                             f"— failover to {alt} (tighter budget)")
-                f = self._hunt_agent(it, model=alt, timeout=max(180, self.timeout // 2))
+                             f"— failover to {alt} ({fbt}s)")
+                f = self._hunt_agent(it, model=alt, timeout=fbt)
+                if f and f.get("error") == "timeout":
+                    self.eng.mark_tested(it)
+                    self.eng.log(f"hunt: INCONCLUSIVE (double-timeout) {it.get('vuln_class')}@{it['url']} "
+                                 "— marked tested, moving on (too heavy for the budget)")
+                    continue
             if f and f.get("error"):
                 # a transient agent error (parse/rate-limit/timeout) must NOT permanently mark the
                 # endpoint tested — leave it so the next round retries it (with a fresh pool model).
@@ -585,9 +608,13 @@ class Engine:
             _AS = _authmod()
             if _AS:
                 task += _AS.auth_block(sess, url)
-        self.eng.log(f"hunt: deep-pentest {url} (analysis-driven) model={model or 'pool'}")
-        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns,
-                        timeout=timeout or self.timeout, model=model)
+        # Give the AI real room to THINK + work an endpoint end-to-end (analyse source -> reason -> exploit ->
+        # chain): a generous time budget and plenty of turns, both env-tunable. Not capped to the quick per-class
+        # budget — a deep pentest legitimately takes many minutes.
+        dt = timeout or int(os.environ.get("HUNT_DEEP_TIMEOUT", "1200"))
+        mt = int(os.environ.get("HUNT_DEEP_TURNS", "80"))
+        self.eng.log(f"hunt: deep-pentest {url} (analysis-driven) model={model or 'pool'} budget={dt}s/{mt}turns")
+        r = A.run_agent(task, context=self.scope.name, max_turns=mt, timeout=dt, model=model)
         if r.get("error"):
             return {"error": r["error"], "model": r.get("model")}
         f = A.extract_json(r.get("result", "")) or {"vulnerable": False}
