@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -655,7 +656,6 @@ class Handler(BaseHTTPRequestHandler):
                 # n8n / the panel trigger a Cursor-agent hunt. Real hunts run under pm2 so they survive
                 # bridge restarts + auto-restart on crash; mock runs inline for testing.
                 import targets as T
-                import subprocess
                 prog = b.get("program", "")
                 sc = T.load(prog, base=self.base)
                 if not sc:
