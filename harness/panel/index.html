@@ -572,7 +572,11 @@ async function loadCaps(){try{
 }catch(e){}}
 async function loadFindings(){try{const j=await api("/findings");document.getElementById("find").innerHTML=(j.findings||[]).map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><a href="${esc(x.url)}" target="_blank">${esc(x.file)}</a><div class="tag">${new Date(x.mtime*1000).toLocaleString()}</div></div>`).join("")||`<div class="empty">No findings yet.</div>`;}catch(e){}}
 async function loadReview(){try{const j=await api("/review/latest");const el=document.getElementById("ov-review");if(!el)return;const r=j&&j.review;if(!r){el.innerHTML='<div class="empty">No review yet — runs every 2h, or hit “Run now”.</div>';return;}
-  const sc=(r.score_0_10==null?"?":r.score_0_10);const when=((j.snapshot&&j.snapshot.ts)||"").slice(0,16).replace("T"," ");
+  const sc=(r.score_0_10==null?"?":r.score_0_10);
+  const _ts=(j.snapshot&&j.snapshot.ts);let when="";
+  if(_ts){const d=new Date(_ts);const mins=Math.max(0,Math.round((Date.now()-d.getTime())/60000));
+    const ago=mins<1?"just now":mins<60?mins+"m ago":Math.round(mins/60)+"h ago";
+    when=d.toLocaleString()+" ("+ago+")";}
   const recs=(r.recommendations||[]).slice(0,6).map(x=>`<div style="padding:6px 0;border-bottom:1px solid #141a25"><b>[${esc(x.where||"?")}·${esc(x.effort||"?")}]</b> ${esc(x.action||"")} <span class="dim">— ${esc(x.why||"")} → ${esc(x.impact||"")}</span></div>`).join("");
   const weak=(r.weaknesses||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");const miss=(r.missing||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");
   const appl=(r.applied||[]).map(x=>`<li><b>${esc(x.action)}</b> @ ${esc(x.target)} — ${esc(x.result)}</li>`).join("");
