@@ -290,27 +290,36 @@ def classify(item):
     return "idor" if p else "info-leak"
 
 
-def classify_all(item, max_classes=3):
-    """Ranked list of plausible vuln classes for an endpoint (multi-class hunting). A preset
-    class (e.g. a secret finding) stays single-class — don't multi-test a confirmed info-leak."""
+def classify_all(item, max_classes=None):
+    """FULL-PENTEST class matrix for an endpoint (not just the top guess). Every reachable HTTP endpoint
+    is a candidate for the core access/SSRF/redirect classes; parameters and API/dynamic paths add the
+    full injection matrix (sqli/nosqli/xss/ssti/lfi/cmdi/xxe); auth/upload/webhook/graphql/ai paths add
+    their specialised classes. Cap is HUNT_MAX_CLASSES (default 10) so the hunt covers ALL plausible
+    classes per endpoint, not a narrow 3. A preset secret finding stays single-class."""
+    if max_classes is None:
+        max_classes = int(os.environ.get("HUNT_MAX_CLASSES", "10"))
     if item.get("source") == "secret" and item.get("vuln_class"):
         return [item["vuln_class"]]
-    classes = [classify(item)]
     url = item.get("url", "").lower()
     p = (item.get("param", "") or "").lower()
-    extras = []
-    if any(k in url for k in ("/chat", "/ai", "/llm", "/assistant", "/agent", "/copilot")):
-        extras += ["llm-ai", "ssrf", "info-leak"]
-    if any(k in url for k in ("/search", "/query")) or p in ("q", "query", "search", "s", "keyword", "filter"):
-        extras += ["xss", "sqli", "ssti"]
-    if "redirect" in url or p in ("url", "uri", "next", "redirect", "return", "callback", "dest", "u"):
-        extras += ["open-redirect", "ssrf"]
-    if "/graphql" in url:
-        extras += ["graphql", "info-leak"]
-    if any(k in url for k in ("/api", "/rest", "/v1", "/v2")):
-        extras += ["info-leak", "idor", "auth-bypass"]
-    if p:  # any parameter is a generic injection / IDOR surface
-        extras += ["idor", "sqli", "xss"]
+    classes = [classify(item)]
+    extras = ["idor", "auth-bypass", "info-leak"]   # universal access / exposure
+    # context-SPECIALISED classes FIRST (before the generic injection matrix) so they survive the cap
+    if any(k in url for k in ("/login", "/signin", "/register", "/auth", "/oauth", "/token",
+                              "/session", "/sso", "/saml", "/mfa", "/2fa", "/otp", "/password", "/reset")):
+        extras += ["jwt", "oauth", "csrf", "mfa", "saml"]
+    if any(k in url for k in ("/chat", "/ai", "/llm", "/assistant", "/agent", "/copilot", "prompt")):
+        extras += ["llm-ai"]
+    if "/graphql" in url or "/gql" in url:
+        extras += ["graphql"]
+    if any(k in url for k in ("/upload", "/file", "/download", "/import", "/attachment", "/avatar", "/media")):
+        extras += ["file-upload", "xxe"]
+    if any(k in url for k in ("/webhook", "/callback", "/fetch", "/proxy", "/integration", "/notify")):
+        extras += ["webhook"]
+    extras += ["ssrf", "open-redirect", "cors"]     # more universal
+    if (bool(p) or "?" in url or any(k in url for k in ("/api", "/rest", "/v1", "/v2", "/v3", "/graphql",
+            "/gql", "/rpc", "/ajax", "/json", "/search", "/query", ".php", ".asp", ".jsp", ".do"))):
+        extras += ["sqli", "nosqli", "xss", "ssti", "lfi", "cmdi", "xxe"]   # full injection matrix on any input
     for e in extras:
         if e not in classes:
             classes.append(e)
