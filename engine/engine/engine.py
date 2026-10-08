@@ -34,6 +34,27 @@ CLASS_WEIGHT = {"deep": 95, "rce": 100, "sqli": 90, "ssrf": 85, "auth-bypass": 8
                 "graphql": 65, "open-redirect": 40, "xss": 55, "cors": 45, "csrf": 50,
                 "info-leak": 30}
 # OSINT (subdomain/asset enum) is a SEPARATE concern (Claude-OSINT) — not in the engine flow.
+
+
+def _deepen(items):
+    """HUNT_DEEP: collapse surface items to ONE analysis-driven agent per endpoint (secrets keep their class).
+    Applied at every add_surface call site so no path (gql/platform/feedback/scope) re-introduces per-class
+    spray. Idempotent."""
+    if os.environ.get("HUNT_DEEP", "1") != "1" or os.environ.get("HUNT_MOCK_AGENT") == "1":
+        return items   # mock pipeline is keyed by real vuln_class; never collapse under test
+    out, seen = [], set()
+    for it in (items or []):
+        if it.get("source") == "secret":
+            out.append(it)
+            continue
+        d = dict(it)
+        d["vuln_class"] = "deep"
+        d.pop("vuln_classes", None)
+        k = (d.get("url", ""), d.get("param", ""))
+        if k not in seen:
+            seen.add(k)
+            out.append(d)
+    return out
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
 ALL_PHASES = ["recon", "rank", "map", "hunt", "validate", "chain", "report"]
@@ -84,6 +105,8 @@ class Engine:
             pass
         self.model, self.max_hunts = model, max_hunts
         self.max_turns, self.timeout, self.mock = max_turns, timeout, mock
+        if self.mock:
+            os.environ["HUNT_MOCK_AGENT"] = "1"   # module-level _deepen keeps real classes under mock
         # HUNT_INTRUSIVE=1 unlocks ACTIVE testing (account creation + state-changing PoC to PROVE impact).
         self.allow_intrusive = bool(allow_intrusive) or os.environ.get("HUNT_INTRUSIVE") == "1"
         self.expand = expand
@@ -214,7 +237,7 @@ class Engine:
             items = []
             for seed in self.scope.seeds:
                 items += [it for it in MOCK_RECON.get(seed, []) if self.scope.in_scope_host(it.get("url", ""))]
-            self.eng.add_surface(items)
+            self.eng.add_surface(_deepen(items))
             self.eng.log(f"recon(mock): {len(items)} item(s)")
             return
         import recon as R, osint as O  # deterministic recon: service/tech + endpoints + secrets + params
@@ -347,7 +370,7 @@ class Engine:
         try:
             gql = R.graphql_recon(self.scope, slug=self.scope.name, ident=ident, log=self.eng.log)
             if gql:
-                self.eng.add_surface(gql)
+                self.eng.add_surface(_deepen(gql))
         except Exception as e:  # noqa: BLE001
             self.eng.log(f"deep-recon: graphql skipped ({type(e).__name__}: {e})")
         if os.environ.get("HUNT_BROWSER_RECON", "1") != "1":
@@ -368,7 +391,7 @@ class Engine:
                     e = dict(it); e["vuln_class"] = cls; e.setdefault("priority", 55)
                     exp.append(e)
             exp = [e for e in exp if R.is_concrete_target(e.get("url", ""))]
-            added = self.eng.add_surface(exp) if exp else 0
+            added = self.eng.add_surface(_deepen(exp)) if exp else 0
             self.eng.state["browser_recon_ts"] = time.time()
             self.eng.save()
             self.eng.log(f"deep-recon: browser capture ({trigger}) -> {added} new authed work unit(s)")
@@ -793,9 +816,9 @@ class Engine:
             if per_host.get(h, 0) >= cap:                 # host already well-covered -> don't amplify a dead-end
                 continue
             if self.scope.in_scope_host(u) and _R.is_concrete_target(u):
-                for cls in _R.classify_all({"url": u}):
-                    if self.eng.add_surface([{"url": u, "vuln_class": cls,
-                                              "source": "agent-found", "priority": 30}]):
+                for it in _deepen([{"url": u, "vuln_class": c, "source": "agent-found", "priority": 30}
+                                   for c in _R.classify_all({"url": u})]):
+                    if self.eng.add_surface([it]):
                         added += 1
                         per_host[h] += 1
         if added:
