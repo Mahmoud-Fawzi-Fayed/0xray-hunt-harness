@@ -57,8 +57,19 @@ def _is_thirdparty(host):
     return h in THIRDPARTY_APEX or apex in THIRDPARTY_APEX
 
 
+def _clean_host(h):
+    """Reduce any host-ish string to a BARE hostname safe to put in a URL. The signup agent sometimes
+    returns a descriptive host (e.g. 'sandbox-login.paddle.com (signup API: sandbox-api.paddle.com)');
+    left unsanitized, the space/parens later crash urllib ('URL can't contain control characters')."""
+    h = str(h or "").strip()
+    h = re.sub(r"(?i)^https?://", "", h)          # strip scheme
+    h = h.split("/", 1)[0]                         # strip any path
+    h = re.split(r"[\s(,;]", h, 1)[0]             # cut at first space / '(' / ',' / ';' (annotations)
+    return h.strip().strip(".")
+
+
 def _apex(h):
-    return G._host_of(h)
+    return G._host_of(_clean_host(h))
 
 
 def pick_auth_host(scope):
@@ -340,7 +351,7 @@ def check_live(program, base=DEFAULT_BASE, timeout=12):
     s = load(program, base)
     if not valid(s):
         return {"ok": False, "error": "no valid session stored for this program"}
-    host = G._host_of(s.get("host", ""))
+    host = _clean_host(G._host_of(s.get("host", "")) or s.get("host", ""))
     if not host:
         return {"ok": False, "error": "stored session has no host"}
     url = "https://" + host + "/"
@@ -497,7 +508,7 @@ def provision(program, base=DEFAULT_BASE, scope=None, host=None, timeout=None):
         save(program, {"success": False, "program": G._slug(program), "host": host,
                        "error": "signup did not complete", "notes": notes, "ts": time.time()}, base=base)
         return {"error": "signup did not complete", "host": host, "notes": notes}
-    session = {"success": True, "program": G._slug(program), "host": data.get("host", host),
+    session = {"success": True, "program": G._slug(program), "host": _clean_host(data.get("host", host)),
                "login_url": data.get("login_url", ""), "cookies": data.get("cookies") or {},
                "headers": data.get("headers") or {}, "user": data.get("user") or ident.get("email"),
                "notes": data.get("notes", ""), "ts": time.time(), "model": r.get("model")}
