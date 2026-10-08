@@ -55,6 +55,62 @@ def _deepen(items):
             seen.add(k)
             out.append(d)
     return out
+
+
+# ---- endpoint quality (signal-based, target-agnostic) ----------------------------------------
+# In deep mode EVERY item is class "deep", so CLASS_WEIGHT can no longer tell a real API endpoint
+# from a brochure page. This scores each endpoint by bug-likelihood from its URL/metadata ALONE (no
+# hardcoded hostnames), so the deep agents spend their budget on real attack surface (APIs, authed,
+# params, object-ids, state-change) first and reach static marketing/asset pages only after.
+_Q_API_PATH = re.compile(r"/(api|graphql|gql|rest|v[0-9]+|internal|admin|oauth|auth|authorize|token|"
+                         r"session|logout|sso|account|users?|me|profile|orders?|payments?|invoices?|"
+                         r"transactions?|wallet|cards?|transfers?|balance|upload|files?|export|import|"
+                         r"webhooks?|callback|redirect|search|query|filter|settings|billing|"
+                         r"subscriptions?|teams?|projects?|reports?|integrations?|keys?|tokens?)\b", re.I)
+_Q_API_HOST = re.compile(r"^(api|apis|gateway|rest|gql|graphql|admin|account|accounts|my|portal|merchant|"
+                         r"customer|app|apps|dashboard|secure|auth|login|sso|id|oauth|connect|rest)[.-]", re.I)
+_Q_STATIC = re.compile(r"\.(js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|pdf|mp4|webm|avif|"
+                       r"xml)(\?|$)", re.I)
+_Q_MARKETING = re.compile(r"/(pricing|blog|about|contact|careers?|press|news(room)?|legal|terms|privacy|"
+                          r"cookies?|faq|features?|resources?|case-stud\w*|customers?|partners?|events?|"
+                          r"webinars?|ebooks?|guides?|academy|community|company|jsi18n|sitemap\w*|robots|"
+                          r"favicon|solutions?|testimonial\w*|reviews?)\b", re.I)
+_Q_OBJID = re.compile(r"/(\d{2,}|[0-9a-f]{8}-[0-9a-f]{4}|[0-9a-f]{16,})(/|\?|$)", re.I)
+_Q_DISCOVERED = {"graphql-op", "graphql", "graphql-recon", "browser", "browser-capture",
+                 "agent-found", "authed", "deep-recon"}
+
+
+def _endpoint_quality(s):
+    """Bug-likelihood delta for ranking (roughly -85..+175). Pure function of the item's URL + metadata."""
+    from urllib.parse import urlparse
+    url = s.get("url", "") or ""
+    try:
+        p = urlparse(url)
+        host, path, query = (p.hostname or ""), (p.path or ""), (p.query or "")
+    except Exception:  # noqa: BLE001
+        return 0
+    q = 0
+    if _Q_API_PATH.search(path):
+        q += 45
+    if _Q_API_HOST.search(host):
+        q += 35
+    if query:
+        q += 25                                    # injectable params = live input
+    if _Q_OBJID.search(path):
+        q += 30                                    # object id in path = IDOR/BOLA surface
+    if s.get("param"):
+        q += 10
+    if (s.get("source") or "").lower() in _Q_DISCOVERED:
+        q += 30                                    # a discovered real endpoint, not a static crawl hit
+    if s.get("authed") or "authenticated" in (s.get("note", "") or "").lower():
+        q += 25
+    if _Q_STATIC.search(path):
+        q -= 70                                    # static asset: nothing to pentest
+    if _Q_MARKETING.search(path):
+        q -= 40                                    # brochure page
+    if path in ("", "/"):
+        q -= 15                                    # bare homepage shell
+    return q
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
 ALL_PHASES = ["recon", "rank", "map", "hunt", "validate", "chain", "report"]
@@ -336,7 +392,7 @@ class Engine:
             for h, items in byh.items():
                 if len(items) > cap:
                     self.eng.log(f"recon: per-host cap — {h} had {len(items)} endpoints, kept top {cap} by priority")
-                    items = sorted(items, key=lambda x: -(x.get("priority") or 0))[:cap]
+                    items = sorted(items, key=lambda x: -((x.get("priority") or 0) + _endpoint_quality(x)))[:cap]
                 capped += items
             expanded = capped
         added = self.eng.add_surface(expanded)
@@ -410,6 +466,7 @@ class Engine:
         for s in self.eng.state["surface"]:
             base = CLASS_WEIGHT.get(s.get("vuln_class", ""), 20)
             s["priority"] = base + (5 if s.get("param") else 0) + (55 if s.get("source") == "secret" else 0)
+            s["priority"] += _endpoint_quality(s)    # float REAL attack surface above brochure/asset pages
             if ym:
                 s["priority"] += ym.bonus(s.get("vuln_class", ""))   # cover all classes, surface most-findable first
         self._dedup_downrank()   # known-issue surface sinks below novel surface (no-op w/o corpus)
