@@ -331,7 +331,7 @@
         </div>
         <div class="box"><div class="h"><span class="t">Recent activity</span><a onclick="go('activity')">view all</a></div><div class="b" style="padding:0"><table><tbody id="ov-act"><tr><td class="empty" style="padding:14px">—</td></tr></tbody></table></div></div>
       </div>
-      <div class="box" style="margin-top:14px"><div class="h"><span class="t">Workflow review</span><span class="dim" style="font-size:11px;margin-left:8px">every 2h · an agent audits the hunt workflow for weaknesses &amp; missing coverage to lift findings</span><button class="ghost" onclick="runReview()" style="margin-left:auto">Run now</button></div><div class="b" id="ov-review"><div class="empty">No review yet.</div></div></div>
+      <div class="box" style="margin-top:14px"><div class="h"><span class="t">Workflow review</span><span class="dim" style="font-size:11px;margin-left:8px">every 40 min · an agent audits the hunt workflow for weaknesses and missing coverage, then applies the fixes</span><button class="ghost" onclick="runReview()" style="margin-left:auto">Run now</button></div><div class="b" id="ov-review"><div class="empty">No review yet.</div></div></div>
     </section>
 
     <!-- TARGETS -->
@@ -516,7 +516,7 @@ async function loadCore(){try{
     const sy=document.getElementById("ov-system");
     if(sy)sy.innerHTML=[
       ["Runtime","cursor-agent (headless)"],
-      ["Chat sessions",c.sessions?((c.sessions.chats_on_disk+(c.sessions.transcripts_on_disk||0))+" on disk · pooled "+c.sessions.pool_per_target+"/target"+((c.sessions.pool_dead_ids||c.sessions.pool_corrupt)?` · <span style="color:var(--red)">${c.sessions.pool_dead_ids||0} dead / ${c.sessions.pool_corrupt||0} corrupt — run Doctor</span>`:" · all pooled alive")):"—"],
+      ["Cursor sessions",c.sessions?(c.sessions.agents_running!=null?(c.sessions.agents_running+" agents running on "+(c.sessions.targets_running||0)+" targets · "+(c.sessions.pooled_in_use||0)+" reused sessions"):(c.sessions.chats_on_disk+" chats on disk")):"—"],
       ["Model pool",(document.getElementById("pool")||{}).textContent||"—"],
       ["Web search",c.websearch&&c.websearch.ready?"ready — "+esc(c.websearch.provider):"off"],
       ["Test identities","mail.tm · cap "+((c.identity&&c.identity.max_accounts)||0)+"/program"],
@@ -570,7 +570,7 @@ async function loadCaps(){try{
   document.getElementById("c-id").innerHTML=dot(c.identity&&c.identity.ready)+"mail.tm";
   document.getElementById("c-sms").innerHTML=dot(c.sms&&c.sms.enabled)+(c.sms&&c.sms.enabled?esc(c.sms.provider||"on"):"off");
   document.getElementById("c-learn").textContent=(c.learn&&c.learn.learned_skills)||0;
-  const se=document.getElementById("cap-sess");if(se&&c.sessions)se.innerHTML=`sessions on disk: <b>${c.sessions.chats_on_disk+(c.sessions.transcripts_on_disk||0)}</b> (${c.sessions.transcripts_on_disk||0} hunt transcripts + ${c.sessions.chats_on_disk} chats) · orphaned (safe to clear): <b>${c.sessions.orphaned||0}</b> · pooled/target: ${c.sessions.pool_per_target}${(c.sessions.pool_dead_ids||c.sessions.pool_corrupt)?` · <span style="color:var(--red)">dead pooled ids: ${c.sessions.pool_dead_ids||0} · corrupt pools: ${c.sessions.pool_corrupt||0}</span>`:` · <span style="color:var(--grn)">all pooled sessions alive</span>`}`;
+  const se=document.getElementById("cap-sess");if(se&&c.sessions)se.innerHTML=`<b>${c.sessions.agents_running!=null?c.sessions.agents_running:"?"}</b> agents running on <b>${c.sessions.targets_running||0}</b> targets · <b>${c.sessions.pooled_in_use!=null?c.sessions.pooled_in_use:c.sessions.pool_per_target}</b> reused sessions (cap ${c.sessions.pool_per_target}/target) · ${c.sessions.chats_on_disk} chats on disk`;
   document.getElementById("cap-list").innerHTML=[
     ["Web search",c.websearch.ready,"DuckDuckGo HTML — look up CVEs, docs, disclosed reports mid-hunt"],
     ["Temp-mail identity",c.identity.ready,`mail.tm disposable inbox · cap ${c.identity.max_accounts}/program for A/B auth testing`],
@@ -588,7 +588,9 @@ async function loadCaps(){try{
   document.getElementById("cap-audit").innerHTML=`<div class="dim" style="padding:8px 14px;font-size:11px">accounts used — ${per||'none'}</div><table><thead><tr><th>Time</th><th>Program</th><th>Action</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty" style="padding:12px">No write-actions yet.</td></tr>'}</tbody></table>`;
 }catch(e){}}
 async function loadFindings(){try{const j=await api("/findings");document.getElementById("find").innerHTML=(j.findings||[]).map(x=>`<div style="padding:7px 0;border-bottom:1px solid #141a25"><a href="${esc(x.url)}" target="_blank">${esc(x.file)}</a><div class="tag">${new Date(x.mtime*1000).toLocaleString()}</div></div>`).join("")||`<div class="empty">No findings yet.</div>`;}catch(e){}}
-async function loadReview(){try{const j=await api("/review/latest");const el=document.getElementById("ov-review");if(!el)return;const r=j&&j.review;if(!r){el.innerHTML='<div class="empty">No review yet — runs every 2h, or hit “Run now”.</div>';return;}
+async function loadReview(){try{const j=await api("/review/latest");const el=document.getElementById("ov-review");if(!el)return;const r=j&&j.review;const liveAppl=(j&&j.live&&j.live.applied)||[];
+  if(!r && !liveAppl.length){el.innerHTML='<div class="empty">No review yet — heals run every minute, full review every 40 min, or hit “Run now”.</div>';return;}
+  if(!r){el.innerHTML=`<div class="dim" style="margin:6px 0 2px">Live heals (this minute)</div><ul style="margin:0 0 8px 18px;color:var(--grn,#38d39f)">${liveAppl.map(x=>`<li><b>${esc(x.action)}</b> @ ${esc(x.target)} — ${esc(x.result)}</li>`).join("")}</ul>`;return;}
   const sc=(r.score_0_10==null?"?":r.score_0_10);
   const _ts=(j.snapshot&&j.snapshot.ts);let when="";
   if(_ts){const d=new Date(_ts);const mins=Math.max(0,Math.round((Date.now()-d.getTime())/60000));
@@ -602,6 +604,7 @@ async function loadReview(){try{const j=await api("/review/latest");const el=doc
   el.innerHTML=`<div style="margin-bottom:8px"><span class="tag" style="font-size:13px">score ${sc}/10</span> <span class="dim">${esc(when)} · ${esc(r._model||"")}</span>${(r.applied||[]).length?` <span class="tag" style="color:var(--grn,#38d39f)">${(r.applied||[]).length} auto-fixed</span>`:""}</div>`+
     `<div style="margin-bottom:8px">${esc(r.assessment||"")}</div>`+
     `<div style="margin-bottom:8px"><b>Top priority:</b> ${esc(r.top_priority||"")}</div>`+
+    (liveAppl.length?`<div class="dim" style="margin:6px 0 2px">Live heals (this minute)</div><ul style="margin:0 0 8px 18px;color:var(--grn,#38d39f)">${liveAppl.map(x=>`<li><b>${esc(x.action)}</b> @ ${esc(x.target)} — ${esc(x.result)}</li>`).join("")}</ul>`:"")+
     (appl?`<div class="dim" style="margin:6px 0 2px">Auto-applied by the reviewer</div><ul style="margin:0 0 8px 18px;color:var(--grn,#38d39f)">${appl}</ul>`:"")+
     (afix?`<div class="dim" style="margin:6px 0 2px">Auto-fixed (recommendation implemented)</div><ul style="margin:0 0 8px 18px;color:var(--grn,#38d39f)">${afix}</ul>`:"")+
     (need?`<div class="dim" style="margin:6px 0 2px">Needs you (can't auto-fix safely)</div><ul style="margin:0 0 8px 18px;color:var(--amb)">${need}</ul>`:"")+
@@ -609,7 +612,21 @@ async function loadReview(){try{const j=await api("/review/latest");const el=doc
     (miss?`<div class="dim" style="margin:6px 0 2px">Missing / gaps</div><ul style="margin:0 0 8px 18px">${miss}</ul>`:"")+
     (recs?`<div class="dim" style="margin:6px 0 2px">Recommendations</div>${recs}`:"");
 }catch(e){}}
-async function runReview(){try{toast("Running a workflow review… (~1–2 min)","info");await api("/review/run","POST",{});setTimeout(loadReview,90000);}catch(e){toast(e.message,"err");}}
+async function runReview(){try{
+  const before=await api("/review/latest");
+  const prev=(before&&before.snapshot&&before.snapshot.ts)||"";
+  const res=await api("/review/run","POST",{});
+  if(res&&res.started===false){toast(res.reason||"A review is already running","warn");return;}
+  toast("Review started. This pass takes several minutes.","info");
+  const deadline=Date.now()+15*60*1000;
+  const tick=async()=>{
+    if(Date.now()>deadline){toast("Review is still running — the score will show here when it finishes","info");return;}
+    try{const j=await api("/review/latest");const ts=(j&&j.snapshot&&j.snapshot.ts)||"";
+      if(ts&&ts!==prev){toast("Review finished","ok");loadReview();return;}}catch(e){}
+    setTimeout(tick,15000);
+  };
+  setTimeout(tick,15000);
+}catch(e){toast(e.message,"err");}}
 async function loadMarks(force){try{const el=document.getElementById("findlist");if(!el||(!force&&el.contains(document.activeElement)))return;const j=await api("/findings/list");const s=j.summary||{};
   const sm=document.getElementById("find-summary");if(sm)sm.textContent=`${s.total||0} findings · ${s.valid||0} valid · ${s.bad||0} invalid/NA · ${s.duplicate||0} dup · ${s.pending||0} unmarked`;
   const sevcol=(v)=>(v==="critical"||v==="high")?"#ff6b6b":(v==="medium"?"var(--amb)":"#8a93a5");

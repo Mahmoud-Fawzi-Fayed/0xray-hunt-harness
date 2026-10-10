@@ -51,6 +51,25 @@ THIRDPARTY_APEX = {"apple.com", "itunes.apple.com", "play.google.com", "google.c
                    "gitlab.com", "okta.com", "auth0.com", "cloudflareaccess.com"}
 
 
+def _request(url, data=None, headers=None, method=None):
+    """Build a Request that keeps header names exactly as given.
+
+    stdlib Request title-cases names; some APIs treat custom auth headers as case-sensitive.
+    """
+    import urllib.request
+    class Raw(urllib.request.Request):
+        def add_header(self, key, val):
+            self.headers[key] = val
+        def add_unredirected_header(self, key, val):
+            self.unredirected_hdrs[key] = val
+    kw = {}
+    if data is not None:
+        kw["data"] = data
+    if method:
+        kw["method"] = method
+    return Raw(url, headers=dict(headers or {}), **kw)
+
+
 def _is_thirdparty(host):
     h = G._host_of(host)
     apex = ".".join(h.split(".")[-2:]) if h.count(".") >= 1 else h
@@ -128,6 +147,225 @@ def save(program, session, base=DEFAULT_BASE):
     return path
 
 
+def _creds_path(program, base=DEFAULT_BASE):
+    d = os.path.join(os.path.expanduser(base), "_identity")
+    os.makedirs(d, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return os.path.join(d, G._slug(program) + "-creds.json")
+
+
+def load_creds(program, base=DEFAULT_BASE):
+    try:
+        c = json.load(open(_creds_path(program, base)))
+        return c if isinstance(c, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_login(program, ident, host, user, password, login_url, extra_headers=None,
+               user_key="username", pass_key="password", probe=None, token_header=None,
+               token_json_key=None, session_headers=None, cookies=None, method=None,
+               base=DEFAULT_BASE):
+    """Store operator-owned login details so an expired session can be refreshed.
+
+    The login URL, JSON field names, and auth header name come from THIS paste/vault —
+    not from an engine path catalog. Password never goes in logs. Cookie-only
+    pastes refresh by replaying login_url with the stored cookie jar.
+    """
+    ident = "B" if str(ident).strip().upper() == "B" else "A"
+    blob = load_creds(program, base)
+    ck = dict(cookies) if isinstance(cookies, dict) else {}
+    rec = {
+        "host": G._host_of(host) or host,
+        "user": user,
+        "password": password,
+        "login_url": login_url,
+        "method": (method or ("POST" if password else "GET")).upper(),
+        "user_key": user_key or "username",
+        "pass_key": pass_key or "password",
+        "extra_headers": dict(extra_headers or {}),
+        "session_headers": dict(session_headers or {}),
+        "token_header": token_header,
+        "token_json_key": token_json_key,
+        "cookies": ck,
+        "probe": probe,
+        "ts": time.time(),
+    }
+    blob[ident] = rec
+    path = _creds_path(program, base)
+    json.dump(blob, open(path, "w"), indent=2)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return {"ok": True, "program": G._slug(program), "ident": ident, "host": rec["host"],
+            "user": user, "login_url_host": G._host_of(login_url)}
+
+
+def _extract_session(resp_headers, body, jar_cookies):
+    """Pull cookies + auth headers out of a login response. No product-specific path list."""
+    cookies = dict(jar_cookies or {})
+    hdrs = {}
+    for k, v in (resp_headers or []):
+        kl = str(k).lower()
+        if kl in ("set-cookie", "content-type", "date", "server", "vary", "location"):
+            continue
+        if any(x in kl for x in ("auth", "api-key", "apikey", "token", "session")):
+            hdrs[k] = v
+    data = None
+    try:
+        data = json.loads(body or b"" if isinstance(body, (bytes, bytearray)) else (body or ""))
+    except Exception:  # noqa: BLE001
+        data = None
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                kl = str(key).lower()
+                if isinstance(val, str) and 8 <= len(val) <= 8192:
+                    if any(x in kl for x in ("api_key", "apikey", "access_token", "auth_token",
+                                             "session_token", "csrf")):
+                        hdrs[key] = val
+                    elif kl in ("token", "key") and re.fullmatch(r"[A-Za-z0-9_\-.]{16,}", val):
+                        hdrs[key] = val
+                    elif kl == "id" and re.fullmatch(r"[A-Za-z0-9_\-.]{16,}", val):
+                        hdrs.setdefault("_token", val)
+                walk(val)
+        elif isinstance(obj, list):
+            for it in obj[:20]:
+                walk(it)
+    walk(data)
+    return cookies, hdrs, data if isinstance(data, dict) else {}
+
+
+def relogin(program, ident="A", base=DEFAULT_BASE, timeout=20):
+    """Replay the stored login_url (password POST or cookie GET). Used when a session expires.
+
+    Nothing here is a product catalog — only this program's creds vault.
+    """
+    import urllib.request
+    import urllib.error
+    import http.cookiejar
+    ident = "B" if str(ident).strip().upper() == "B" else "A"
+    rec = (load_creds(program, base) or {}).get(ident) or {}
+    url = rec.get("login_url") or ""
+    user = rec.get("user") or ""
+    password = rec.get("password") or ""
+    stored_ck = dict(rec.get("cookies") or {}) if isinstance(rec.get("cookies"), dict) else {}
+    if not (url.startswith("http") and (password or stored_ck)):
+        return {"error": "no stored login_url with password or cookies for this ident — paste a live session"}
+    method = str(rec.get("method") or ("POST" if password else "GET")).upper()
+    extra = dict(rec.get("extra_headers") or {})
+    extra.setdefault("Accept", "application/json")
+    extra.setdefault("User-Agent",
+                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    payload = None
+    if password and method == "POST":
+        uk, pk = rec.get("user_key") or "username", rec.get("pass_key") or "password"
+        payload = json.dumps({uk: user, pk: password}).encode("utf-8")
+        extra.setdefault("Content-Type", "application/json")
+    elif method == "GET":
+        extra.pop("Content-Type", None)
+    if stored_ck:
+        extra["Cookie"] = "; ".join(f"{k}={v}" for k, v in stored_ck.items())
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    req = _request(url, data=payload, headers=extra, method=method)
+    try:
+        r = opener.open(req, timeout=timeout)
+        code, body, rh = r.status, r.read(8000), r.headers.items()
+    except urllib.error.HTTPError as e:
+        code, body, rh = e.code, (e.read(8000) if hasattr(e, "read") else b""), getattr(e, "headers", {})
+        rh = rh.items() if hasattr(rh, "items") else []
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"login request failed: {type(e).__name__}"}
+    jar_cookies = {c.name: c.value for c in jar}
+    cookies, hdrs, data = _extract_session(rh, body, jar_cookies)
+    merged = dict(stored_ck)
+    merged.update(cookies)
+    cookies = merged
+    th = rec.get("token_header")
+    tjk = rec.get("token_json_key")
+    token = data.get(tjk) if tjk and isinstance(data.get(tjk), str) else None
+    token = token or hdrs.pop("_token", None)
+    if not token:
+        for k in ("access_token", "token", "id_token"):
+            v = data.get(k)
+            if isinstance(v, str) and len(v) >= 8:
+                token = v
+                break
+    if token and th:
+        hdrs[th] = token
+    elif token and not any(str(k).lower() == "authorization" for k in hdrs):
+        hdrs["Authorization"] = token if str(token).lower().startswith("bearer ") else ("Bearer " + token)
+    hdrs.pop("_token", None)
+    for junk in ("access_token", "id_token", "refresh_token", "token"):
+        if junk in hdrs and any(str(k).lower() == "authorization" for k in hdrs):
+            hdrs.pop(junk, None)
+    if token:
+        nt = _first_jwt(token) or str(token)
+        for k, v in list(cookies.items()):
+            if not _jwt_expired_value(v) and not (
+                _first_jwt(v) and (_jwt_payload(_first_jwt(v) or "") or {}).get("typ")
+                == (_jwt_payload(nt) or {}).get("typ")
+            ):
+                continue
+            old = str(v)
+            fj = _first_jwt(old)
+            cookies[k] = (nt + old[len(fj):]) if fj and old.startswith(fj) else nt
+    for k, v in (rec.get("session_headers") or {}).items():
+        if k and v and k not in hdrs:
+            hdrs[k] = v
+    if extra.get("User-Agent"):
+        hdrs.setdefault("User-Agent", extra["User-Agent"])
+    user_out = user
+    for k in ("username", "email", "user", "login"):
+        v = data.get(k)
+        if isinstance(v, str) and "@" in v:
+            user_out = v
+            break
+    if not cookies and not hdrs:
+        return {"error": f"login HTTP {code} returned no session cookies/headers"}
+    if cookies:
+        rec["cookies"] = cookies
+        rec["ts"] = time.time()
+        blob = load_creds(program, base)
+        blob[ident] = rec
+        path = _creds_path(program, base)
+        json.dump(blob, open(path, "w"), indent=2)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    probe = rec.get("probe") if isinstance(rec.get("probe"), str) else None
+    if probe and probe.startswith("http"):
+        probe_h = {**{"Accept": extra.get("Accept") or "application/json",
+                      "User-Agent": extra.get("User-Agent") or "Mozilla/5.0"}, **hdrs}
+        if cookies:
+            probe_h["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        try:
+            preq = _request(probe, headers=probe_h)
+            pr = urllib.request.urlopen(preq, timeout=timeout)
+            pcode = pr.status
+            pr.read(200)
+        except urllib.error.HTTPError as e:
+            pcode = e.code
+        except Exception:  # noqa: BLE001
+            pcode = None
+        if not (isinstance(pcode, int) and 200 <= pcode < 300):
+            return {"error": "login HTTP %s but probe HTTP %s — token_header/probe mismatch" % (code, pcode)}
+    r = set_manual(program, rec.get("host") or G._host_of(url), cookie=cookies, headers=hdrs,
+                   user=user_out, ident=ident, probe=probe, base=base)
+    if r.get("ok"):
+        r["relogin"] = True
+        r["http"] = code
+    return r
+
+
 def _mirror_to_authn(program, session, base, ident="A"):
     """Mirror the operator/provisioned session into the authn A/B store (<base>/_auth/<slug>.json) as
     identity `ident` (default A) — so the authn-based tools all carry the SAME logged-in session the agent
@@ -144,7 +382,7 @@ def _mirror_to_authn(program, session, base, ident="A"):
         bearer = hdrs.pop("Authorization", "") or hdrs.pop("authorization", "")
         bearer = re.sub(r"(?i)^bearer\s+", "", str(bearer)).strip()
         authn.save(program, ident, cookie=cstr or None, bearer=bearer or None,
-                   headers=hdrs or None, base=base)
+                   headers=hdrs or None, base=base, replace=True)
     except Exception:  # noqa: BLE001
         pass
 
@@ -154,6 +392,176 @@ def valid(session):
     if not isinstance(session, dict) or not session.get("success"):
         return False
     return bool(session.get("cookies")) or bool(session.get("headers"))
+
+
+def _first_jwt(s):
+    """First compact JWT in a header/cookie value. Ignores trailing concatenated blobs. No secrets logged."""
+    s = str(s or "").strip()
+    if s.lower().startswith("bearer "):
+        s = s.split(None, 1)[-1].strip()
+    cand = s.split("+", 1)[0]
+    parts = cand.split(".")
+    if len(parts) >= 3 and parts[0].startswith("eyJ"):
+        return cand
+    return None
+
+
+def _jwt_payload(tok):
+    parts = str(tok or "").split(".")
+    if len(parts) < 2:
+        return None
+    import base64
+    pad = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        p = json.loads(base64.urlsafe_b64decode(pad.encode("ascii")))
+    except Exception:  # noqa: BLE001
+        return None
+    return p if isinstance(p, dict) else None
+
+
+def _jwt_expired_value(s):
+    tok = _first_jwt(s)
+    if not tok:
+        return False
+    payload = _jwt_payload(tok)
+    exp = payload.get("exp") if payload else None
+    if not isinstance(exp, (int, float)):
+        return False
+    return exp < (time.time() - 30)
+
+
+def _jwt_expired(headers, cookies=None):
+    """True when any JWT in headers or cookies has exp in the past. No token is logged."""
+    for v in list((headers or {}).values()) + list((cookies or {}).values()):
+        if _jwt_expired_value(v):
+            return True
+    return False
+
+
+def _bearer_from_cookies(cookies):
+    """Pick the best access-token-looking JWT from a cookie jar to send as Authorization."""
+    best, score = None, -1
+    for v in (cookies or {}).values():
+        tok = _first_jwt(v)
+        if not tok:
+            continue
+        p = _jwt_payload(tok) or {}
+        sc = 0
+        typ = str(p.get("typ") or "").lower()
+        if "at" in typ or "access" in typ:
+            sc += 3
+        if p.get("aud") or p.get("scp"):
+            sc += 2
+        if p.get("exp"):
+            sc += 1
+        if sc > score:
+            best, score = tok, sc
+    return best
+
+
+def note_live(program, url, base=DEFAULT_BASE):
+    """Remember the URL that proved this login, so the next health check is that URL — not a catalog."""
+    if not isinstance(url, str) or not url.startswith("http") or " " in url or "(" in url:
+        return
+    sess = load(program, base)
+    if not valid(sess):
+        return
+    if G._host_of(url) != G._host_of(sess.get("host") or ""):
+        return
+    if sess.get("probe"):
+        return
+    sess["probe"] = url.split("#")[0]
+    save(program, sess, base)
+
+
+def _probes_for(session, program=None, base=None):
+    """URLs to re-check, from this session and this program's live surface. No built-in path list."""
+    host = G._host_of(session.get("host") or "")
+    probes = []
+    for key in ("probe", "health_url"):
+        u = session.get(key)
+        if isinstance(u, str) and u.startswith("http") and " " not in u and "(" not in u:
+            probes.append(u.split("#")[0])
+    slug = program or session.get("program")
+    root = os.path.expanduser(base or DEFAULT_BASE)
+    if slug and host:
+        try:
+            st = json.load(open(os.path.join(root, slug, "state.json")))
+        except (OSError, json.JSONDecodeError):
+            st = {}
+        scored = []
+        for s in st.get("surface") or []:
+            u = (s.get("url") or "").split("#")[0]
+            if not u.startswith("http") or " " in u or "(" in u:
+                continue
+            if G._host_of(u) != host:
+                continue
+            if re.search(r"\.(png|jpe?g|gif|svg|css|js|mjs|map|woff2?|mp4|webm)(\?|$)", u, re.I):
+                continue
+            apiish = 1 if re.search(r"/api/|/gw/|/v[0-9]+/|/auth/|/rest/", u, re.I) else 0
+            scored.append((apiish, u.split("?")[0]))
+        scored.sort(reverse=True)
+        for _, u in scored:
+            if u not in probes:
+                probes.append(u)
+            if len(probes) >= 3:
+                break
+    return probes[:3]
+
+
+def site_rejects(session, timeout=12, program=None, base=None):
+    """True when the site itself refuses this session.
+
+    Rechecks the URL that proved the login, then up to two APIs already on this
+    program's surface. There is no built-in path or product catalog. A public
+    homepage 200 is not proof of login; a 401 is a dead session. Network errors
+    do not count as rejection.
+    """
+    if not valid(session):
+        return False
+    host = G._host_of(session.get("host") or "")
+    if not host:
+        return False
+    import urllib.request
+    cookies = session.get("cookies") or {}
+    hdrs = {k: v for k, v in (session.get("headers") or {}).items() if k.lower() != "cookie"}
+    if _jwt_expired(hdrs, cookies if isinstance(cookies, dict) else None):
+        return True
+    if isinstance(cookies, dict) and cookies:
+        hdrs["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    if not any(str(k).lower() == "user-agent" for k in hdrs):
+        hdrs["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    if not any(str(k).lower() == "accept" for k in hdrs):
+        hdrs["Accept"] = "application/json"
+
+    def _open(url):
+        req = _request(url, headers=hdrs)
+        try:
+            r = urllib.request.urlopen(req, timeout=timeout)
+            return r.status, r.read(800)
+        except Exception as e:  # noqa: BLE001
+            code = getattr(e, "code", None)
+            body = e.read(800) if hasattr(e, "read") else b""
+            return code, body
+
+    saw_401 = False
+    for url in _probes_for(session, program=program, base=base):
+        code, body = _open(url)
+        if code == 401:
+            saw_401 = True
+            continue
+        raw = (body or b"").lstrip()
+        if code and 200 <= code < 300:
+            flat = re.sub(rb"\s+", b"", raw[:800])
+            if b'"loggedIn":false' in flat:
+                saw_401 = True
+                continue
+            return False
+    if saw_401:
+        return True
+    code, _body = _open("https://" + host + "/")
+    return code == 401
 
 
 def _parse_cookie(s):
@@ -191,7 +599,8 @@ def _parse_cookie(s):
     return out, domains
 
 
-def set_manual(program, host, cookie=None, headers=None, token=None, user=None, base=DEFAULT_BASE, ident="A"):
+def set_manual(program, host, cookie=None, headers=None, token=None, user=None,
+               base=DEFAULT_BASE, ident="A", probe=None):
     """Store an OPERATOR-PROVIDED session (a ready test account) so the hunt tests AUTHENTICATED — the easy
     path when a program forbids self-registration. `cookie` may be a raw Cookie-header string or a dict;
     `token` becomes an `Authorization: Bearer` header. The host must be in the program's scope. Returns a
@@ -202,6 +611,10 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
     tok = str(token or "").strip()
     if tok and tok not in ("eyJ…", "eyJ...", "..."):        # ignore the UI placeholder
         hdrs["Authorization"] = tok if tok.lower().startswith("bearer ") else ("Bearer " + tok)
+    if not any(str(k).lower() == "authorization" for k in hdrs):
+        btok = _bearer_from_cookies(cookies)
+        if btok:
+            hdrs["Authorization"] = "Bearer " + btok
     if not cookies and not hdrs:
         return {"error": "no cookies found — paste the Cookie header, a cookie-extension JSON export, "
                          "a curl command, or a token"}
@@ -232,6 +645,8 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None, 
     sess = {"success": True, "host": host, "program": slug, "cookies": cookies, "headers": hdrs,
             "user": user or ("victim-B" if ident == "B" else "operator-provided"),
             "source": "manual", "ts": time.time()}
+    if isinstance(probe, str) and probe.startswith("http"):
+        sess["probe"] = probe.split("#")[0]
     if ident == "B":
         # a SECOND account for cross-account IDOR/BOLA (the victim). Store ONLY as authn 'B' — don't
         # replace the agent's primary session (A) or requeue the surface; the agent reaches B via
@@ -347,60 +762,23 @@ def status(base=DEFAULT_BASE):
 
 
 def check_live(program, base=DEFAULT_BASE, timeout=12):
-    """Live probe: fetch the session's host WITH and WITHOUT the stored cookies and compare, to tell whether
-    the target actually ACCEPTS the login (vs expired/rejected). Best-effort heuristic; returns a verdict."""
-    import urllib.request
-    import urllib.error
+    """Panel/live verdict: same check the hunt uses (JWT exp + this session's probe / this
+    program's own surface). No homepage marker catalog."""
     s = load(program, base)
     if not valid(s):
         return {"ok": False, "error": "no valid session stored for this program"}
     host = _clean_host(G._host_of(s.get("host", "")) or s.get("host", ""))
     if not host:
         return {"ok": False, "error": "stored session has no host"}
-    url = "https://" + host + "/"
-    cstr = "; ".join(f"{k}={v}" for k, v in (s.get("cookies") or {}).items())
-    extra = dict(s.get("headers") or {})
-    ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"
-
-    def fetch(auth):
-        h = {"User-Agent": ua, "Accept": "text/html,application/json"}
-        if auth:
-            if cstr:
-                h["Cookie"] = cstr
-            h.update(extra)
-        try:
-            r = urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout)
-            body = r.read(300000)
-            return {"status": getattr(r, "status", r.getcode()), "final": r.geturl(),
-                    "len": len(body), "body": body.decode("utf-8", "ignore")}
-        except urllib.error.HTTPError as e:
-            return {"status": e.code, "final": url, "len": 0, "body": ""}
-        except Exception as e:  # noqa: BLE001
-            return {"error": str(e)[:120]}
-
-    a = fetch(True)
-    if a.get("error"):
-        return {"ok": False, "error": "could not reach " + host + ": " + a["error"]}
-    n = fetch(False)
-    af = (a.get("final") or "").lower()
-    body = a.get("body", "").lower()
-    markers = ["logout", "log out", "my profile", "account-manager", '"isloggedin":true',
-               'data-logged-in="true"', "karma", "/settings", "loggedin\":true"]
-    authed, note = None, ""
-    if any(k in af for k in ("login", "signin", "sign-in")):
-        authed, note = False, "the session request was redirected to a login page — session rejected/expired"
-    elif n.get("status") in (401, 403) and a.get("status") == 200:
-        authed, note = True, "authenticated request returns 200 while anonymous is blocked (401/403)"
-    elif any(m in body for m in markers):
-        authed, note = True, "logged-in markers present in the response (logout / profile / settings / karma)"
-    elif a.get("len") and n.get("len") and abs(a["len"] - n["len"]) > 3000:
-        authed, note = True, "authenticated response is materially different from anonymous (personalized)"
-    else:
-        authed, note = None, ("couldn't confirm from the homepage — the hunt still tries the session; "
-                              "check the hunt log for the 'AUTHENTICATED' line")
-    return {"ok": True, "program": G._slug(program), "host": host, "authed": authed, "note": note,
-            "with_session": {k: a.get(k) for k in ("status", "final", "len")},
-            "anonymous": {k: n.get(k) for k in ("status", "final", "len")}}
+    rejected = site_rejects(s, timeout=timeout, program=program, base=base)
+    probes = _probes_for(s, program=program, base=base)
+    if rejected:
+        return {"ok": True, "program": G._slug(program), "host": host, "authed": False,
+                "note": "site refused this session — paste a live login",
+                "probes": len(probes)}
+    return {"ok": True, "program": G._slug(program), "host": host, "authed": True,
+            "note": "session accepted on this program's probe/surface",
+            "probes": len(probes)}
 
 
 def _host_apex(h):
@@ -507,7 +885,8 @@ def provision(program, base=DEFAULT_BASE, scope=None, host=None, timeout=None):
     alt_hosts = [h for h in alt_hosts if h and h != host and not _is_thirdparty(h)]
     r = A.run_agent(_provision_task(program, host, ident, alt_hosts=alt_hosts), timeout=timeout, attempts=1)
     if r.get("error"):
-        transient = r["error"] in ("timeout", "rate-limited")   # still-in-progress, not a proven dead-end
+        # A missing JSON block is the agent failing to answer, not proof that signup is impossible.
+        transient = r["error"] in ("timeout", "rate-limited", "parse:no-json") or str(r["error"]).startswith("parse")
         save(program, {"success": False, "program": G._slug(program), "host": host,
                        "error": "agent: " + r["error"], "transient": transient,
                        "ts": time.time()}, base=base)            # cooldown marker (short if transient)
@@ -609,6 +988,31 @@ def _cmd_selftest(_a):
     # hostile input never raises
     for bad in (None, "", 123, {"x": 1}):
         pick_auth_host(bad); valid(bad); auth_block(bad, bad)     # type: ignore
+    c, h, _d = _extract_session([("X-Auth-Token", "tokentokentoken")],
+                                b'{"api_key":"abcdefghijklmnop"}', {"sid": "1"})
+    assert c.get("sid") == "1"
+    assert h.get("X-Auth-Token") == "tokentokentoken" and h.get("api_key") == "abcdefghijklmnop"
+    _c2, h2, _d2 = _extract_session([], b'{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}', {})
+    assert h2.get("_token") == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    sr = save_login("acme", "A", "sandbox-login.acme.com", "u@x", "pw",
+                    "https://sandbox-login.acme.com/login", token_header="X-Auth-Token",
+                    token_json_key="id", base=base)
+    assert sr.get("ok") and load_creds("acme", base)["A"]["user"] == "u@x"
+    assert load_creds("acme", base)["A"]["token_header"] == "X-Auth-Token"
+    import base64 as _b64
+    def _mkjwt(exp):
+        p = _b64.urlsafe_b64encode(json.dumps({"exp": exp, "typ": "at+jwt", "aud": ["x"]}).encode()).decode().rstrip("=")
+        return "eyJhbGciOiJub25lIn0." + p + ".sig"
+    assert _jwt_expired_value("Bearer " + _mkjwt(int(time.time()) - 120))
+    assert not _jwt_expired_value("Bearer " + _mkjwt(int(time.time()) + 3600))
+    assert _bearer_from_cookies({"k": _mkjwt(int(time.time()) + 3600)})
+    sr2 = save_login("acme", "B", "sandbox-login.acme.com", "v@x", "",
+                     "https://sandbox-login.acme.com/refresh", cookies={"sid": "abc"},
+                     method="GET", base=base)
+    assert sr2.get("ok") and load_creds("acme", base)["B"]["cookies"]["sid"] == "abc"
+    assert load_creds("acme", base)["B"]["method"] == "GET"
+    raw = _request("https://example.com/x", headers={"X-Auth-Token": "abc"})
+    assert raw.headers.get("X-Auth-Token") == "abc"
     print("authsession.py self-test: PASS")
     return 0
 

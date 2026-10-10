@@ -291,15 +291,15 @@ def classify(item):
 
 
 def classify_all(item, max_classes=None):
-    """FULL-PENTEST class matrix for an endpoint (not just the top guess). Every reachable HTTP endpoint
-    is a candidate for the core access/SSRF/redirect classes; parameters and API/dynamic paths add the
-    full injection matrix (sqli/nosqli/xss/ssti/lfi/cmdi/xxe); auth/upload/webhook/graphql/ai paths add
-    their specialised classes. Cap is HUNT_MAX_CLASSES (default 10) so the hunt covers ALL plausible
-    classes per endpoint, not a narrow 3. A preset secret finding stays single-class."""
-    if max_classes is None:
-        max_classes = int(os.environ.get("HUNT_MAX_CLASSES", "10"))
+    """Work units for an endpoint. Deep mode is one thinking hunt per URL — not a
+    vuln-class matrix. A preset secret finding stays single-class. The keyword
+    matrix below is only used when HUNT_DEEP is off (tests / explicit class mode)."""
     if item.get("source") == "secret" and item.get("vuln_class"):
         return [item["vuln_class"]]
+    if os.environ.get("HUNT_DEEP", "1") == "1":
+        return ["deep"]
+    if max_classes is None:
+        max_classes = int(os.environ.get("HUNT_MAX_CLASSES", "10"))
     url = item.get("url", "").lower()
     p = (item.get("param", "") or "").lower()
     classes = [classify(item)]

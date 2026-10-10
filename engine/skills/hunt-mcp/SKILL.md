@@ -65,7 +65,7 @@ jq -r '.. | strings' mcp-init.json mcp-catalog.json | grep -iE \
 
 ### Auth / transport checks (common real bugs)
 - **No auth on the HTTP transport** — `initialize` + `tools/list` succeed with no token → anyone on the network drives the tools. High on its own if a tool has a real sink.
-- **401 → map the auth server, don't stop** — read `WWW-Authenticate`, then `GET /.well-known/oauth-protected-resource` (RFC 9728, required by the 2025-06-18 auth spec) → the listed `authorization_servers` → their `/.well-known/openid-configuration`. Run `hunt-oauth` on that AS; open dynamic client registration is a common MCP finding.
+- **401 → map the auth server, don't stop** — read `WWW-Authenticate`, then `GET /.well-known/oauth-protected-resource` (RFC 9728, required by the 2025-06-18 auth spec) → the listed `authorization_servers` → their `/.well-known/openid-configuration`. Run `hunt-oauth` on that AS. Advertised RFC 7591 `registration_endpoint` + **400** on `redirect_uri` mismatch is **intended MCP DCR**, not a finding. Draft only if mismatch is **accepted** **or** account **B**'s `code` lands on a client B did not register.
 - **DNS rebinding / missing `Origin` check** on a localhost MCP server — a browser page reaches `http://127.0.0.1:<port>/mcp` (same gate as `hunt-desktop-*` local bridges). Confirm with a forged `Origin`/`Host`.
 - **Over-broad OAuth scope / token passthrough** — the server exchanges your low-priv token for its own high-priv credential downstream (see confused-deputy below).
 - **Audience mix-up** — a token whose `aud` / RFC 8707 `resource` is server A is accepted by server B. Proof: call a tool on B with A's token and read data A was not issued for.

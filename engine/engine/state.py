@@ -30,6 +30,33 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+# Object ids in a path or query are one hunt, not one hunt per file. /v1 and short
+# counters stay distinct so versioned routes and the selftest URLs are not collapsed.
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_LONGHEX_RE = re.compile(r"(?<=/)[0-9a-fA-F]{16,}(?=/|[?#]|$)")
+_LONGNUM_RE = re.compile(r"(?<=/)\d{4,}(?=/|[?#]|$)")
+_QVAL_RE = re.compile(r"([?&][^=&]+=)([^&]*)")
+_IDVAL_RE = re.compile(r"^(?:[0-9a-fA-F]{16,}|\d{4,})$")
+
+
+def url_pattern(url):
+    """Concrete URL with UUIDs, long hex, and long numeric ids replaced by {id}."""
+    if not url:
+        return ""
+    u = _UUID_RE.sub("{id}", str(url))
+    u = _LONGHEX_RE.sub("{id}", u)
+    u = _LONGNUM_RE.sub("{id}", u)
+
+    def _qv(m):
+        val = m.group(2)
+        if _UUID_RE.search(val or "") or _IDVAL_RE.match(val or ""):
+            return m.group(1) + "{id}"
+        return m.group(0)
+
+    return _QVAL_RE.sub(_qv, u)
+
+
 def _as_epoch(v):
     """Coerce a stored 'tested' timestamp (epoch float, or legacy ISO string, or missing) to epoch."""
     if isinstance(v, (int, float)):
@@ -81,16 +108,57 @@ class Engagement:
 
     # ---- surface (discovered, scope-checked endpoints/params) ----
     def add_surface(self, items):
-        seen = {(s["url"], s.get("param", ""), s.get("vuln_class", "")) for s in self.state["surface"]}
+        # Dedup on the URL *pattern* so /files/<uuid-1> and /files/<uuid-2> are one job.
+        # The first concrete URL is what the agent actually requests.
+        seen = {self._pat_key(s) for s in self.state["surface"]}
         added = 0
         for it in items:
-            key = (it["url"], it.get("param", ""), it.get("vuln_class", ""))
+            key = self._pat_key(it)
             if key not in seen:
                 self.state["surface"].append(it)
                 seen.add(key)
                 added += 1
         self.save()
         return added
+
+    def collapse_patterns(self):
+        """Mark extra concrete URLs of the same pattern tested, leaving one representative huntable."""
+        groups = {}
+        for s in self.state["surface"]:
+            groups.setdefault(self._pat_key(s), []).append(s)
+        tested = self.state.get("tested")
+        if not isinstance(tested, dict):
+            tested = {str(k): 0.0 for k in (tested or [])}
+            self.state["tested"] = tested
+        now = time.time()
+        n = 0
+        for items in groups.values():
+            if len(items) < 2:
+                continue
+            keep = max(items, key=lambda s: ((s.get("priority") or 0), s.get("url") or ""))
+            for s in items:
+                if s is keep:
+                    continue
+                k = self._key(s)
+                if k not in tested:
+                    tested[k] = now
+                    n += 1
+        if n:
+            self.save()
+        return n
+
+    def hunt_note(self, item):
+        return (self.state.get("hunt_notes") or {}).get(self._key(item)) or {}
+
+    def note_hunt(self, item, analysis, classes=None):
+        """Remember why an endpoint was nothing, so the next look does not repeat the same dead end."""
+        notes = self.state.setdefault("hunt_notes", {})
+        notes[self._key(item)] = {
+            "analysis": str(analysis or "")[:600],
+            "classes": [str(c) for c in (classes or [])][:8],
+            "ts": time.time(),
+        }
+        self.save()
 
     def _tested_map(self):
         """{key: epoch_ts} from either the current dict form or a legacy list[str] (ts=0 => eligible)."""
@@ -135,6 +203,10 @@ class Engagement:
     def _key(s):
         return f"{s['url']}|{s.get('param','')}|{s.get('vuln_class','')}"
 
+    @staticmethod
+    def _pat_key(s):
+        return (url_pattern(s.get("url", "")), s.get("param") or "", s.get("vuln_class") or "")
+
     def mark_tested(self, item):
         k = self._key(item)
         t = self.state.get("tested")
@@ -148,6 +220,24 @@ class Engagement:
     def add_candidate(self, finding):
         finding["ts"] = _now()
         self.state["candidates"].append(finding)
+        self.save()
+
+    def _finding_key(self, finding):
+        return f"{finding.get('url','')}|{finding.get('vuln_class','')}"
+
+    def rejected_keys(self):
+        r = self.state.get("rejected")
+        if isinstance(r, dict):
+            return set(r)
+        return set()
+
+    def mark_rejected(self, finding, reason):
+        """A candidate that was disproved, held, or out of scope is not sent back to the validator."""
+        rec = self.state.setdefault("rejected", {})
+        if not isinstance(rec, dict):
+            rec = {}
+            self.state["rejected"] = rec
+        rec[self._finding_key(finding)] = str(reason or "")[:240]
         self.save()
 
     def confirm(self, finding, verdict):
@@ -194,6 +284,19 @@ def _selftest():
         # resume: a fresh handle on the same dir sees persisted state
         e2 = Engagement(d, "demo")
         assert e2.summary() == {"surface": 2, "tested": 1, "candidates": 1, "confirmed": 1, "phase": "init"}
+        # one file-id pattern is one hunt: the second UUID is not a new surface item
+        u1 = "https://files.example/api/v1/files/11111111-1111-4111-8111-111111111111"
+        u2 = "https://files.example/api/v1/files/22222222-2222-4222-8222-222222222222"
+        assert e.add_surface([{"url": u1, "vuln_class": "deep"}, {"url": u2, "vuln_class": "deep"}]) == 1
+        e3 = Engagement(d, "dup")
+        e3.state["surface"] = [{"url": u1, "vuln_class": "deep"}, {"url": u2, "vuln_class": "deep"}]
+        assert e3.collapse_patterns() == 1
+        assert len(e3.worklist()) == 1
+        kept = e3.worklist()[0]
+        e3.note_hunt(kept, "static uuid file, no authz object", ["idor"])
+        assert "static uuid" in e3.hunt_note(kept)["analysis"]
+        e.mark_rejected({"url": "http://t/a", "vuln_class": "idor"}, "false positive")
+        assert "http://t/a|idor" in e.rejected_keys()
         print("state.py self-test: PASS")
     finally:
         shutil.rmtree(d)

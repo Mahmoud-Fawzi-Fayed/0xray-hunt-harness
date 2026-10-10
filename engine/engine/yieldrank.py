@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
-yieldrank.py — "cover every class, hunt the most-findable first, and stop farming your own dups."
+yieldrank.py — order THIS program's live surface from its own outcomes.
 
-CLASS_WEIGHT in engine.py ranks by IMPACT (rce=100, sqli=90...). That is one axis. This module adds
-the other axis the operator asked for: YIELD — how likely a class is to actually produce a finding —
-and then LEARNS from your own outcomes so the order adapts:
-
-  - start from frequency PRIORS (grounded in public bug-bounty disclosure frequency),
-  - + a bonus for classes YOU have been confirming lately,
-  - - a penalty for classes where YOU keep getting duplicated (so effort drifts to where dups are
-    least likely — the whole point of this harness).
-
-Every class stays in the ranking (nothing is dropped — "cover all types"); only the ORDER changes.
+No global vuln-class menu. Bonus comes only from hunt-memory/journal.jsonl and
+this program's dedup corpus: classes you confirmed recently rise; classes you
+keep duplicating sink. rank() lists classes that actually appeared in that
+journal — it does not emit a canned OWASP list.
 
 Learning sources (all optional, read-only, offline):
   - hunt-memory/journal.jsonl   -> per-class confirmed / duplicate counts (your real outcomes)
@@ -28,23 +22,9 @@ import sys
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
-# find-frequency priors (0..100). NOT impact — how often this class actually lands a finding.
-PRIORS = {
-    "info-leak": 80, "secret": 78, "xss": 78, "idor": 75, "api-misconfig": 70,
-    "auth-bypass": 62, "ssrf": 60, "sqli": 58, "llm-ai": 58, "open-redirect": 55,
-    "business-logic": 55, "oauth": 52, "subdomain-takeover": 52, "csrf": 50, "graphql": 50,
-    "rce": 48, "file-upload": 46, "lfi": 45, "mfa": 45, "cors": 45, "race-condition": 42,
-    "host-header": 38, "ssti": 36, "xxe": 34, "nosqli": 32, "deserialization": 32,
-    "http-smuggling": 28, "saml": 26, "cache-poison": 40, "websocket": 30,
-}
-
-# tech fingerprint -> classes to boost for that stack
-TECH_BOOST = {
-    "next.js": ["ssrf", "open-redirect", "api-misconfig"], "node.js": ["rce", "api-misconfig", "ssrf"],
-    "graphql": ["graphql", "idor", "api-misconfig"], "laravel": ["rce", "idor", "info-leak"],
-    "spring": ["rce", "ssrf", "info-leak"], "wordpress": ["sqli", "idor", "info-leak"],
-    "react": ["xss", "info-leak"], "asp.net": ["deserialization", "info-leak"],
-}
+# Kept empty so callers that still import PRIORS do not get a hunt catalog.
+PRIORS = {}
+TECH_BOOST = {}
 
 
 def _find_journal(base):
@@ -121,35 +101,25 @@ class Model:
         return min(s["confirmed"], 6) * 2.0 - dup_rate * 30.0 - bad_rate * 20.0
 
     def bonus(self, c):
-        """Small ADDITIVE bump for engine.rank() (keeps impact baseline, nudges by yield). ~ -20..+52."""
+        """Additive bump from THIS journal only. Unknown / empty class → 0."""
         c = (c or "").strip().lower()
         if not c:
             return 0.0
-        return round(PRIORS.get(c, 20) * 0.4 + self._adj(c), 1)
+        return round(self._adj(c), 1)
 
     def score(self, c, tech=None):
-        """Full yield score for the /yield coverage list."""
-        c = c.lower()
-        base = PRIORS.get(c, 20) + self._adj(c)
-        if tech:
-            for t in tech:
-                if c in TECH_BOOST.get((t or "").lower(), []):
-                    base += 12
-                    break
-        return round(base, 1)
+        """Yield score from this journal. `tech` is ignored (no stack→class table)."""
+        return round(self._adj((c or "").lower()), 1)
 
     def rank(self, tech=None):
-        """All classes, highest yield first (covers everything)."""
+        """Classes that actually appeared in this journal, highest yield first."""
         rows = []
-        for c in PRIORS:
-            s = self.learned.get(c, {})
+        for c, s in (self.learned or {}).items():
             note = []
             if s.get("confirmed"):
                 note.append(f"you confirmed x{s['confirmed']}")
             if s.get("dup"):
                 note.append(f"dup'd x{s['dup']} (downranked)")
-            if tech and any(c in TECH_BOOST.get((t or "").lower(), []) for t in tech):
-                note.append("tech-match")
             rows.append({"class": c, "score": self.score(c, tech), "note": ", ".join(note)})
         rows.sort(key=lambda r: -r["score"])
         return rows
@@ -239,7 +209,7 @@ def main(argv=None):
         print(f"{'class':20s} {'yield':>6s}  note")
         for r in rows:
             print(f"{r['class']:20s} {r['score']:6.1f}  {r['note']}")
-        print("\ncover all; hunt top-down. classes you keep getting dup'd on sink automatically.")
+        print("\norder from this journal only — no canned class list.")
     return 0
 
 
@@ -256,14 +226,9 @@ def _selftest():
     m = Model.load(base)
     rows = m.rank()
     order = [r["class"] for r in rows]
-    # xss prior (78) is high, but 4 dups must drop it below ssrf (prior 60 + confirmed bonus)
-    assert order.index("ssrf") < order.index("xss"), order[:8]
-    # every class is present (coverage)
-    assert len(rows) == len(PRIORS), (len(rows), len(PRIORS))
-    # engine bonus is additive + bounded
-    assert -20 <= m.bonus("ssrf") <= 60 and m.bonus("") == 0.0
-    # tech boost moves graphql up when graphql stack present
-    assert m.score("graphql", ["graphql"]) > m.score("graphql", None)
+    assert order == ["ssrf", "xss"], order
+    assert m.bonus("ssrf") > m.bonus("xss") and m.bonus("") == 0.0
+    assert m.score("graphql", ["graphql"]) == m.score("graphql", None)
     print("yieldrank.py self-test: PASS")
     return 0
 

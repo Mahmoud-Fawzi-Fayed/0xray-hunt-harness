@@ -348,7 +348,8 @@ class Orchestrator:
             self._email_drafts(new_drafts)             # email each finding ONCE — only drafts NEW this round
         elif not self.eng.eng.state.get("confirmed"):
             self.eng.eng.log("orchestrator: no confirmed finding THIS pass — NOT a conclusion. "
-                             "Rotate classes / re-recon for new surface (redteam-mindset: DO NOT STOP).")
+                             "Invent the next test from live bytes / re-recon for new surface "
+                             "(redteam-mindset: DO NOT STOP).")
         summary = {**self.eng.eng.summary(), "drafted": len(drafted), "held_dups": len(held),
                    "held_policy": len(getattr(self, "_policy", []) or []),
                    "submitted": 0, "dir": self.eng.eng.dir}
@@ -376,6 +377,12 @@ class Orchestrator:
         drafted_total = 0
         while True:
             r += 1
+            park = self._review_park_seconds()
+            if park > 30:
+                self.eng.eng.log(f"persist: parked by workflow review for {int(park/60)}m "
+                                 "— covered, and there is no live session to mine")
+                time.sleep(min(park, interval or 600))
+                continue
             self.eng.eng.log(f"=== persist round {r} ===")
             try:
                 s = self.run(obs=None)               # obs=None -> re-observe live each round
@@ -414,6 +421,16 @@ class Orchestrator:
                 time.sleep(interval)
         return {"rounds": r, "drafted_total": drafted_total, "dir": self.eng.eng.dir}
 
+    def _review_park_seconds(self):
+        """Seconds left on a workflow-review park. 0 means hunt this round."""
+        path = os.path.join(os.path.expanduser(self.base), "_review", "directives",
+                            self.eng.scope.name + ".json")
+        try:
+            until = float(json.load(open(path)).get("park_until") or 0)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return 0
+        return max(0.0, until - time.time())
+
 
 def _selftest():
     import tempfile
@@ -422,7 +439,7 @@ def _selftest():
     os.environ["HUNT_ENV_FILE"] = "/nonexistent-selftest-env"
     os.environ["HUNT_WEB_DIR"] = os.path.join(base, "web")
     os.environ.pop("HUNT_PUBLIC_URL", None)
-    for _k in ("SMTP_HOST", "SMTP_TO"):
+    for _k in ("SMTP_HOST", "SMTP_TO", "HUNT_PARALLEL", "HUNT_MAX_HUNTS", "HUNT_AGENT_TIMEOUT"):
         os.environ.pop(_k, None)
     scope = os.path.join(ENGINE, "engagement.example.json")
     obs = {"subdomains": ["localhost"], "hosts": [{"url": "http://localhost:3002", "status": 200}],

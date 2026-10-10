@@ -24,14 +24,40 @@
     },
     {
       "parameters": {
-        "jsCode": "// Targets to monitor — one object per apex. Keep IN-SCOPE programs only.\nconst targets = [\n  // 'example.com',\n];\nreturn targets.map(t => ({ json: { target: t } }));"
+        "method": "GET",
+        "url": "__HUNT_BRIDGE_URL__/targets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Hunt-Token",
+              "value": "__HUNT_BRIDGE_TOKEN__"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
       },
       "id": "a2222222-2222-4222-8222-222222222222",
-      "name": "Targets",
+      "name": "Live programs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const list = ($json.targets || []).filter(t => t && (t.target || t.name));\nreturn list.map(t => ({ json: { target: String(t.target || t.name).replace(/^https?:\\/\\//, '') } }));"
+      },
+      "id": "a25252525-2222-4222-8222-222222222225",
+      "name": "Split apexes",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        460,
+        680,
         300
       ]
     },
@@ -60,7 +86,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        680,
+        900,
         300
       ]
     },
@@ -93,7 +119,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        900,
+        1120,
         300
       ]
     }
@@ -103,14 +129,25 @@
       "main": [
         [
           {
-            "node": "Targets",
+            "node": "Live programs",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Targets": {
+    "Live programs": {
+      "main": [
+        [
+          {
+            "node": "Split apexes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split apexes": {
       "main": [
         [
           {

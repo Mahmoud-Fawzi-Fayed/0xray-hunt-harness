@@ -26,6 +26,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -290,10 +291,18 @@ class Handler(BaseHTTPRequestHandler):
                                         "watchdog": {"ts": wd.get("ts"), "revived": wd.get("revived") or {}}})
             if p.path == "/review/latest":
                 fp = os.path.join(os.path.expanduser(self.base), "_review", "latest.json")
+                livep = os.path.join(os.path.expanduser(self.base), "_review", "live.json")
                 try:
-                    return self._send(200, json.load(open(fp)))
+                    data = json.load(open(fp))
                 except Exception:  # noqa: BLE001
-                    return self._send(200, {"error": "no review yet"})
+                    data = {"error": "no review yet"}
+                try:
+                    live = json.load(open(livep))
+                    if isinstance(data, dict):
+                        data["live"] = live
+                except Exception:  # noqa: BLE001
+                    pass
+                return self._send(200, data)
             if p.path == "/review/journal":
                 fp = os.path.join(os.path.expanduser(self.base), "_review", "journal.jsonl")
                 out = []
@@ -409,6 +418,10 @@ class Handler(BaseHTTPRequestHandler):
                 _sinv = _SESS.inventory(self.base)
                 _dead = sum(len(h.get("dead", [])) for h in _sinv["pool_health"].values())
                 _corrupt = sum(1 for h in _sinv["pool_health"].values() if h.get("corrupt"))
+                _live = _SESS.live_resume_ids()
+                _running = set(_sinv.get("running") or [])
+                _pooled_n = sum(len(v or []) for k, v in (_sinv.get("pools") or {}).items()
+                                if k in _running and isinstance(v, list))
                 return self._send(200, {
                     "sessions": {"chats_on_disk": len(_sinv["chats"]),
                                  "transcripts_on_disk": len(_sinv["transcripts"]),
@@ -416,7 +429,10 @@ class Handler(BaseHTTPRequestHandler):
                                  "orphaned_chats": len(_sinv["orphans"]),
                                  "pool_dead_ids": _dead, "pool_corrupt": _corrupt,
                                  "pool_per_target": int(os.environ.get("HUNT_SESSION_POOL", "3")),
-                                 "max_uses": int(os.environ.get("HUNT_SESSION_MAX_USES", "25"))},
+                                 "max_uses": int(os.environ.get("HUNT_SESSION_MAX_USES", "25")),
+                                 "agents_running": len(_live),
+                                 "pooled_in_use": _pooled_n,
+                                 "targets_running": len(_running)},
                     "websearch": {"ready": True, "provider": "duckduckgo-html"},
                     "identity": {"ready": True, "provider": "mail.tm", "max_accounts": _G.max_accounts()},
                     "sms": _SMS.status(),
@@ -477,8 +493,10 @@ class Handler(BaseHTTPRequestHandler):
                     for line in reversed(tail):
                         if "AUTHENTICATED — using test session" in line:
                             res["hunt_status"] = "hunt is USING the session (log shows 'AUTHENTICATED')"; break
+                        if "until a live session is pasted" in line:
+                            res["hunt_status"] = "holding that host until a live session is pasted"; break
                         if "hunting unauthenticated" in line:
-                            res["hunt_status"] = "hunt ran UNAUTHENTICATED last round — restart it or wait one round to apply"; break
+                            res["hunt_status"] = "hunt ran UNAUTHENTICATED last round — paste a live login"; break
                 except OSError:
                     pass
                 return self._send(200, res)
@@ -509,12 +527,19 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._send(400, {"error": str(e)})
                 return self._send(200, {"ok": True, "mark": rec})
-            if p.path == "/review/run":                 # trigger a workflow review on demand (panel button)
+            if p.path == "/review/run":                 # panel "Run now" — always a real pass, not the 40-min wait
                 log = os.path.join(os.path.expanduser(self.base), "_review", "run.log")
                 os.makedirs(os.path.dirname(log), exist_ok=True)
-                subprocess.Popen(["python3", os.path.join(ENGINE, "reviewer.py"), "--quiet"],
+                lock = os.path.join(os.path.dirname(log), "review.lock")
+                try:
+                    if os.path.exists(lock) and time.time() - os.path.getmtime(lock) < 1800:
+                        return self._send(200, {"started": False,
+                                                "reason": "a review is already running"})
+                except OSError:
+                    pass
+                subprocess.Popen(["python3", os.path.join(ENGINE, "reviewer.py"), "--force", "--quiet"],
                                  start_new_session=True, stdout=open(log, "a"), stderr=subprocess.STDOUT)
-                return self._send(200, {"started": True, "note": "review running; poll /review/latest"})
+                return self._send(200, {"started": True, "note": "review running now"})
             if p.path in ("/novelty/watch", "/novelty/diff"):
                 target = b.get("target")
                 if not target:

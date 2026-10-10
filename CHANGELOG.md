@@ -3,6 +3,22 @@
 All notable changes to the 0xRay Hunt Harness. Format based on
 [Keep a Changelog](https://keepachangelog.com/); releases are date-based.
 
+## [0.10.0] - 2026-10-10
+### Added — destatic hunt + auto-relogin
+- **No product/class path catalog in the engine.** Rank, skill map, and session probes use this
+  program's live surface and the operator paste. `HUNT_DEEP=1` runs one analysis-driven agent per
+  URL instead of spraying an OWASP class list.
+- **Creds vault auto-relogin** (`authsession.save_login` / `relogin`) — password POST or cookie GET
+  against the stored `login_url`. JWT `exp` on headers *and* cookies marks a session dead; reviewer
+  and hunt refresh it. Header names are case-preserved (some APIs are case-sensitive).
+- **Reviewer 60s heal** — revive false-dead logins, coerce leftover class items to deep, wake
+  hunts onto current code, publish `_review/live.json` to the panel.
+- **`brain.py`** — per-program hunt memory so the next agent does not repeat the same empty test.
+
+### Changed
+- `hunt-dispatch` loads matching skills from disk (cap 8), not a hardcoded army.
+- Yield rank uses this journal only (no global class-weight table).
+
 ## [0.9.1] - 2026-10-06
 ### Added — RTFS / Informative protection (generic, every program)
 - **`verify.py` now runs the `disposition.py` RTFS/Informative gate** plus a generic

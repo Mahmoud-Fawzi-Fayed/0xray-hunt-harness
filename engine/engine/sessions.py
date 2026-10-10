@@ -253,29 +253,175 @@ def created_ids(base=DEFAULT_BASE):
         return set()
 
 
-def clear_harness(base=DEFAULT_BASE, stale_min=30, confirm=False):
-    """Remove ONLY harness-created sessions (per the created-id registry) that are BOTH (a) not in any
-    target's active pool and (b) stale — no on-disk session dir modified within the last `stale_min`
-    minutes. Spans both stores via drop_ids (which re-checks the pool as a second guard).
+def _engine_cwds():
+    """Working directories cursor-agent is launched from by the panel/harness. Operator chats use
+    other directories and are never matched by this list."""
+    raw = os.environ.get(
+        "HUNT_ENGINE_CWDS",
+        "/root/Claude-BugHunter,/root/Claude-BugHunter/engine,/root/.claude/skills")
+    return {os.path.realpath(p.strip()) for p in raw.split(",") if p.strip()}
 
-    The operator's own sessions are never in the registry, so this can never delete them — even when
-    they live in the harness workspace. Dry-run unless confirm=True."""
+
+def _chat_meta(path):
+    try:
+        with open(os.path.join(path, "meta.json")) as fh:
+            m = json.load(fh)
+        return m if isinstance(m, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _conversation_ts(sid):
+    """Last conversation update (meta.updatedAtMs). Directory mtime is ignored: opening the store
+    rewrites it and would make a finished session look active."""
+    stamps, mtimes = [], []
+    for d in session_dirs(sid):
+        ms = _chat_meta(d).get("updatedAtMs")
+        if ms:
+            stamps.append(float(ms) / 1000.0)
+        try:
+            mtimes.append(os.path.getmtime(d))
+        except OSError:
+            pass
+    if stamps:
+        return max(stamps)                 # conversation time wins over a touched folder
+    return max(mtimes) if mtimes else None
+
+
+def engine_session_ids():
+    """Panel/harness sessions that never landed in the created-id registry: untitled chats whose
+    cwd is an engine launch directory, and subagents in a workspace that has no operator chat.
+    A titled chat is never returned. A workspace that holds an operator chat (a title, or a cwd
+    outside the engine list) keeps its subagents — those belong to that chat."""
+    cwds = _engine_cwds()
+    by_ws = {}
+    for d in _chat_session_dirs():
+        by_ws.setdefault(os.path.dirname(d), []).append(d)
+    ids = []
+    for dirs in by_ws.values():
+        metas = [(d, _chat_meta(d)) for d in dirs]
+        operator = False
+        for _, m in metas:
+            cwd = m.get("cwd") or ""
+            try:
+                engine = bool(cwd) and os.path.realpath(cwd) in cwds
+            except Exception:  # noqa: BLE001
+                engine = False
+            if m.get("title") or (cwd and not engine and not m.get("isSubagent")):
+                operator = True
+                break
+        for d, m in metas:
+            if m.get("title"):
+                continue
+            cwd = m.get("cwd") or ""
+            try:
+                engine = bool(cwd) and os.path.realpath(cwd) in cwds
+            except Exception:  # noqa: BLE001
+                engine = False
+            if engine or (m.get("isSubagent") and not operator):
+                ids.append(os.path.basename(d))
+    return ids
+
+
+# Spawned hunt/subagent prompts. These are what fill /resume. A chat the operator typed
+# ("what is the status", "start hunting on ...") does not match.
+_SPAWNED_HEAD = re.compile(
+    r"^(you are\b|authorized\b|expert bug bounty\b|reply with exactly\b|"
+    r"rules of engagement\b|pentest this one endpoint\b)",
+    re.I)
+
+
+def _opening_head(text):
+    m = re.search(r"<user_query>\s*(.{0,500})", text or "", re.S)
+    head = (m.group(1) if m else "").split("</user_query>")[0]
+    # jsonl stores newlines as the two characters "\n" inside the JSON string
+    return head.replace("\\n", "\n").replace("\\t", "\t").strip()
+
+
+def _is_spawned_prompt(text):
+    return bool(_SPAWNED_HEAD.match(_opening_head(text)))
+
+
+def _operator_chat_ids():
+    """Chats the operator opened in the IDE: titled, or a non-engine cwd that is not a subagent.
+    Spawned hunt prompts never qualify, so they can be removed from /resume."""
+    ids = set()
+    cwds = _engine_cwds()
+    for d in _chat_session_dirs():
+        m = _chat_meta(d)
+        if m.get("title"):
+            ids.add(os.path.basename(d))
+            continue
+        cwd = m.get("cwd") or ""
+        try:
+            engine = bool(cwd) and os.path.realpath(cwd) in cwds
+        except Exception:  # noqa: BLE001
+            engine = False
+        if cwd and not engine and not m.get("isSubagent"):
+            ids.add(os.path.basename(d))
+    return ids
+
+
+def sweep_spawned_sessions(base=DEFAULT_BASE, confirm=False):
+    """Remove resume transcripts whose opening prompt is a spawned hunt/subagent/CTF-solver
+    template. The operator's own chats (a title, or any non-engine cwd) are never selected,
+    and neither is a session a live agent is resuming or a running hunt still has pooled."""
+    protect = _operator_chat_ids() | live_resume_ids()
+    protect |= {i for ids in _pools(base).values() for i in (ids or [])}
+    found = []
+    for store in glob.glob(os.path.join(_projects_dir(), "*", "agent-transcripts")):
+        for d in glob.glob(os.path.join(store, "*")):
+            if not os.path.isdir(d):
+                continue
+            sid = os.path.basename(d)
+            if sid in protect:
+                continue
+            jl = os.path.join(d, sid + ".jsonl")
+            try:
+                with open(jl, encoding="utf-8", errors="replace") as fh:
+                    head = fh.read(20000)
+            except OSError:
+                continue
+            if _is_spawned_prompt(head):
+                found.append(sid)
+    found = list(dict.fromkeys(found))
+    removed = 0
+    if confirm and found:
+        removed = drop_ids(found, base=base).get("removed", 0)
+    return {"found": len(found), "removed": removed, "dry_run": not confirm}
+
+
+def live_resume_ids():
+    """Session ids a cursor-agent process is actually resuming right now. Anything else on disk
+    is not a running hunt, even if its folder was touched recently."""
+    try:
+        r = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, timeout=10)
+        return set(re.findall(r"--resume\s+([0-9A-Fa-f-]{36})", r.stdout or ""))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def clear_harness(base=DEFAULT_BASE, stale_min=30, confirm=False):
+    """Remove harness sessions that are BOTH (a) not in any target's active pool and (b) stale —
+    the conversation itself has not updated within `stale_min` minutes. Sources: the created-id
+    registry, plus untitled engine-cwd chats and hunt subagents (engine_session_ids).
+
+    The operator's titled chats, and subagents sitting in a workspace that has an operator chat,
+    are never selected. Dry-run unless confirm=True."""
     inv = inventory(base)
     reg = created_ids(base)
     pooled = inv["pooled_ids"]
+    live = live_resume_ids()
     cutoff = time.time() - max(0, stale_min) * 60
     victims = []
-    for sid in reg:
-        if sid in pooled:
-            continue                               # active hunt session — never touch
-        dirs = session_dirs(sid)
-        if not dirs:
-            continue                               # already gone (stale registry entry)
-        try:
-            if max(os.path.getmtime(d) for d in dirs) >= cutoff:
-                continue                           # recently active — keep (avoids racing a fresh one)
-        except OSError:
-            continue
+    for sid in set(reg) | set(engine_session_ids()):
+        if sid in pooled or sid in live:
+            continue                               # reused by a target, or a process is resuming it now
+        if not session_dirs(sid):
+            continue                               # already gone
+        ts = _conversation_ts(sid)
+        if ts is None or ts >= cutoff:
+            continue                               # no conversation stamp, or still active
         victims.append(sid)
     out = {"registry": len(reg), "candidates": len(victims), "removed": 0, "skipped_pooled": 0,
            "dry_run": not confirm}
@@ -283,6 +429,10 @@ def clear_harness(base=DEFAULT_BASE, stale_min=30, confirm=False):
         r = drop_ids(victims, base=base)           # removes both stores; skips any pooled id
         out["removed"] = r["removed"]
         out["skipped_pooled"] = r["skipped_pooled"]
+    spawned = sweep_spawned_sessions(base=base, confirm=confirm)
+    out["spawned"] = spawned["found"]
+    if confirm:
+        out["removed"] += spawned["removed"]
     return out
 
 
@@ -429,8 +579,39 @@ def _selftest():
         assert not session_dirs("hx"), "harness orphan must be removed"
         assert is_alive("ux"), "operator session (not in registry) must survive"
         assert is_alive("s1"), "pooled harness session must survive"
+        # engine-cwd chats + hunt subagents go; titled chats and operator workspaces stay
+        eng = "/opt/hunt-engine"
+        os.environ["HUNT_ENGINE_CWDS"] = eng
+        old_ms = int((time.time() - 9999) * 1000)
+
+        def _meta(path, **kw):
+            os.makedirs(path, exist_ok=True)
+            json.dump({"updatedAtMs": old_ms, **kw}, open(os.path.join(path, "meta.json"), "w"))
+
+        _meta(os.path.join(chats, "engws", "eng1"), cwd=eng)
+        _meta(os.path.join(chats, "engws", "titled"), cwd=eng, title="Keep me")
+        _meta(os.path.join(chats, "subws", "sub1"), isSubagent=True)
+        _meta(os.path.join(chats, "userws", "mine"), cwd="/home/operator", title="My chat")
+        _meta(os.path.join(chats, "userws", "usersub"), isSubagent=True)
+        rh2 = clear_harness(base, stale_min=30, confirm=True)
+        assert rh2["removed"] >= 2, rh2
+        assert not session_dirs("eng1"), "finished engine chat must be removed"
+        assert not session_dirs("sub1"), "hunt subagent in an engine-only workspace must be removed"
+        assert is_alive("titled"), "titled chat must survive even on an engine cwd"
+        assert is_alive("mine") and is_alive("usersub"), "operator workspace and its subagents must survive"
+        # /resume clutter: spawned prompts go, a chat the operator typed stays
+        spawned = os.path.join(projects, "root", "agent-transcripts", "spawn1")
+        human = os.path.join(projects, "root", "agent-transcripts", "human1")
+        os.makedirs(spawned); os.makedirs(human)
+        open(os.path.join(spawned, "spawn1.jsonl"), "w").write(
+            '{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\\nYou are a vuln-hunter subagent in an authorized bug-bounty hunt.\\n</user_query>"}]}}')
+        open(os.path.join(human, "human1.jsonl"), "w").write(
+            '{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\\nwhat is the current hunting state?\\n</user_query>"}]}}')
+        sw = sweep_spawned_sessions(base, confirm=True)
+        assert sw["found"] == 1 and not os.path.isdir(spawned), sw
+        assert os.path.isdir(human), "operator-typed resume session must survive"
     finally:
-        for e in ("HUNT_CHATS_DIR", "HUNT_PROJECTS_DIR", "HUNT_SESSION_STORES"):
+        for e in ("HUNT_CHATS_DIR", "HUNT_PROJECTS_DIR", "HUNT_SESSION_STORES", "HUNT_ENGINE_CWDS"):
             os.environ.pop(e, None)
     print("sessions.py self-test: PASS")
     return 0

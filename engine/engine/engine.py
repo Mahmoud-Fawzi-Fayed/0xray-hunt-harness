@@ -28,11 +28,6 @@ from scope import Scope            # noqa: E402
 from state import Engagement       # noqa: E402
 import agent as A                  # noqa: E402
 
-# deterministic priority by class (impact-ish); used by rank
-CLASS_WEIGHT = {"deep": 95, "rce": 100, "sqli": 90, "ssrf": 85, "auth-bypass": 85, "idor": 80,
-                "deserialization": 88, "xxe": 75, "ssti": 88, "lfi": 78, "llm-ai": 70,
-                "graphql": 65, "open-redirect": 40, "xss": 55, "cors": 45, "csrf": 50,
-                "info-leak": 30}
 # OSINT (subdomain/asset enum) is a SEPARATE concern (Claude-OSINT) — not in the engine flow.
 
 
@@ -58,10 +53,7 @@ def _deepen(items):
 
 
 # ---- endpoint quality (signal-based, target-agnostic) ----------------------------------------
-# In deep mode EVERY item is class "deep", so CLASS_WEIGHT can no longer tell a real API endpoint
-# from a brochure page. This scores each endpoint by bug-likelihood from its URL/metadata ALONE (no
-# hardcoded hostnames), so the deep agents spend their budget on real attack surface (APIs, authed,
-# params, object-ids, state-change) first and reach static marketing/asset pages only after.
+# Rank by URL shape (API vs brochure), never by a vuln-class menu and never by hostname.
 _Q_API_PATH = re.compile(r"/(api|graphql|gql|rest|v[0-9]+|internal|admin|oauth|auth|authorize|token|"
                          r"session|logout|sso|account|users?|me|profile|orders?|payments?|invoices?|"
                          r"transactions?|wallet|cards?|transfers?|balance|upload|files?|export|import|"
@@ -75,9 +67,30 @@ _Q_MARKETING = re.compile(r"/(pricing|blog|about|contact|careers?|press|news(roo
                           r"cookies?|faq|features?|resources?|case-stud\w*|customers?|partners?|events?|"
                           r"webinars?|ebooks?|guides?|academy|community|company|jsi18n|sitemap\w*|robots|"
                           r"favicon|solutions?|testimonial\w*|reviews?)\b", re.I)
+# Pages the workflow review tells a hunt to skip. Narrower than _Q_MARKETING so /api/customers/123 stays huntable.
+_REVIEW_JUNK = re.compile(
+    r"/(blog|legal|careers?|customer-stories|events|pricing|whats-new|about|press|news(room)?|"
+    r"terms|privacy|cookies|faq|features|resources|solutions|webinars?|ebooks?|academy|community|"
+    r"company|docs|integrations|team|jobs|compare|compliance|switch|support|enterprise)"
+    r"(/|$|\?)|robots\.txt|security\.txt|/\.well-known/|/healthz?\b|manifest\.json|favicon|[?&]_rsc=",
+    re.I)
 _Q_OBJID = re.compile(r"/(\d{2,}|[0-9a-f]{8}-[0-9a-f]{4}|[0-9a-f]{16,})(/|\?|$)", re.I)
 _Q_DISCOVERED = {"graphql-op", "graphql", "graphql-recon", "browser", "browser-capture",
                  "agent-found", "authed", "deep-recon"}
+
+
+def _logged_out_result(analysis):
+    """The agent stopped at a login wall instead of using the session."""
+    t = (analysis or "").lower()
+    if not any(x in t for x in ("401", "unauthorized", "authentication required", "invalid credentials")):
+        return False
+    if not any(x in t for x in ("unauthenticated", "session-gated", "auth enforced", "without the session",
+                                "no session", "logged out", "login wall")):
+        return False
+    # A real look with the session names a 200 and the account it used.
+    if re.search(r"\b200\b", t) and any(x in t for x in ("with the session", "logged in", "as identity", " as a")):
+        return False
+    return True
 
 
 def _endpoint_quality(s):
@@ -106,10 +119,16 @@ def _endpoint_quality(s):
         q += 25
     if _Q_STATIC.search(path):
         q -= 70                                    # static asset: nothing to pentest
+    # /files/<uuid> is a capability URL the product already handed out, not an IDOR job.
+    if re.search(r"/files?/[0-9a-f-]{16,}(?:/|$)", path, re.I) and s.get("source") != "session-mine":
+        q -= 60
     if _Q_MARKETING.search(path):
         q -= 40                                    # brochure page
     if path in ("", "/"):
         q -= 15                                    # bare homepage shell
+    # Logout, health, and discovery docs are not where a paid bug lives.
+    if re.search(r"/(logout|health|ready|live|robots\.txt|security\.txt|\.well-known)(/|$)", path, re.I):
+        q -= 80
     return q
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
@@ -220,11 +239,25 @@ class Engine:
         return roe
 
     def _scope_audit(self, f):
-        """Deterministic safety net: which out-of-scope hosts did the agent's PoC touch?"""
+        """Deterministic safety net: which out-of-scope hosts did the agent's PoC touch?
+
+        Dummy RFC 2606 / RFC 6761 names (example.invalid, *.test, etc.) are callback placeholders
+        in OAuth DCR JSON, not hosts the PoC contacted. Flagging them was a false SCOPE warning
+        on Superhuman/Coda advertised MCP DCR.
+        """
         blob = " ".join([str(f.get("request", "")), str(f.get("evidence", "")),
                          " ".join(f.get("hosts_contacted") or [])])
         hosts = set(re.findall(r'https?://([A-Za-z0-9.\-]+)', blob)) | set(f.get("hosts_contacted") or [])
-        return sorted({h for h in hosts if h and not self.scope.in_scope_host(h)})
+        return sorted({h for h in hosts if h and not self.scope.in_scope_host(h)
+                       and not self._dummy_callback_host(h)})
+
+    @staticmethod
+    def _dummy_callback_host(host):
+        h = (host or "").lower().rstrip(".")
+        if h in ("example.com", "example.net", "example.org", "example.invalid"):
+            return True
+        # RFC 2606 / 6761 reserved: .invalid .test .example .localhost
+        return bool(re.search(r"(^|\.)(invalid|test|example|localhost)$", h))
 
     # ---------------- osint (deterministic scope expansion) ----------------
     def osint(self):
@@ -289,6 +322,20 @@ class Engine:
 
     def recon(self):
         self.eng.set_phase("recon")
+        self._honor_heals()
+        # Collapse /files/<uuid> duplicates before the "is the worklist empty?" decision,
+        # so a pile of object ids is not treated as a reason to crawl again.
+        if not self.mock:
+            collapsed = self.eng.collapse_patterns()
+            if collapsed:
+                self.eng.log(f"recon: {collapsed} duplicate object-id URL(s) collapsed to one pattern each")
+            d = self._review_directive()
+            age = time.time() - float(d.get("ts_epoch") or 0)
+            if d.get("skip_crawl") and age < 6 * 3600 and self._authn_ready():
+                self.eng.log("recon: 2h review — skip crawl, mine the session if the worklist is empty")
+                if not self.eng.worklist():
+                    self._mine_session()
+                return
         if self.mock:
             items = []
             for seed in self.scope.seeds:
@@ -305,6 +352,10 @@ class Engine:
         ttl = int(os.environ.get("HUNT_RECON_TTL", "10800"))         # 3h default
         last = self.eng.state.get("recon_ts") or 0
         queued = len(self.eng.worklist())
+        # Anything still untested is hunted now. A fresh crawl happens only when the queue is empty.
+        if queued > 0:
+            self.eng.log(f"recon: {queued} item(s) still untested — skipping the crawl, straight to HUNT")
+            return
         if last and (time.time() - last) < ttl and queued >= self.max_hunts:
             self.eng.log(f"recon: cached ({int((time.time()-last)/60)}m old) + {queued} item(s) queued "
                          f">= {self.max_hunts} — SKIPPING heavy recon, straight to HUNT (cores -> vuln-finding)")
@@ -320,6 +371,32 @@ class Engine:
         if queued >= self.max_hunts and _capfresh:       # self-expires after the TTL so new surface is still caught
             self.eng.log(f"recon: CAPPED by reviewer + {queued} item(s) queued — straight to HUNT "
                          "(stop crawling the long tail, hunt the ranked slice)")
+            return
+        # Covered worklist: do not spend the round on gau/katana. With a session, pull new object
+        # ids out of that session and test those. Without one, wait out the recon TTL.
+        if queued == 0 and self._authn_ready():
+            try:
+                import authsession as _AS
+                _sess = _AS.load(self.scope.name, self.base)
+                if not (_AS.valid(_sess) and not _AS.site_rejects(_sess, program=self.scope.name, base=self.base)):
+                    self.eng.log("recon: no live session — not mining object ids")
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            self.eng.log("recon: worklist covered and a session exists — mining logged-in object ids "
+                         "instead of another crawl")
+            self._profile()
+            added = self._mine_session()
+            if not added:
+                added = self._hypothesize()
+            self.eng.state["recon_ts"] = time.time()
+            self.eng.save()
+            if not added:
+                self.eng.log("recon: session mine found no new object urls — not starting another crawl")
+            return
+        elif queued == 0 and last and (time.time() - last) < ttl:
+            self.eng.log("recon: worklist covered, no session, last crawl still fresh — not recrawling. "
+                         "A logged-in session is required before another round pays.")
             return
         if self.expand:
             self._expand_scope()
@@ -406,6 +483,337 @@ class Engine:
         self.eng.state["recon_ts"] = time.time()   # mark heavy recon done -> next rounds hunt the cache
         self.eng.save()
 
+    def _harvest_urls(self, urls):
+        """Turn authenticated response bodies into concrete object URLs. No agent."""
+        import authz
+        import netget
+        found = []
+        for u in urls:
+            try:
+                status, body, hdrs = netget.get(u, method="GET", ident="A", slug=self.scope.name)
+            except Exception:  # noqa: BLE001
+                continue
+            if not (200 <= (status or 0) < 300) or not body:
+                continue
+            # A marketing HTML page is not an object list. Ids have to come from JSON.
+            ctype = (hdrs.get("content-type") or "") if isinstance(hdrs, dict) else ""
+            is_json = body.lstrip()[:1] in "{[" or "json" in ctype.lower()
+            if not is_json:
+                # From an HTML page, keep only API links the session was shown. Not every href.
+                for m in re.findall(r"https://[^\s\"'<>\\]{8,180}", body):
+                    m = m.rstrip(").,]}>")
+                    if "{" in m or "}" in m:
+                        continue
+                    if re.search(r"/api/|/gw/|/v[0-9]+/", m) and self.scope.in_scope_host(m):
+                        found.append(m)
+                continue
+            for ou in authz._object_urls(u, authz._extract_ids(body)):
+                if "{" not in ou and self.scope.in_scope_host(ou):
+                    found.append(ou)
+            for m in re.findall(r"https://[^\s\"'<>\\]{8,180}", body):
+                m = m.rstrip(").,]}>")
+                if "{" in m or "}" in m:
+                    continue
+                if self.scope.in_scope_host(m) and _endpoint_quality({"url": m}) > 0:
+                    found.append(m)
+        items, seen = [], set()
+        for u in found:
+            if u in seen:
+                continue
+            seen.add(u)
+            items.append({"url": u, "vuln_class": "deep", "source": "session-mine", "priority": 90})
+            if len(items) >= 15:
+                break
+        return items
+
+    def _mine_session(self):
+        """Pull object ids out of the logged-in session. Deterministic fetches first; an agent only
+        if those fetches saw nothing, and at most once per recon TTL."""
+        seeds = []
+        for s in self.eng.state.get("surface") or []:
+            u = s.get("url") or ""
+            if not u or not self.scope.in_scope_host(u):
+                continue
+            if _endpoint_quality(s) < 20:
+                continue
+            if re.search(r"/files?/[0-9a-f-]{16,}", u, re.I):
+                continue
+            seeds.append(u)
+        seeds.sort(key=lambda u: (0 if re.search(r"/api/|/gw/|/v[0-9]+/|https://api[.-]", u) else 1,
+                                  -_endpoint_quality({"url": u})))
+        seeds = seeds[:8]
+        items = self._harvest_urls(seeds) if seeds else []
+        who = "A"
+        err = ""
+        if not items:
+            import agent as A
+            ttl = int(os.environ.get("HUNT_RECON_TTL", "10800"))
+            last_agent = self.eng.state.get("mine_agent_ts") or 0
+            # A mine that added nothing should try again in 30 minutes, not sit out the
+            # full recon TTL while the worklist stays empty.
+            if self.eng.state.get("mine_agent_added") == 0:
+                ttl = min(ttl, 1800)
+            if last_agent and (time.time() - last_agent) < ttl:
+                self.eng.log("session-mine: deterministic harvest empty; agent mine still inside its TTL")
+                return 0
+            try:
+                import authn
+                idents = authn.identities(self.scope.name, self.base)
+            except Exception:  # noqa: BLE001
+                idents = ["A"]
+            who = ", ".join(idents) or "A"
+            b = " and `--as B`" if "B" in idents else ""
+            task = (
+                f"You are mining a logged-in session for NEW object URLs on program {self.scope.name}. "
+                "Do not crawl the public site and do not run gau or katana.\n"
+                f"Identities: {who}. Fetch with `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A`{b}.\n"
+                "Open the APIs this session can actually see (profile, bookings, orders, trips, payments, "
+                "seats, documents). Collect concrete object URLs the responses returned, with the real id.\n"
+                "Return ONLY a fenced json object: {\"discovered\": [\"https://host/path/with-real-id\", ...]}.\n"
+                "Every URL must be one you saw in an authenticated response. Do not invent URLs. "
+                "At most 15 URLs, in-scope hosts only."
+            )
+            r = A.run_agent(task, context=self.scope.name, max_turns=30,
+                            timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")))
+            self.eng.state["mine_agent_ts"] = time.time()
+            self.eng.save()
+            err = r.get("error") or ""
+            f = A.extract_json(r.get("result") or "") or {}
+            for u in (f.get("discovered") or [])[:15]:
+                if isinstance(u, str) and self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
+                    items.append({"url": u, "vuln_class": "deep", "source": "session-mine", "priority": 90})
+        # Images and video are not a successful mine. Counting them kept the
+        # worklist empty and blocked the next mine for the full recon TTL.
+        items = [it for it in items if not _Q_STATIC.search(it.get("url") or "")]
+        added = self.eng.add_surface(_deepen(items)) if items else 0
+        self.eng.state["mine_agent_added"] = added
+        self.eng.save()
+        self.eng.log(f"session-mine: {added} new object url(s) from identity {who}"
+                     + (f" ERR={err}" if err else ""))
+        return added
+
+    def _remember(self, it, analysis, classes, result="nothing", finding=None):
+        """Write this look into the live hunt graph so the next agent does not repeat it."""
+        try:
+            import brain as BR
+        except Exception:  # noqa: BLE001
+            return
+        f = finding if isinstance(finding, dict) else {}
+        hyps = f.get("hypotheses") or []
+        signals = f.get("signals_missed") or []
+        BR.record_edge(self.scope.name, it.get("url") or "", analysis=analysis,
+                       classes=classes, signals=signals, result=result,
+                       hypotheses=hyps, base=self.base)
+        if signals:
+            BR.mark_reactive(self.scope.name, signals, self.base)
+        if result != "auth_wall":
+            try:
+                import authsession as _AS
+                _AS.note_live(self.scope.name, it.get("url") or "", self.base)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _profile(self):
+        """One look at what the product is, before another mine. Stolen from BugHunter AI's
+        AppReviewAgent — without their XSSAgent/SQLiAgent dispatch table."""
+        if self.mock:
+            return
+        try:
+            import brain as BR
+        except Exception:  # noqa: BLE001
+            return
+        prev = (BR.load(self.scope.name, self.base).get("profile") or {})
+        if prev.get("narrative") and (time.time() - float(prev.get("ts") or 0)) < 6 * 3600:
+            return
+        import agent as A
+        seeds = [s for s in (self.scope.seeds or []) if self.scope.in_scope_host(s)][:4]
+        host = ""
+        try:
+            import authsession as _AS
+            sess = _AS.load(self.scope.name, self.base)
+            host = str((sess or {}).get("host") or "")
+        except Exception:  # noqa: BLE001
+            host = ""
+        task = (
+            f"You are profiling program {self.scope.name} so the next hunt attacks the product, "
+            "not a vulnerability catalog. Do not name SQLi/XSS/IDOR unless you saw that sink.\n"
+            f"Session host: {host or '?'}. Seeds: {', '.join(seeds) or '(none)'}.\n"
+            f"Fetch with `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A` "
+            "and read what the logged-in app actually is.\n"
+            "Return ONLY a fenced json object: "
+            '{"narrative":"<one sentence: this product lets who do what>",'
+            '"roles":["..."],"crown_jewels":["the data/actions that pay if stolen"],'
+            '"flows":[{"what":"<user flow>","url":"https://in-scope/...","why":"<why this flow is dangerous>"}],'
+            '"deprioritized":["marketing/static things to skip"]}. '
+            "URLs must be in-scope and real. No class-agent names."
+        )
+        r = A.run_agent(task, context=self.scope.name, max_turns=20,
+                        timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")))
+        f = A.extract_json(r.get("result") or "") or {}
+        if not isinstance(f, dict) or not (f.get("narrative") or f.get("flows")):
+            self.eng.log("profile: no narrative from the session — continuing without one"
+                         + (f" ERR={r.get('error')}" if r.get("error") else ""))
+            return
+        BR.set_profile(self.scope.name, f, self.base)
+        n = len(f.get("flows") or [])
+        self.eng.log(f"profile: {n} flow(s) — {(f.get('narrative') or '')[:140]}")
+        items = []
+        for fl in (f.get("flows") or [])[:8]:
+            if not isinstance(fl, dict):
+                continue
+            u = fl.get("url") or fl.get("endpoint") or ""
+            if isinstance(u, str) and self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
+                items.append({"url": u, "vuln_class": "deep", "source": "profile", "priority": 110})
+        if items:
+            added = self.eng.add_surface(_deepen(items))
+            self.eng.log(f"profile: queued {added} flow url(s)")
+
+    def _hypothesize(self):
+        """When the worklist and the mine are empty, invent the next tests from the live session.
+
+        Same idea as Reaper's later-round hypotheses / bountyhunter's loop mode: do not recrawl
+        marketing pages and do not replay a class catalog. Ask one agent to name new in-scope
+        URLs the session can actually see.
+        """
+        if self.mock:
+            return 0
+        ttl = min(int(os.environ.get("HUNT_RECON_TTL", "10800")), 1800)
+        last = float(self.eng.state.get("hypo_ts") or 0)
+        if last and (time.time() - last) < ttl:
+            self.eng.log("hypothesize: still inside its TTL")
+            return 0
+        try:
+            import brain as BR
+            import agent as A
+        except Exception:  # noqa: BLE001
+            return 0
+        notes = self.eng.state.get("hunt_notes") or {}
+        prior = []
+        if isinstance(notes, dict):
+            for k, n in list(notes.items())[-12:]:
+                url = k.split("|")[0]
+                a = (n or {}).get("analysis") if isinstance(n, dict) else ""
+                if url and a:
+                    prior.append(f"- {url}: {str(a)[:160]}")
+        memory = BR.prompt_block(self.scope.name, "", self.base)
+        open_u = BR.open_urls(self.scope.name, self.base)
+        items = []
+        for u in open_u:
+            if self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
+                items.append({"url": u, "vuln_class": "deep", "source": "hypothesis", "priority": 100})
+        who = "A"
+        err = ""
+        if not items:
+            try:
+                import authn
+                idents = authn.identities(self.scope.name, self.base)
+            except Exception:  # noqa: BLE001
+                idents = ["A"]
+            who = ", ".join(idents) or "A"
+            b = " and `--as B`" if "B" in idents else ""
+            task = (
+                f"You are inventing the NEXT tests for program {self.scope.name}. "
+                "The worklist is empty. Do not recrawl the public site. Do not pick from a vuln class list.\n"
+                f"Identities: {who}. Fetch with `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A`{b}.\n"
+                "Open what this session can actually see (whatever the product calls it — profile, docs, "
+                "files, orgs, bookings, payments, admin). From the JSON/HTML, name concrete in-scope URLs "
+                "with real ids, plus one sentence each of what to try that was NOT already tried below.\n"
+                + (memory or "")
+                + ("Already looked:\n" + "\n".join(prior[:10]) + "\n" if prior else "")
+                + "Return ONLY a fenced json object: "
+                '{"discovered":["https://host/path/with-real-id"],'
+                '"hypotheses":["<one-sentence tests>"]}. '
+                "At most 10 URLs, in-scope hosts only, no static images or marketing pages."
+            )
+            r = A.run_agent(task, context=self.scope.name, max_turns=25,
+                            timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")))
+            self.eng.state["hypo_ts"] = time.time()
+            self.eng.save()
+            err = r.get("error") or ""
+            f = A.extract_json(r.get("result") or "") or {}
+            for u in (f.get("discovered") or [])[:10]:
+                if isinstance(u, str) and self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
+                    items.append({"url": u, "vuln_class": "deep", "source": "hypothesis", "priority": 100})
+            brain = BR.load(self.scope.name, self.base)
+            for h in f.get("hypotheses") or []:
+                BR.add_hypothesis(brain, h, url=(items[0]["url"] if items else ""),
+                                  source="hypothesize")
+            BR.save(self.scope.name, brain, self.base)
+        added = self.eng.add_surface(_deepen(items)) if items else 0
+        self.eng.log(f"hypothesize: {added} new url(s) from identity {who}"
+                     + (f" ERR={err}" if err else ""))
+        return added
+
+    def _unmark_tested(self, item):
+        """Drop a just-written tested mark so a refused nothing is retried, not closed."""
+        t = self.eng.state.get("tested")
+        if isinstance(t, dict) and item:
+            t.pop(f"{item.get('url')}|{item.get('param','')}|{item.get('vuln_class','')}", None)
+            self.eng.save()
+
+    def _needs_authz_gate(self, url):
+        """True when a deep nothing on this URL would be a guess: A and B are live and the URL
+        is an in-scope endpoint worth an object-level diff. Health/logout checks are not."""
+        if self.mock or not url or not str(url).startswith("http"):
+            return False
+        if not self.scope.in_scope_host(url):
+            return False
+        if re.search(r"/(logout|health|ready|live|robots\.txt|\.well-known)(/|$)", url, re.I):
+            return False
+        try:
+            import authn
+            ids = authn.identities(self.scope.name, self.base)
+        except Exception:  # noqa: BLE001
+            return False
+        return "A" in ids and "B" in ids
+
+    def _authz_closeout(self, url):
+        """Read-only authz.py diff plus netget as B. Logs `authz:` only from that run.
+        Returns the log line, or '' if the commands were not run (caller must refuse nothing)."""
+        try:
+            import authn
+            import authz
+            import netget
+            slug = authn._slug(self.scope.name)
+            d = authz.diff_one("GET", url, None, self.scope.name)
+            sb, _tb, _h = netget.get(url, method="GET", ident="B", slug=slug)
+        except Exception:  # noqa: BLE001
+            return ""
+        line = (f"authz: diff A={d.get('A_status')} B={d.get('B_status')} "
+                f"sim={d.get('similarity')} bola={bool(d.get('bola_suspect'))} "
+                f"netget_B={sb} {str(url)[:120]}")
+        self.eng.log(line)
+        return line
+
+    def _authz_lead(self, url):
+        """Two live accounts: the first action on an object or API URL is A's id read as B.
+        A similarity hit is a lead, not a finding, until B's body contains A's marker."""
+        try:
+            import authn
+            ids = authn.identities(self.scope.name, self.base)
+        except Exception:  # noqa: BLE001
+            return ""
+        if "A" not in ids or "B" not in ids:
+            return ""
+        if _endpoint_quality({"url": url}) < 25:
+            return ""
+        if re.search(r"/(logout|health|ready|live|robots\.txt|\.well-known)(/|$)", url or "", re.I):
+            return ""
+        try:
+            import authz
+            suspects = authz.id_oracle(url, self.scope.name) or []
+        except Exception:  # noqa: BLE001
+            suspects = []
+        if not suspects:
+            return ("\nAUTHZ PRE-CHECK: accounts A and B are both live. Before any other class, "
+                    "GET this URL as A, take one object id from the JSON, and GET that object as B. "
+                    "vulnerable:true only if B's body contains a marker that belongs to A.\n")
+        s = suspects[0]
+        return (f"\nAUTHZ PRE-CHECK already compared A and B. B requested {s.get('url')} and got "
+                f"HTTP {s.get('B_status')} ({float(s.get('similarity') or 0):.0%} similar to A). "
+                "That similarity is not a finding. Quote a string that is in A's object and also in "
+                "B's response, or return vulnerable:false.\n")
+
     def _authn_ready(self):
         """True iff an authn A/B session exists for this target (operator-provided or provisioned, mirrored
         by authsession.save()). Gates authenticated recon, headless browser capture, and the IDOR sweep."""
@@ -463,12 +871,24 @@ class Engine:
             ym = Y.Model.load(self.base)     # yield priors + learned (your confirms up, your dups down)
         except Exception:
             ym = None
+        session_host = ""
+        from urllib.parse import urlparse
+        try:
+            import authsession as _AS
+            sess = _AS.load(self.scope.name, self.base)
+            if _AS.valid(sess):
+                session_host = str((sess or {}).get("host") or "").split("/")[0].split(":")[0].lower()
+        except Exception:
+            session_host = ""
         for s in self.eng.state["surface"]:
-            base = CLASS_WEIGHT.get(s.get("vuln_class", ""), 20)
-            s["priority"] = base + (5 if s.get("param") else 0) + (55 if s.get("source") == "secret" else 0)
+            s["priority"] = 50 + (5 if s.get("param") else 0) + (55 if s.get("source") == "secret" else 0)
             s["priority"] += _endpoint_quality(s)    # float REAL attack surface above brochure/asset pages
+            # The logged-in host is the one the operator can actually test. Do not
+            # let a shared marketing apex outrank it.
+            if session_host and (urlparse(s.get("url") or "").hostname or "") == session_host:
+                s["priority"] += 120
             if ym:
-                s["priority"] += ym.bonus(s.get("vuln_class", ""))   # cover all classes, surface most-findable first
+                s["priority"] += ym.bonus(s.get("vuln_class", ""))
         self._dedup_downrank()   # known-issue surface sinks below novel surface (no-op w/o corpus)
         self.eng.save()
         wl = self.eng.worklist()
@@ -541,12 +961,12 @@ class Engine:
         self.eng.log(f"map: ARSENAL — tech-skills: {', '.join(tech_sk) or 'none'} | {len(groups)} target(s):")
         for (url, param), g in groups.items():
             label = param if param else "(endpoint)"
-            per = "  ".join(f"{c}→{','.join(SM.skills_for(c))}" for c in g["classes"])
+            per = "  ".join(f"{c}→{','.join(SM.skills_for(c, url=url))}" for c in g["classes"])
             self.eng.log(f"map:   {label:16.16s} {url[:42]:42.42s}  {per}")
             lines.append(f"## `{label}`  —  {', '.join(g['classes'])}")
             lines.append(f"- **URL:** `{url}`" + (f"  ·  source: {g['src']}" if g["src"] else ""))
             for c in g["classes"]:
-                lines.append(f"- **{c}** → {', '.join('`'+s+'`' for s in SM.skills_for(c))}  ·  "
+                lines.append(f"- **{c}** → {', '.join('`'+s+'`' for s in SM.skills_for(c, url=url))}  ·  "
                              f"`{SM.probe_for(c, url, param)}`")
             lines.append("")
         path = os.path.join(self.eng.dir, "arsenal.md")
@@ -576,23 +996,83 @@ class Engine:
     # ---------------- hunt ----------------
     def hunt(self):
         self.eng.set_phase("hunt")
+        self._honor_heals()
         # load an authenticated session (if HUNT_AUTH=1 + one was provisioned) to reach behind-login surface
         self._auth_session = None
+        self._auth_dead = False
+        self._auth_dead_host = ""
         if os.environ.get("HUNT_AUTH") == "1":
             _AS = _authmod()
             if _AS:
                 self._auth_session = _AS.load(self.scope.name, self.base)
-                if _AS.valid(self._auth_session):
+                if _AS.valid(self._auth_session) and _AS.site_rejects(
+                        self._auth_session, program=self.scope.name, base=self.base):
+                    rel = {}
+                    try:
+                        rel = _AS.relogin(self.scope.name, ident="A", base=self.base)
+                    except Exception:  # noqa: BLE001
+                        rel = {}
+                    if rel.get("ok"):
+                        self._auth_session = _AS.load(self.scope.name, self.base)
+                        self._auth_dead = False
+                        self.eng.log(f"hunt: auto-relogin — AUTHENTICATED on {self._auth_session.get('host')} "
+                                     f"(user {self._auth_session.get('user')})")
+                        try:
+                            _AS.relogin(self.scope.name, ident="B", base=self.base)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    else:
+                        self.eng.log("hunt: session file was rejected by the site (logged out) — "
+                                     "not using it, and not marking auth-walled URLs tested")
+                        self._auth_dead = True
+                        self._auth_dead_host = str((self._auth_session or {}).get("host") or "")
+                        self._auth_session = None
+                elif _AS.valid(self._auth_session):
+                    self._auth_dead = False
                     self.eng.log(f"hunt: AUTHENTICATED — using test session on {self._auth_session.get('host')} "
                                  f"(user {self._auth_session.get('user')})")
                 else:
-                    self.eng.log("hunt: HUNT_AUTH=1 but no valid session yet — hunting unauthenticated this round")
+                    rel = {}
+                    try:
+                        rel = _AS.relogin(self.scope.name, ident="A", base=self.base)
+                    except Exception:  # noqa: BLE001
+                        rel = {}
+                    if rel.get("ok"):
+                        self._auth_session = _AS.load(self.scope.name, self.base)
+                        self._auth_dead = False
+                        self.eng.log(f"hunt: auto-relogin — AUTHENTICATED on {self._auth_session.get('host')} "
+                                     f"(user {self._auth_session.get('user')})")
+                        try:
+                            _AS.relogin(self.scope.name, ident="B", base=self.base)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    else:
+                        self._auth_dead_host = str((self._auth_session or {}).get("host") or "")
+                        self._auth_dead = bool(self._auth_dead_host)
+                        self._auth_session = None
+                        self.eng.log("hunt: HUNT_AUTH=1 but no valid session yet — hunting unauthenticated this round"
+                                     + (f"; holding {self._auth_dead_host} until a live paste" if self._auth_dead_host else ""))
+        collapsed = self.eng.collapse_patterns()
+        if collapsed:
+            self.eng.log(f"hunt: {collapsed} duplicate object-id URL(s) collapsed to one pattern each")
+        self._honor_review_skips()
         wl = self.eng.worklist()[: self.max_hunts]
         todo = []
         for it in wl:
-            if not self.scope.in_scope_host(it["url"]):     # belt-and-suspenders scope gate
+            if "{" in (it.get("url") or ""):
+                self.eng.log(f"hunt: skipping template url {it['url']}")
+                self.eng.mark_tested(it)
+            elif not self.scope.in_scope_host(it["url"]):     # belt-and-suspenders scope gate
                 self.eng.log(f"hunt: REFUSING out-of-scope {it['url']} ({self.scope.reject_reason(it['url'])})")
                 self.eng.mark_tested(it)
+            elif self._auth_dead:
+                from urllib.parse import urlparse as _up
+                dead = (self._auth_dead_host or "").split("/")[0].split(":")[0].lower()
+                host = (_up(it.get("url") or "").hostname or "").lower()
+                if dead and host == dead:
+                    self.eng.log(f"hunt: holding {it['url']} until a live session is pasted")
+                    continue
+                todo.append(it)
             else:
                 todo.append(it)
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
@@ -631,14 +1111,48 @@ class Engine:
                         "id_source": f.get("id_source", ""),
                         "disposition": f.get("disposition") or {},
                         "scope_warning": oos or None}
-                self.eng.add_candidate(cand)
-                self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
-                              f"host(s): {', '.join(oos)} (flagged)") if oos
-                             else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
+                import disposition as _D
+                if _D.own_session_oauth(cand):
+                    self.eng.mark_rejected(cand, "own-session oauth")
+                    self.eng.log(f"hunt: dropped own-session oauth @ {it['url']} — "
+                                 "the token belongs to the account that registered the client")
+                else:
+                    self.eng.add_candidate(cand)
+                    self._remember(it, cand.get("evidence") or "", [cand.get("vuln_class")],
+                                   result="candidate", finding=f)
+                    self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
+                                  f"host(s): {', '.join(oos)} (flagged)") if oos
+                                 else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
             elif f and f.get("skipped"):
                 self.eng.log(f"hunt: skipped {it.get('vuln_class')}@{it['url']} — {f['skipped']}")
             else:
-                self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}")
+                analysis = ""
+                classes = []
+                if isinstance(f, dict):
+                    analysis = f.get("analysis") or ""
+                    classes = f.get("classes_considered") or []
+                if _logged_out_result(analysis):
+                    self._unmark_tested(it)
+                    self.eng.note_hunt(it, analysis, classes)
+                    self._remember(it, analysis, classes, result="auth_wall", finding=f)
+                    self.eng.log(f"hunt: auth wall on {it.get('vuln_class')}@{it['url']} — left untested "
+                                 "so a live session can retry")
+                    continue
+                # Deep + two live accounts: hunt:nothing is refused until authz.py diff and
+                # netget --as B have actually run. The log line is the proof authz_logged reads.
+                if ((it.get("vuln_class") or "").lower() == "deep"
+                        and self._needs_authz_gate(it.get("url"))):
+                    line = self._authz_closeout(it.get("url"))
+                    if not line:
+                        self._unmark_tested(it)
+                        self.eng.log(f"hunt: refused nothing on {it.get('vuln_class')}@{it['url']} "
+                                     "— authz.py diff and netget --as B were not run")
+                        continue
+                    analysis = (str(analysis) + "\n" + line).strip()
+                self.eng.note_hunt(it, analysis, classes)
+                self._remember(it, analysis, classes, result="nothing", finding=f)
+                tail = f" — {str(analysis)[:160]}" if analysis else ""
+                self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}{tail}")
 
     def _hunt_deep(self, it, model=None, timeout=None):
         """ANALYSIS-DRIVEN per-endpoint pentest: the agent reads the endpoint's source/JS, reasons about what
@@ -648,34 +1162,75 @@ class Engine:
         import skill_map as SM
         url = it["url"]
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
-        idx = "; ".join(f"{c}->{','.join(s)}" for c, s in SM.CLASS_SKILL.items())   # class -> which skill to read
         p, e = self.scope.name, ENGINE_DIR
+        lead = self._authz_lead(url)
+        # Do not log "authz:" here. A queued sentence is not a run; authz_logged stays false
+        # until _authz_closeout (or a real diff) writes the line.
+        try:
+            import brain as BR
+            memory = BR.prompt_block(p, url, self.base)
+        except Exception:  # noqa: BLE001
+            memory = ""
+        hinted = SM.matching(url, tech, extra=str(it.get("note") or ""))
+        hinted_paths = []
+        for n in hinted[:6]:
+            sp = os.path.join(SM.SKILLS_DIR, n, "SKILL.md")
+            if os.path.isfile(sp):
+                hinted_paths.append(sp)
+        hypo = os.path.join(SM.SKILLS_DIR, "hunt-hypothesis", "SKILL.md")
+        if os.path.isfile(hypo) and hypo not in hinted_paths:
+            hinted_paths.insert(0, hypo)
+        skill_hint = ("Read these ONLY if they match what the live response is: "
+                      + ", ".join(f"`{x}`" for x in hinted_paths[:6])
+                      + f". Any other hunt-* in {SM.SKILLS_DIR} may be Read. "
+                      "They are references, not a menu. Invent the test from the bytes on the wire.")
         task = (self._roe() + "\n"
-                f"PENTEST THIS ONE ENDPOINT like a senior researcher — THINK FIRST, do NOT blind-spray payloads.\n"
+                f"PENTEST THIS ONE ENDPOINT. Think from the live response. Do NOT walk a vulnerability catalog.\n"
+                + lead + memory +
                 f"URL: {url}   method: {it.get('method','GET')}   known param(s): {it.get('param','')}   "
                 f"tech: {', '.join(tech) or 'unknown'}\n\n"
-                "STEP 1 — ANALYSE (VIEW SOURCE FIRST): curl the endpoint and READ the response body, status, "
-                "headers, Set-Cookie and any error/stack text. Fetch and READ the linked JS bundles, inline "
-                "scripts and any .map. Work out the framework/stack, EVERY input (query, body, path, header, "
-                "cookie), what the endpoint actually DOES, and any hidden routes / params / tokens / secrets "
-                "revealed in the source.\n"
-                "STEP 2 — REASON: from what you ACTUALLY SEE, decide which vuln classes are plausible HERE and "
-                "why — e.g. search/filter -> sqli/nosqli/xss/ssti; object id -> idor/bola; redirect/url param -> "
-                "open-redirect/ssrf; file/path -> lfi/xxe; template/render -> ssti; auth/login/token -> "
-                "auth-bypass/jwt/oauth; upload -> file-upload/xxe; graphql -> introspection/bola; reflected input "
-                "-> xss. Do NOT test classes this endpoint cannot have.\n"
-                "STEP 3 — EXPLOIT only the plausible ones: `cat` the matching skill for its exact methodology + "
-                f"payloads, then try REAL, targeted exploitation with curl.  skills dir: {SM.SKILLS_DIR}\n  "
-                f"class->skill: {idx}\n"
-                f"  authed fetch: `python3 {e}/netget.py GET \"<url>\" --as A` (second account: --as B).  "
-                f"IDOR: list as A, request A's object as B, or `python3 {e}/authz.py diff --slug {p} "
-                "--url \"<A-object-url>\"`.  Chain primitives into higher severity.\n"
+                "If an AUTHENTICATED SESSION block is attached below, send its Cookie and headers on EVERY "
+                "request. A 401 from a request that omitted them is not a result. Do not return "
+                "vulnerable:false just because the logged-out call was rejected. Use the session, list the "
+                "objects it can see, then test those.\n"
+                "AUTHZ GATE (hard): when identities A and B are both live, do NOT return vulnerable:false "
+                "on this endpoint until you have actually executed both read-only commands (running them, "
+                "not describing them): "
+                f"`python3 {e}/authz.py diff --slug {p} --url \"<this URL or an A-owned object URL>\"` and "
+                f"`python3 {e}/netget.py GET \"<that same URL>\" --as B`. "
+                "analysis must contain a line that starts with `authz:` plus both HTTP statuses and whether "
+                "B's body contained a marker that belongs only to A. vulnerable:true only with that marker — "
+                "a similarity score is not a finding. The harness refuses hunt:nothing and leaves the "
+                "endpoint untested if those two commands did not run. No brute force, no id guessing past "
+                "ids account A already returned, in-scope GET only.\n"
+                "STEP 1 — SEE: fetch this URL (and linked JS / maps) as the session. Write what the product "
+                "is doing, every input, every object id, every other host or role the response implies.\n"
+                "STEP 2 — INVENT: from those bytes, name one trust boundary and one test that would be "
+                "false if the developer had been careful. Do not start from SQLi/XSS/IDOR because those "
+                "words exist in a list. If a previous look is in HUNT MEMORY, do something else.\n"
+                "STEP 3 — RUN that test with curl / netget. Then a second different test if the first is "
+                "negative. "
+                + skill_hint + "\n"
+                f"  authed fetch: `python3 {e}/netget.py GET \"<url>\" --as A`. Before any negative on an "
+                f"authed endpoint also run `python3 {e}/netget.py GET \"<A-object-url>\" --as B` and "
+                f"`python3 {e}/authz.py diff --slug {p} --url \"<A-object-url>\"`.  "
+                f"Unknown stack? `python3 {e}/learn.py auto --kind tech --name \"<thing>\" --context \"<why>\"` "
+                "then Read the drafted skill.\n"
                 "STEP 4 — PROVE: claim a vuln ONLY with demonstrated, exploitable impact (never reflection, an "
-                "error, or a permissive header) using in-scope, read-only actions.\n"
+                "error, or a permissive header) using in-scope, read-only actions. "
+                "IDOR/BOLA: vulnerable:true ONLY with an A-vs-B body-diff showing B received A's unique "
+                "marker on an attacker-enumerated or product-issued (in-scope list/oracle) id — not a "
+                "holder-only capability URL. Do NOT nominate as candidates: public CDN/UUID marketing/"
+                "static files (PNG/JPG/WebP/SVG, UUID v7 unguessable, DELETE 401) or unauthenticated "
+                "WordPress field-title leaks (/wp-json titles/schema without field values/secrets). "
+                "Disposition HOLD_RTFS/HOLD_INFORMATIVE still apply — do not weaken those gates.\n"
                 "End with a fenced ```json``` object: "
-                '{"vulnerable":true|false,"vuln_class":"<class you PROVED>","severity":"low|medium|high|critical",'
+                '{"vulnerable":true|false,"vuln_class":"<class you PROVED or invented>",'
+                '"severity":"low|medium|high|critical",'
                 '"analysis":"<what the source/responses told you this endpoint is + does>",'
-                '"classes_considered":["<plausible classes you reasoned about>"],'
+                '"classes_considered":["<what you actually tested, including invented names>"],'
+                '"hypotheses":["<next tests this target still deserves>"],'
+                '"signals_missed":["<things you saw and did not prove>"],'
                 '"evidence":"<what proves it>","request":"<the winning request>",'
                 '"hosts_contacted":["every host you hit"],"attacker_holds":"nothing|own_session|'
                 'link_issued_by_product|foreign_id_shown","id_source":"not_required|enumerated|product_link|'
@@ -683,6 +1238,7 @@ class Engine:
                 '"discovered":["<new in-scope endpoints/params/secrets you saw in the source>"],'
                 '"proof_note":"<empty, or why proof was limited>"}'
                 + self._capabilities_note())
+        task += self._prior_note(it)
         sess = getattr(self, "_auth_session", None)
         if sess:
             _AS = _authmod()
@@ -745,15 +1301,29 @@ class Engine:
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
         cls = (it.get("vuln_class") or "").lower()
+        if os.environ.get("HUNT_DEEP", "1") == "1" and cls not in ("deep",):
+            it = dict(it)
+            it["vuln_class"] = "deep"
+            cls = "deep"
         # DEAD-SURFACE PRE-PROBE: don't burn a ~2-min LLM hunt on an endpoint whose host is WAF/staging-walled.
-        # (paysafe's 2fa-staging.* was 8.8k endpoints that ALL return 403 — 96% of the budget wasted on a wall.)
+        # A staging host that 403s every path wastes the whole budget if we hunt each URL.
         # Probe once with the authed session; a 403 or 5xx means walled/dead -> skip + mark tested (won't requeue).
         if os.environ.get("HUNT_SKIP_WALLED", "1") == "1" and str(it.get("url", "")).startswith("http"):
             try:
                 import netget as _ng
+                from urllib.parse import urlparse as _up
                 _st, _, _ = _ng.get(it["url"], ident="A", slug=self.scope.name)
-                if _st == 403 or (_st and _st >= 500):
-                    return {"vulnerable": False, "skipped": f"host walled (HTTP {_st})"}
+                # A 500 on one route is an application result, not a dead host.
+                # Skip only when the host root is also 403, which is a WAF wall.
+                if _st == 403:
+                    _p = _up(it["url"])
+                    _root = f"{_p.scheme}://{_p.netloc}/"
+                    if _root.rstrip("/") != it["url"].split("?")[0].rstrip("/"):
+                        _rst, _, _ = _ng.get(_root, ident="A", slug=self.scope.name)
+                    else:
+                        _rst = _st
+                    if _rst == 403:
+                        return {"vulnerable": False, "skipped": f"host walled (HTTP {_st})"}
             except Exception:  # noqa: BLE001
                 pass
         if cls == "deep":                          # analysis-driven per-endpoint pentest (think, then exploit)
@@ -806,6 +1376,7 @@ class Engine:
                 f'API responses or links; helps the next round go deeper>"],'
                 f'"proof_note":"<empty, or why proof was limited by scope/read-only>"}}.'
                 + self._capabilities_note())
+        task += self._prior_note(it)
         sess = getattr(self, "_auth_session", None)             # inject the logged-in session if it fits this host
         if sess:
             _AS = _authmod()
@@ -889,13 +1460,17 @@ class Engine:
         chainable primitives exist -> free on targets that found nothing. In-scope, read-only, end-to-end."""
         if self.mock:
             return
-        CHAINABLE = {"open-redirect", "open_redirect", "ssrf", "idor", "xss", "oauth",
-                     "auth-bypass", "subdomain-takeover", "csrf", "host-header"}
         pool = (self.eng.state.get("confirmed") or []) + (self.eng.state.get("candidates") or [])
+        rejected = self.eng.rejected_keys()
         seen, prims = set(), []
         for c in pool:
             k = (c.get("vuln_class"), c.get("url"))
-            if c.get("vuln_class") in CHAINABLE and k not in seen:
+            fk = f"{c.get('url','')}|{c.get('vuln_class','')}"
+            if fk in rejected or f"{c.get('url','')}|" in rejected:
+                continue
+            if c.get("url") and not self.scope.in_scope_host(c["url"]):
+                continue
+            if c.get("url") and k not in seen:
                 seen.add(k)
                 prims.append(c)
         if not prims:
@@ -941,15 +1516,143 @@ class Engine:
             self.eng.log("chain: no end-to-end chain composed from current primitives")
 
     # ---------------- validate ----------------
+    def _honor_heals(self):
+        """Apply a workflow-review heal written to disk. State lives in this process, so the
+        reviewer cannot edit tested URLs or the mine timer directly."""
+        path = os.path.join(os.path.expanduser(self.base), "_review", "heals",
+                            self.scope.name + ".json")
+        try:
+            heal = json.load(open(path))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(heal, dict):
+            return
+        if heal.get("reset_mine"):
+            self.eng.state["mine_agent_ts"] = 0
+            self.eng.state.pop("mine_agent_added", None)
+            self.eng.state["hypo_ts"] = 0
+            self.eng.log("review: mine timer reset — empty worklist, live session, last mine added nothing")
+        if heal.get("coerce_deep") and os.environ.get("HUNT_DEEP", "1") == "1":
+            n_c = 0
+            for s in self.eng.state.get("surface") or []:
+                if not isinstance(s, dict) or s.get("source") == "secret":
+                    continue
+                cls = (s.get("vuln_class") or "").lower()
+                if cls and cls not in ("deep",):
+                    s["vuln_class"] = "deep"
+                    s.pop("vuln_classes", None)
+                    n_c += 1
+            if n_c:
+                self.eng.log(f"review: coerced {n_c} leftover class slot(s) to deep")
+        n = 0
+        if heal.get("reopen_auth_wall"):
+            tested = self.eng.state.get("tested") or {}
+            notes = self.eng.state.get("hunt_notes") or {}
+            if isinstance(tested, dict) and isinstance(notes, dict):
+                for key, note in list(notes.items()):
+                    analysis = (note or {}).get("analysis") if isinstance(note, dict) else ""
+                    if key in tested and _logged_out_result(analysis):
+                        tested.pop(key, None)
+                        notes.pop(key, None)
+                        n += 1
+                self.eng.state["tested"] = tested
+                self.eng.state["hunt_notes"] = notes
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self.eng.save()
+        if n:
+            self.eng.log(f"review: reopened {n} url(s) closed on a login wall")
+        if heal.get("hypothesize"):
+            added = self._hypothesize()
+            self.eng.log(f"review: hypothesis pass queued {added} url(s)")
+
+    def _honor_review_skips(self):
+        """The workflow review marks brochure pages as not worth a deep agent. Applied at hunt start
+        so a running process picks the decision up from disk."""
+        d = self._review_directive()
+        if not d.get("skip_junk"):
+            return 0
+        tested = self.eng.state.get("tested")
+        if not isinstance(tested, dict):
+            tested = {}
+        n = 0
+        for it in list(self.eng.state.get("surface") or []):
+            url = it.get("url") or ""
+            if not (_REVIEW_JUNK.search(url) or _Q_STATIC.search(url)):
+                continue
+            key = f"{url}|{it.get('param','')}|{it.get('vuln_class','')}"
+            if key in tested:
+                continue
+            self.eng.mark_tested(it)
+            tested = self.eng.state.get("tested") or tested
+            n += 1
+        if n:
+            self.eng.log(f"review: skipped {n} marketing/static url(s) — the round stays on APIs")
+        return n
+
+    def _review_directive(self):
+        path = os.path.join(os.path.expanduser(self.base), "_review", "directives",
+                            self.scope.name + ".json")
+        try:
+            d = json.load(open(path))
+            return d if isinstance(d, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _apply_review_directives(self):
+        """Close candidates the 2h workflow check already judged. Read from disk each pass so a
+        running hunt picks the decision up without a restart."""
+        d = self._review_directive()
+        closed = 0
+        for item in d.get("close") or []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            reason = item.get("reason") or "2h workflow review"
+            targets = [item]
+            if not item.get("vuln_class"):
+                targets = [c for c in self.eng.state.get("candidates") or []
+                           if c.get("url") == item.get("url")] or [item]
+            for t in targets:
+                fk = f"{t.get('url','')}|{t.get('vuln_class','')}"
+                if fk in self.eng.rejected_keys():
+                    continue
+                self.eng.mark_rejected({"url": t.get("url"), "vuln_class": t.get("vuln_class", "")}, reason)
+                closed += 1
+        if closed:
+                self.eng.log(f"review: closed {closed} candidate(s) from the workflow review")
+
+    def _candidate_key(self, c):
+        return (c.get("url"), c.get("vuln_class"))
+
+    def _close_candidate(self, c, reason):
+        self.eng.mark_rejected(c, reason)
+        self.eng.log(f"validate: closed {c.get('vuln_class')} @ {c.get('url')} — {reason}")
+
     def validate(self):
         self.eng.set_phase("validate")
+        self._apply_review_directives()
+        import disposition as D
         held_keys = {(h.get("url"), h.get("vuln_class"))
                      for h in (self.eng.state.get("disposition_held") or [])}
-        pending = [c for c in self.eng.state["candidates"]
-                   if (c.get("url"), c.get("vuln_class")) not in held_keys
-                   and not any(cf.get("url") == c["url"] and cf.get("vuln_class") == c["vuln_class"]
-                               for cf in self.eng.state["confirmed"])]
-        self.eng.log(f"validate: {len(pending)} candidate(s) to adversarially verify, {self.parallel} at a time")
+        rejected = self.eng.rejected_keys()
+        confirmed = {(cf.get("url"), cf.get("vuln_class")) for cf in self.eng.state["confirmed"]}
+        pending = []
+        for c in self.eng.state["candidates"]:
+            key = self._candidate_key(c)
+            fk = f"{c.get('url','')}|{c.get('vuln_class','')}"
+            if key in held_keys or key in confirmed or fk in rejected:
+                continue
+            if not self.scope.in_scope_host(c.get("url") or ""):
+                self._close_candidate(c, "out of scope — not re-checked")
+                continue
+            if D.own_session_oauth(c):
+                self._close_candidate(c, "own-session oauth — token belongs to the registering account")
+                continue
+            pending.append(c)
+        self.eng.log(f"validate: {len(pending)} new candidate(s) to verify "
+                     f"({len(rejected)} already closed), {self.parallel} at a time")
         for c, v in self._run_parallel(self._validate_agent, pending):
             cls, url = c.get("vuln_class"), c.get("url")
             repro = self._reproduce(c, v)              # INDEPENDENT, deterministic real-vs-not separator
@@ -957,12 +1660,14 @@ class Engine:
             llm_real = bool(v and v.get("real"))
             # 1) deterministic DISPROOF overrides an LLM 'real' -> NOT a real bug (kills false positives)
             if repro["status"] == "disproved":
+                self.eng.mark_rejected(c, f"disproved via {repro['method']}")
                 _lrn("record_outcome", self.scope.name, cls, "false-positive",
                      f"disproved by {repro['method']}: {repro['signal']}", base=self.base)
                 self.eng.log(f"validate: ✗ NOT REAL (disproved via {repro['method']}) {cls} @ {url} — {repro['signal']}")
                 continue
-            # 2) the skeptical validator says it's not real -> drop it
+            # 2) the skeptical validator says it's not real -> drop it, and do not verify it again
             if not llm_real:
+                self.eng.mark_rejected(c, (v or {}).get("reason", "") or "false positive")
                 _lrn("record_outcome", self.scope.name, cls, "false-positive",
                      (v or {}).get("reason", ""), base=self.base)
                 self.eng.log(f"validate: ✗ rejected (false positive) {cls} @ {url} — "
@@ -971,6 +1676,7 @@ class Engine:
             # 3) RTFS / Informative disposition hold (advisory text-gate) -> held, not reported
             disp = self._disposition(c, v)
             if disp["verdict"] != "PASS":
+                self.eng.mark_rejected(c, disp.get("reason", "") or disp["verdict"])
                 self.eng.state.setdefault("disposition_held", []).append({
                     "url": url, "vuln_class": cls, "verdict": disp["verdict"], "reason": disp.get("reason", "")})
                 self.eng.save()
@@ -1133,7 +1839,39 @@ class Engine:
         self.eng.log(f"report: wrote {len(c)} confirmed finding(s) -> {path}")
         return path
 
+    def _prior_note(self, it):
+        prior = self.eng.hunt_note(it)
+        if not prior.get("analysis"):
+            return ""
+        return ("\nPRIOR LOOK on this exact URL — do not repeat this dead end; try a different input "
+                f"or object id: {prior['analysis'][:400]} classes={prior.get('classes')}\n")
+
+    def _drop_own_session_oauth(self):
+        """A confirmed OAuth whose only token belongs to the registering account is not a finding."""
+        import disposition as D
+        held = {(h.get("url"), h.get("vuln_class"))
+                for h in (self.eng.state.get("disposition_held") or [])}
+        kept, dropped = [], 0
+        for c in list(self.eng.state.get("confirmed") or []):
+            if not D.own_session_oauth(c):
+                kept.append(c)
+                continue
+            dropped += 1
+            key = (c.get("url"), c.get("vuln_class"))
+            if key not in held:
+                self.eng.state.setdefault("disposition_held", []).append({
+                    "url": c.get("url"), "vuln_class": c.get("vuln_class"),
+                    "verdict": "HOLD_RTFS",
+                    "reason": "Own-session OAuth: the token belongs to the account that registered the client.",
+                })
+                held.add(key)
+            self.eng.log(f"validate: unconfirm own-session oauth {c.get('vuln_class')} @ {c.get('url')}")
+        if dropped:
+            self.eng.state["confirmed"] = kept
+            self.eng.save()
+
     def run(self, phases):
+        self._drop_own_session_oauth()
         for ph in ALL_PHASES:
             if ph in phases:
                 try:

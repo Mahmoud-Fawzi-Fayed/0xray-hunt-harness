@@ -11,8 +11,9 @@ the agents + rules, and `engine/` is the vendored engine + skills.
 2. Keep the body **under 500 lines**; move long payload banks into a `references/` subfolder.
 3. Match the house structure: **"What actually pays (and what doesn't)"**, detection, **PoC
    minimums**, the **dedup-gate footer**, and **cross-references** to sibling skills.
-4. If the skill maps to a vuln class, register it in `engine/engine/skill_map.py`
-   (`CLASS_SKILL`, and ideally a `CLASS_PROBE` starter curl).
+4. Name the directory `hunt-<token>` so `skill_map.matching()` picks it up from
+   live URL/stack bytes. Do **not** add a class→skill table or a payload catalog
+   in engine code.
 5. For the live runtime, skills are read from `~/.claude/skills` — copy or symlink
    `engine/skills/<name>` there (the engine installer does this for you).
 

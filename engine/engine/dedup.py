@@ -65,8 +65,8 @@ W_CLASS = 0.40
 W_PATH = 0.35
 W_TITLE = 0.25
 
-# normalize the many human phrasings of a bug class onto the engine's class slugs
-# (kept consistent with engine/skill_map.py CLASS_SKILL keys).
+# normalize the many human phrasings of a disclosed bug onto one slug for dedup.
+# This is matching public reports, not a hunt menu.
 CLASS_CANON = {
     "idor": "idor", "insecure-direct-object-reference": "idor",
     "insecure direct object reference": "idor", "insecure direct object references": "idor",

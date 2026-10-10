@@ -152,9 +152,14 @@ def read_audit(program=None, n=200, base=None):
 
 
 def account_count(program, base=None):
-    """How many test accounts we've already provisioned for this program (from the audit trail)."""
+    """How many disposable inboxes this program has minted.
+
+    A signup agent probes several register URLs for one identity. Those probes are not extra
+    accounts — counting them filled the cap (indrive 4 inboxes + 6 URL hits = 10/10) and blocked
+    the next real session. The cap still refuses register once the inbox count is exhausted.
+    """
     return sum(1 for r in read_audit(program, n=2000, base=base)
-               if r.get("action") in ("register", "identity") and r.get("allowed"))
+               if r.get("action") == "identity" and r.get("allowed"))
 
 
 def _load_scope(program, base):
@@ -243,10 +248,15 @@ def _cmd_selftest(_a):
     # out-of-scope register refused
     ok, _ = check("acme", "register", url="https://evil.com/signup", base=base)
     assert not ok
-    # in-scope register allowed, then capped
+    # inbox mints are the account cap; register URL probes during one signup do not each count
     os.environ["HUNT_MAX_ACCOUNTS"] = "2"
+    assert check("acme", "identity", base=base)[0]
     assert check("acme", "register", url="https://api.acme.com/signup", base=base)[0]
-    assert check("acme", "register", url="https://api.acme.com/signup", base=base)[0]
+    assert check("acme", "register", url="https://api.acme.com/other", base=base)[0]
+    assert account_count("acme", base) == 1, account_count("acme", base)
+    assert check("acme", "identity", base=base)[0]
+    ok, why = check("acme", "identity", base=base)
+    assert not ok and "cap" in why, why
     ok, why = check("acme", "register", url="https://api.acme.com/signup", base=base)
     assert not ok and "cap" in why, why
     assert account_count("acme", base) == 2

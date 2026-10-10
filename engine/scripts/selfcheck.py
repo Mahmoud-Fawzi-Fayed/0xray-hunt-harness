@@ -106,7 +106,7 @@ def _yr_junk():
     m = yieldrank.Model.load(b)
     assert m.bonus(None) == 0.0
     m.bonus("x"); m.score("idor", ["next.js"]); r = m.rank(["graphql"])
-    assert len(r) == len(yieldrank.PRIORS)
+    assert any(row.get("class") == "idor" for row in r)
 case("yieldrank corrupt journal + bonus(None) + rank", _yr_junk)
 
 

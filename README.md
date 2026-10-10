@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
 ![skills](https://img.shields.io/badge/skills-81-blue)
-![engine modules](https://img.shields.io/badge/engine%20modules-33-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-34-blue)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
@@ -58,9 +58,9 @@ end. Nothing leaves without your say-so.
 ```mermaid
 flowchart LR
     A["novelty<br/>what's new?"] --> B["recon<br/>find endpoints"]
-    B --> C["rank<br/>most-findable first"]
-    C --> D["map<br/>endpoint → skill"]
-    D --> E["hunt<br/>test each, safely"]
+    B -->     C["rank<br/>this program's live surface"]
+    C --> D["map<br/>skills that match the bytes"]
+    D --> E["hunt<br/>one deep agent per URL"]
     E --> F{"impact<br/>proven?"}
     F -->|no| R["mark tested<br/>rotate / re-recon"]
     F -->|yes| G["validate<br/>adversarial recheck"]
@@ -110,7 +110,7 @@ qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent �
 | [`harness/.env.example`](harness/.env.example) | every setting documented — copy to `.env` and fill in |
 | [`.cursor/agents/`](.cursor/agents/) | 5 subagents (orchestrator, recon, vuln-hunter, dedup, report) |
 | [`.cursor/rules/`](.cursor/rules/) | always-on rules: SOP, dedup/novelty, triager-grade reporting |
-| [`engine/`](engine/) | the full engine (33 modules) + 81 skills |
+| [`engine/`](engine/) | the full engine (34 modules) + 81 skills |
 | [`MANUAL.md`](MANUAL.md) | the deep operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
@@ -134,6 +134,13 @@ Run `make` with no target to see every command.
 
 The harness can now reach the surface where the paid bugs actually live:
 
+- **No static hunt catalog** — ranking, skill pick, and session health come from *this* program's
+  live surface and the operator paste, not a baked-in list of classes, paths, or products.
+- **Auto-relogin** (`authsession.py` creds vault) — store the login URL + cookies or
+  username/password from a paste. When a JWT/session dies, hunt and reviewer replay that URL
+  and refresh. Password never goes in logs.
+- **Reviewer heal loop** (`reviewer.py`, ~60s) — false-dead sessions, idle mines, and stale
+  processes get fixed and published to the panel (`live.json`) without a manual restart.
 - **Authenticated sessions** (`authn.py`) — drop in a logged-in session, with two accounts A + B.
 - **Headless-browser capture** (`browser.py`, Playwright) — see the real XHR/fetch/GraphQL API that a
   plain crawler misses on single-page apps.

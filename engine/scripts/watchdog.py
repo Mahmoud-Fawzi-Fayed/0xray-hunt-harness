@@ -38,8 +38,7 @@ CHAT_MAX = int(os.environ.get("WATCHDOG_CHAT_MAX", "60"))        # prune chats a
 CORES = os.cpu_count() or 2
 MAX_HUNTS_BOX = int(os.environ.get("WATCHDOG_MAX_HUNTS_BOX", str(max(1, CORES + 1))))  # suite size for this box
 LOAD_CEIL = float(os.environ.get("WATCHDOG_LOAD_CEIL", str(CORES * 4)))                # 15m-load overload line
-HUNT_PRIORITY = [p.strip() for p in os.environ.get(
-    "WATCHDOG_HUNT_PRIORITY", "reddit,paysafe,vinted,dransay,wyylde").split(",") if p.strip()]
+HUNT_PRIORITY = [p.strip() for p in os.environ.get("WATCHDOG_HUNT_PRIORITY", "").split(",") if p.strip()]
 BRIDGE = "http://127.0.0.1:8899"
 PM2 = __import__("shutil").which("pm2") or "/usr/bin/pm2"
 # a last log line starting with one of these means the hunt is BETWEEN rounds (sleeping), not stuck

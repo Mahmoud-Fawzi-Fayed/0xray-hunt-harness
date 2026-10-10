@@ -129,8 +129,11 @@ def _run_once(cmd, m, timeout):
 # (to avoid context-window bloat). Slots are leased with a lock so parallel workers never share one.
 _POOL_LOCK = threading.Lock()
 _POOL = {}                                  # context -> [ {id, model, uses, inuse}, ... ]
-POOL_SIZE = int(os.environ.get("HUNT_SESSION_POOL", "3"))          # concurrent sessions per context
+POOL_SIZE = int(os.environ.get("HUNT_SESSION_POOL", "3"))          # reused sessions kept per target
 MAX_SESSION_USES = int(os.environ.get("HUNT_SESSION_MAX_USES", "25"))
+# A resumed chat older than this is retired instead of reused. Uses reset on process restart, so
+# without an age cap one slot keeps an 18-hour transcript forever and it looks like a live hunt.
+MAX_SESSION_AGE_MIN = int(os.environ.get("HUNT_SESSION_MAX_AGE_MIN", "360"))
 
 
 def _enforce_pool(m):
@@ -212,6 +215,16 @@ def _load_pool_models(context):
         return {}
 
 
+def _load_pool_uses(context):
+    """{id: use count} so HUNT_SESSION_MAX_USES survives a process restart. Without this, every
+    restart resets the counter to 0 and a slot resumes the same chat forever."""
+    try:
+        m = json.load(open(_pool_file(context))).get("uses", {})
+        return m if isinstance(m, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _persist_pool(context):
     """Save THIS target's live session ids (per-target file) so stop+rerun RESUMES them, no new sessions.
     Snapshot under the lock (no mid-iteration mutation) + atomic write (no torn file under concurrency)."""
@@ -221,14 +234,62 @@ def _persist_pool(context):
             ids = [s["id"] for s in slots if s.get("id")]
             model = slots[0].get("model") if slots else None
             models = {s["id"]: s["model"] for s in slots if s.get("id") and s.get("model")}
+            uses = {s["id"]: int(s.get("uses") or 0) for s in slots if s.get("id")}
         path = _pool_file(context)
         tmp = path + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump({"context": context, "ids": ids, "models": models,
+            json.dump({"context": context, "ids": ids, "models": models, "uses": uses,
                        "ts": time.time(), "model": model}, fh)
         os.replace(tmp, path)                   # atomic: readers never see a half-written file
     except Exception:  # noqa: BLE001
         pass
+
+
+def _ids_to_retire(orphans, kept):
+    """Session ids a finished step abandoned. The id the slot is keeping is never retired."""
+    out = []
+    for sid in orphans:
+        if sid and sid != kept and sid not in out:
+            out.append(sid)
+    return out
+
+
+def _session_ancient(sid):
+    """True when the conversation itself has not moved in MAX_SESSION_AGE_MIN. Directory mtime is
+    not used — opening the store rewrites it."""
+    if not sid or MAX_SESSION_AGE_MIN <= 0:
+        return False
+    try:
+        import sessions as SESS
+        ts = SESS._conversation_ts(sid)
+    except Exception:  # noqa: BLE001
+        return False
+    if not ts:
+        return False
+    return (time.time() - ts) > MAX_SESSION_AGE_MIN * 60
+
+
+def _retire(sid):
+    """Delete a harness chat this process is done with. Never raises. An id another slot still
+    holds is left alone; sessions.drop_ids also refuses anything still listed in a pool file, so
+    the caller must persist the pool BEFORE retiring a replaced id."""
+    if not sid:
+        return
+    try:
+        with _POOL_LOCK:
+            for slots in _POOL.values():
+                for s in slots:
+                    if s.get("id") == sid:
+                        return
+        import sessions as SESS
+        SESS.drop_ids([sid])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _retire_all(ids):
+    for sid in ids:
+        _retire(sid)
 
 
 def _session_alive(sid):
@@ -245,22 +306,37 @@ def _session_alive(sid):
 
 
 def _acquire(context):
+    """Lease one pooled slot. A persisted id that is dead, exhausted, or older than the age cap is
+    not resumed — it is retired after the pool file is rewritten, so it cannot sit on disk forever.
+    When every slot is busy, the extra call is transient: its chat is deleted when that call ends
+    (see run_agent) instead of becoming a permanent extra session."""
+    retire = []
+    chosen = None
     with _POOL_LOCK:
         slots = _POOL.setdefault(context, [])
         if not slots:                       # first use in this process: seed from the persisted pool
             models = _load_pool_models(context)
+            uses = _load_pool_uses(context)
             for sid in _load_pool_ids(context)[:POOL_SIZE]:
-                if _session_alive(sid):     # skip dead persisted ids — resuming one loses all context
-                    slots.append({"id": sid, "model": models.get(sid), "uses": 0, "inuse": False})
+                used = int(uses.get(sid) or 0)
+                if (not _session_alive(sid) or used >= MAX_SESSION_USES or _session_ancient(sid)):
+                    retire.append(sid)      # do not resume a dead, exhausted, or stale chat
+                    continue
+                slots.append({"id": sid, "model": models.get(sid), "uses": used, "inuse": False})
         for sl in slots:
             if not sl["inuse"]:
                 sl["inuse"] = True
-                return sl
-        if len(slots) < POOL_SIZE:
-            sl = {"id": None, "model": None, "uses": 0, "inuse": True}
-            slots.append(sl)
-            return sl
-    return {"id": None, "model": None, "uses": 0, "inuse": True, "transient": True}   # burst overflow
+                chosen = sl
+                break
+        if chosen is None and len(slots) < POOL_SIZE:
+            chosen = {"id": None, "model": None, "uses": 0, "inuse": True}
+            slots.append(chosen)
+        elif chosen is None:
+            chosen = {"id": None, "model": None, "uses": 0, "inuse": True, "transient": True}
+    if retire:
+        _persist_pool(context)              # drop retired ids from the file before unlinking them
+        _retire_all(retire)
+    return chosen
 
 
 def _release(sl):
@@ -301,17 +377,23 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
         _register_created(r.get("session_id") or resume_id)   # harness-owned: safe to auto-prune later
         return r
 
-    sl = _acquire(context) if context is not None else {"id": None, "model": None, "uses": 0}
+    # context=None is a one-shot (review, verify, provisioning). It must not stay on disk.
+    ephemeral = context is None
+    sl = _acquire(context) if not ephemeral else {"id": None, "model": None, "uses": 0, "ephemeral": True}
+    orphans = []
     try:
-        reuse = bool(sl["id"] and sl["uses"] < MAX_SESSION_USES and not model)
+        reuse = bool(sl.get("id") and sl["uses"] < MAX_SESSION_USES and not model
+                     and not sl.get("transient") and not ephemeral)
         if reuse and not _session_alive(sl["id"]):
-            # dead pooled session (its on-disk dir is gone) — resuming it would silently restart with
-            # zero context; drop it so a fresh session is opened and its NEW id persisted instead.
+            # dead pooled session — resuming it silently starts an empty chat under the same id
+            orphans.append(sl["id"])
             sl.update(id=None, model=None, uses=0)
             reuse = False
         if reuse:
             m, cmd = sl["model"], _cmd(task, sl["model"], resume_id=sl["id"])
-        else:                               # fresh session (rotate to next approved-pool model)
+        else:                               # fresh session (first use, failover, exhausted, or one-shot)
+            if sl.get("id"):
+                orphans.append(sl["id"])    # the chat being replaced is finished — close it
             m = _enforce_pool(model or _pick_model())
             sl.update(id=None, model=m, uses=0)
             cmd = _cmd(task, m)
@@ -319,6 +401,8 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
         for attempt in range(1, max(1, attempts) + 1):
             r = _run_once(cmd, m, timeout)
             if r.get("session_id"):
+                if sl.get("id") and sl["id"] != r["session_id"]:
+                    orphans.append(sl["id"])
                 sl["id"] = r["session_id"]  # remember so the next call --resume's it (across rounds too)
                 _register_created(r["session_id"])   # harness-owned id -> eligible for safe auto-prune
             if r.get("model") and not sl.get("model"):
@@ -327,19 +411,29 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
                 break
             time.sleep(2 * attempt)
             r["retried"] = attempt
+            if sl.get("id"):
+                orphans.append(sl["id"])    # failed attempt is not reused
             sl["id"] = None
             cmd = _cmd(task, m)             # retry on a fresh session
         if r.get("error"):                  # drop the session on error/limit; next call opens a fresh one
+            if sl.get("id"):
+                orphans.append(sl["id"])
             sl.update(id=None, model=None, uses=0)
         else:
-            sl["uses"] += 1
-        if context is not None:
-            _persist_pool(context)          # keep this target's state current so stop+rerun resumes it
+            sl["uses"] = int(sl.get("uses") or 0) + 1
+        # One-shots and burst overflow are outside the per-target cap. Close them when the call ends.
+        if ephemeral or sl.get("transient"):
+            if sl.get("id"):
+                orphans.append(sl["id"])
+            sl["id"] = None
+        if context is not None and not sl.get("transient"):
+            _persist_pool(context)          # pool file first, so the replaced id is no longer protected
+        _retire_all(_ids_to_retire(orphans, sl.get("id")))
         r.setdefault("model", m)
         r["reused"] = reuse
         return r
     finally:
-        if context is not None:
+        if context is not None and not sl.get("transient"):
             _release(sl)
 
 
@@ -376,4 +470,6 @@ if __name__ == "__main__":
               '{"type":"result","is_error":false,"result":"```json\\n{\\"score_0_10\\": 4}\\n```"}')
     got = _parse_result_json(stream)
     assert got and got.get("type") == "result" and "score_0_10" in got["result"], got
+    assert _ids_to_retire(["old", "old", None, "kept"], "kept") == ["old"]
+    assert _ids_to_retire(["only"], None) == ["only"]
     print("agent.py (cursor) self-test: PASS")

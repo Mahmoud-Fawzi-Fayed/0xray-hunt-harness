@@ -89,6 +89,15 @@ _TERMINAL_WRITE = re.compile(
     r"\b(billed|completed|paid)\b.{0,80}\b200\b|\b200\b.{0,80}\b(billed|completed|paid)\b")
 _ATO = re.compile(
     r"account takeover|\bato\b|any (?:buyer|user|seller|victim)|other compan|full (?:seller|account)")
+# Advertised RFC 7591 / MCP DCR. Own-session register→consent→token is product behavior, not ATO.
+# /oauth2/register plus a client_secret is the same shape even when the write-up never says "RFC 7591".
+_ADVERTISED_DCR = re.compile(
+    r"registration_endpoint|rfc\s*7591|dynamic client registration|"
+    r"\bmcp consent\b|oauth-authorization-server|"
+    r"oauth2?/register|client_secret|redirect_uris")
+_OWN_OAUTH = re.compile(
+    r"own[- ]session|own (?:account|consent|user)|attacker_holds.{0,40}own_session|"
+    r"id_source.{0,40}own_only|tester'?s own")
 
 
 def _blob(f):
@@ -206,22 +215,52 @@ def _rules(blob, meta):
 # even if its prose also mentions a session/precondition (the regex can't see the PoC; real proof wins). Kept
 # NARROW on purpose: a cross-account read/write actually shown, command/file/metadata execution, SQLi
 # extraction, or a demonstrated session/token theft — never bare words like "account takeover" or "could".
+# Do NOT treat HTTP `/whoami` (Coda/GitHub-style APIs) or OAuth `token`/`code` endpoint words as proof —
+# that was a false PASS on advertised MCP DCR (Superhuman/Coda) and the same "token"/"code" failure as indrive.
 _PROOF_SHOWN = re.compile(
     r"cross-account"
     r"|another user'?s |other users?'? (pii|data|order|invoice|account|email|record)"
     r"|victim'?s (data|order|invoice|account|email|record|session|token|cookie)"
     r"|account ?b (read|saw|retrieved|accessed|received|returned|got|calls|lists)"
-    r"|\buid=\d|\bgid=\d|\bwhoami\b|root@|root:.*:0:0|/etc/passwd|command output"
-    r"|169\.254\.169\.254|metadata.*(token|credential|role)"
+    r"|\buid=\d|\bgid=\d|(?<![/\w])whoami\b|root@|root:.*:0:0|/etc/passwd|command output"
+    r"|169\.254\.169\.254|"
+    r"(?:cloud |instance |iam |ec2 )metadata.{0,40}(?:token|credential|role)"
     r"|union select|sleep\(\d|extracted (the )?(data|rows|password|hash|version)"
     r"|stole (the )?(session|token|cookie)|session (token |cookie )?(stolen|hijacked|exfiltrated)"
-    # info-disclosure proof — GENERIC (any class/target, no finding-specific nouns): sensitive data actually
-    # RETURNED in a response, or a quantified dump. Works for configs, PII, invoices, secrets, keys, etc.
+    # info-disclosure proof — GENERIC. Bare "token"/"code"/"secret" after "api ... returned" is OAuth DCR
+    # noise (token endpoint 200, client_secret issued). Require other-user/PII/key material.
     r"|(?:response|endpoint|api|server)\b[^\n]{0,20}(?:contains?|returned|included?|expos\w+|disclos\w+|leak\w*|lists?)"
-    r"[^\n]{0,60}(?:secret|credential|password|token|api[_ ]?key|private key|internal|sensitive|personal|pii|another|other user)"
+    r"[^\n]{0,60}(?:password|api[_ ]?key|private key|internal|sensitive|personal|pii|another|other user)"
     r"|\d[\d,]{2,}\s+(?:entr(?:y|ies)|records?|rows?|users?|accounts?|objects?|items?)\b"
     r"[^\n]{0,20}(?:returned|exposed|disclos\w+|leaked|accessible|in the response)",
     re.I)
+
+
+def own_session_oauth(finding):
+    """True when the only OAuth token/code belongs to the account that registered the client.
+
+    Advertised DCR (register → own consent → own token) is the product working as designed.
+    A cross-account code or token is not this shape and is left to the rest of the gate.
+    """
+    f = finding if isinstance(finding, dict) else {}
+    blob = _blob(f)
+    meta = _meta(f)
+    cls = str(f.get("vuln_class") or "").lower()
+    oauthish = "oauth" in cls or bool(_ADVERTISED_DCR.search(blob))
+    own = (
+        meta["holds"] in ("own_session", "victim_session_unproven")
+        or meta["idsrc"] in ("own_only",)
+        or _hit(blob, _OWN_OAUTH)
+    )
+    registered = bool(_ADVERTISED_DCR.search(blob))
+    # "requires a victim to sign in" is the write-up admitting theft was NOT shown.
+    # Only a second account that actually received the code/token lifts this hold.
+    demonstrated_b = bool(re.search(
+        r"account b\b.{0,80}\b(?:received|exchanged|obtained|stole|got)\b|"
+        r"\b(?:account|user) b['’]?s (?:code|token|session)\b|"
+        r"cross-account (?:code|token|consent)",
+        blob))
+    return bool(oauthish and own and registered and not demonstrated_b)
 
 
 def check(finding, program=None, base=DEFAULT_BASE):
@@ -242,6 +281,18 @@ def check(finding, program=None, base=DEFAULT_BASE):
                 "id": "break_proven", "verdict": "PASS",
                 "reason": f"Evidence shows the break `{br}`: {BREAKS[br]}.",
             }], "reason": f"Break `{br}` is present in the evidence."}
+
+        # Intended MCP / RFC 7591 DCR must HOLD before the proof-override. `/whoami` 500 and
+        # "token returned 200" used to false-PASS advertised DCR (own-session MCP consent).
+        # A client_secret returned to the account that called /oauth2/register is the same hold
+        # even when the write-up never mentions registration_endpoint.
+        if own_session_oauth(f):
+            return {"verdict": "HOLD_RTFS", "draft": False, "rules": [{
+                "id": "advertised_mcp_dcr", "verdict": "HOLD_RTFS",
+                "reason": "Advertised RFC 7591 DCR plus own-session register→consent→token is MCP "
+                          "consent, not ATO. Draft only if account B's code lands on a client B did "
+                          "not register (mismatch-accepted redirect_uri is still HOLD without B).",
+            }], "reason": "Advertised MCP DCR / own-session consent — intended-behavior, HOLD_RTFS."}
 
         if _PROOF_SHOWN.search(blob):          # concrete demonstrated impact overrides the RTFS text-heuristic
             return {"verdict": "PASS", "draft": True, "rules": [{
@@ -332,6 +383,15 @@ def _selftest():
                     "The seller record shows the new total. The id is sequential (id=44).",
         "disposition": {"break": "unauth_write_past_terminal_lock"},
     }
+    mcp_dcr = {
+        "title": "Open DCR ATO via /v4/api/oauth2/register",
+        "evidence": "GET /.well-known/oauth-authorization-server advertises registration_endpoint. "
+                    "Unauthenticated POST /v4/api/oauth2/register stored redirect_uris and returned "
+                    "client_id plus a client_secret. Own-session consent. POST /v4/api/oauth2/token "
+                    "returned 200 with access_token and code in Location. GET /apis/v1/whoami returned 500. "
+                    "attacker_holds: own_session. id_source: own_only.",
+        "disposition": {"attacker_holds": "own_session", "id_source": "own_only"},
+    }
 
     cases = [
         ("own-session ATO", own_session, "HOLD_RTFS"),
@@ -342,7 +402,26 @@ def _selftest():
         ("in-scope id oracle", oracle, "PASS"),
         ("csrf shown", csrf, "PASS"),
         ("write past terminal lock", past_lock, "PASS"),
+        ("advertised MCP DCR own-session", mcp_dcr, "HOLD_RTFS"),
+        ("own-session register without RFC words", {
+            "vuln_class": "oauth",
+            "title": "DCR client on coda",
+            "evidence": "Unauthenticated POST /v4/api/oauth2/register stored redirect_uris "
+                        "https://example.invalid/cb and returned client_id plus a client_secret. "
+                        "Authorize used the registering account's session.",
+            "attacker_holds": "own_session",
+            "id_source": "own_only",
+        }, "HOLD_RTFS"),
     ]
+    # A second account that actually received the code is not the own-session hold.
+    cross_oauth = {
+        "vuln_class": "oauth",
+        "evidence": "POST /oauth2/register returned a client_secret. Account B received the "
+                    "authorization code on that client and exchanged the victim's access_token.",
+        "attacker_holds": "own_session",
+        "id_source": "own_only",
+    }
+    assert own_session_oauth(cross_oauth) is False, own_session_oauth(cross_oauth)
     for name, finding, expect in cases:
         got = check(finding)
         assert got["verdict"] == expect, (name, got)
