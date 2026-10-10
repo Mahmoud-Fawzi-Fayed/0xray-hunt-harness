@@ -63,6 +63,7 @@ _Q_API_HOST = re.compile(r"^(api|apis|gateway|rest|gql|graphql|admin|account|acc
                          r"customer|app|apps|dashboard|secure|auth|login|sso|id|oauth|connect|rest)[.-]", re.I)
 _Q_STATIC = re.compile(r"\.(js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|pdf|mp4|webm|avif|"
                        r"xml)(\?|$)", re.I)
+_Q_CDN_HOST = re.compile(r"(^|\.)cdn[\d.-]", re.I)
 _Q_MARKETING = re.compile(r"/(pricing|blog|about|contact|careers?|press|news(room)?|legal|terms|privacy|"
                           r"cookies?|faq|features?|resources?|case-stud\w*|customers?|partners?|events?|"
                           r"webinars?|ebooks?|guides?|academy|community|company|jsi18n|sitemap\w*|robots|"
@@ -77,6 +78,19 @@ _REVIEW_JUNK = re.compile(
 _Q_OBJID = re.compile(r"/(\d{2,}|[0-9a-f]{8}-[0-9a-f]{4}|[0-9a-f]{16,})(/|\?|$)", re.I)
 _Q_DISCOVERED = {"graphql-op", "graphql", "graphql-recon", "browser", "browser-capture",
                  "agent-found", "authed", "deep-recon"}
+
+
+def _skip_static_url(url):
+    """Static/CDN bytes are not a hunt. Shape-based, not a host catalog."""
+    u = url or ""
+    if _Q_STATIC.search(u):
+        return True
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(u).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(host.startswith("cdn.") or ".cdn." in host or _Q_CDN_HOST.search(host))
 
 
 def _logged_out_result(analysis):
@@ -785,6 +799,34 @@ class Engine:
         self.eng.log(line)
         return line
 
+    def _ab_same_host(self):
+        """True when A and B log into the same host. Cross-tenant B (other subdomain) 401s on
+        A's APIs by design — that is not IDOR and must not drive the hunt."""
+        try:
+            import authn
+            d = authn.load(self.scope.name, self.base)
+            ha = ((d.get("A") or {}).get("host") or "")
+            hb = ((d.get("B") or {}).get("host") or "")
+            if ha and hb:
+                from urllib.parse import urlparse
+                def _h(x):
+                    x = str(x or "")
+                    return (urlparse("https://" + x).hostname or x).lower()
+                return _h(ha) == _h(hb)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import authsession as AS
+            creds = AS.load_creds(self.scope.name, self.base) or {}
+            ha = (creds.get("A") or {}).get("host") or ""
+            hb = (creds.get("B") or {}).get("host") or ""
+            if ha and hb:
+                import guardrails as G
+                return G._host_of(ha) == G._host_of(hb)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def _authz_lead(self, url):
         """Two live accounts: the first action on an object or API URL is A's id read as B.
         A similarity hit is a lead, not a finding, until B's body contains A's marker."""
@@ -795,6 +837,11 @@ class Engine:
             return ""
         if "A" not in ids or "B" not in ids:
             return ""
+        if not self._ab_same_host():
+            return ("\nAUTHZ PRE-CHECK: account B is a live login on a different host than A "
+                    "(other tenant / other site). A 401 from B on this URL is tenant isolation, "
+                    "not IDOR. Do not spend the look proving B=401. Invent the next test from "
+                    "A's live bytes on THIS host.\n")
         if _endpoint_quality({"url": url}) < 25:
             return ""
         if re.search(r"/(logout|health|ready|live|robots\.txt|\.well-known)(/|$)", url or "", re.I):
@@ -1058,10 +1105,14 @@ class Engine:
         self._honor_review_skips()
         wl = self.eng.worklist()[: self.max_hunts]
         todo = []
+        skipped_static = 0
         for it in wl:
             if "{" in (it.get("url") or ""):
                 self.eng.log(f"hunt: skipping template url {it['url']}")
                 self.eng.mark_tested(it)
+            elif _skip_static_url(it.get("url") or ""):
+                self.eng.mark_tested(it)
+                skipped_static += 1
             elif not self.scope.in_scope_host(it["url"]):     # belt-and-suspenders scope gate
                 self.eng.log(f"hunt: REFUSING out-of-scope {it['url']} ({self.scope.reject_reason(it['url'])})")
                 self.eng.mark_tested(it)
@@ -1075,6 +1126,8 @@ class Engine:
                 todo.append(it)
             else:
                 todo.append(it)
+        if skipped_static:
+            self.eng.log(f"hunt: skipped {skipped_static} static/CDN url(s) — the round stays on APIs")
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
         for it, f in self._run_parallel(self._hunt_agent, todo):
             if f and f.get("error") == "timeout":
@@ -1572,15 +1625,14 @@ class Engine:
         """The workflow review marks brochure pages as not worth a deep agent. Applied at hunt start
         so a running process picks the decision up from disk."""
         d = self._review_directive()
-        if not d.get("skip_junk"):
-            return 0
+        skip_junk = bool(d.get("skip_junk"))
         tested = self.eng.state.get("tested")
         if not isinstance(tested, dict):
             tested = {}
         n = 0
         for it in list(self.eng.state.get("surface") or []):
             url = it.get("url") or ""
-            if not (_REVIEW_JUNK.search(url) or _Q_STATIC.search(url)):
+            if not (_skip_static_url(url) or (skip_junk and _REVIEW_JUNK.search(url))):
                 continue
             key = f"{url}|{it.get('param','')}|{it.get('vuln_class','')}"
             if key in tested:
@@ -1631,6 +1683,12 @@ class Engine:
         self.eng.log(f"validate: closed {c.get('vuln_class')} @ {c.get('url')} — {reason}")
 
     def validate(self):
+        real_todo = [it for it in self.eng.worklist()
+                     if not _skip_static_url(it.get("url") or "")
+                     and not _REVIEW_JUNK.search(it.get("url") or "")]
+        if len(real_todo) > 20:
+            self.eng.log(f"validate: {len(real_todo)} real url(s) still untested — staying on hunt")
+            return
         self.eng.set_phase("validate")
         self._apply_review_directives()
         import disposition as D

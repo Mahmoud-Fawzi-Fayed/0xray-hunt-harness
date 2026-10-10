@@ -382,7 +382,7 @@ def _mirror_to_authn(program, session, base, ident="A"):
         bearer = hdrs.pop("Authorization", "") or hdrs.pop("authorization", "")
         bearer = re.sub(r"(?i)^bearer\s+", "", str(bearer)).strip()
         authn.save(program, ident, cookie=cstr or None, bearer=bearer or None,
-                   headers=hdrs or None, base=base, replace=True)
+                   headers=hdrs or None, host=session.get("host"), base=base, replace=True)
     except Exception:  # noqa: BLE001
         pass
 
@@ -475,13 +475,19 @@ def note_live(program, url, base=DEFAULT_BASE):
 
 
 def _probes_for(session, program=None, base=None):
-    """URLs to re-check, from this session and this program's live surface. No built-in path list."""
+    """URLs to re-check, from this session and this program's live surface. No built-in path list.
+
+    If the login named a probe, that URL is the only health check — extra surface paths can
+    401 for authorization (other tenant, other role) while the session is still live.
+    """
     host = G._host_of(session.get("host") or "")
     probes = []
     for key in ("probe", "health_url"):
         u = session.get(key)
         if isinstance(u, str) and u.startswith("http") and " " not in u and "(" not in u:
             probes.append(u.split("#")[0])
+    if probes:
+        return probes[:2]
     slug = program or session.get("program")
     root = os.path.expanduser(base or DEFAULT_BASE)
     if slug and host:
@@ -655,17 +661,25 @@ def set_manual(program, host, cookie=None, headers=None, token=None, user=None,
         return {"ok": True, "program": slug, "host": host, "ident": "B", "cookies": len(cookies),
                 "headers": list(hdrs.keys()), "user": sess["user"], "requeued": 0}
     save(program, sess, base=base)
-    # make the login immediately productive: clear the tested-state so the hunt RE-COVERS its surface
-    # AUTHENTICATED now, instead of waiting out the 48h re-hunt window on already-tested (unauth) items.
+    # Relogin / a still-good paste must NOT wipe coverage. Only reopen URLs that were closed on a
+    # login wall so the hunt retries those authenticated — everything else stays tested.
     requeued = 0
     try:
         sp = os.path.join(os.path.expanduser(base), slug, "state.json")
         stt = json.load(open(sp))
-        requeued = len(stt.get("tested") or [])
-        stt["tested"] = {}
-        tmp = sp + ".tmp"
-        json.dump(stt, open(tmp, "w"), indent=2)
-        os.replace(tmp, sp)
+        tested = stt.get("tested") if isinstance(stt.get("tested"), dict) else {}
+        notes = stt.get("hunt_notes") if isinstance(stt.get("hunt_notes"), dict) else {}
+        for key, note in list(notes.items()):
+            analysis = str((note or {}).get("analysis") if isinstance(note, dict) else "").lower()
+            wall = any(x in analysis for x in ("401", "unauthorized", "authentication required")) and \
+                any(x in analysis for x in ("unauthenticated", "login wall", "logged out", "no session"))
+            if key in tested and wall:
+                tested.pop(key, None)
+                requeued += 1
+            stt["tested"] = tested
+            tmp = sp + ".tmp"
+            json.dump(stt, open(tmp, "w"), indent=2)
+            os.replace(tmp, sp)
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "program": slug, "host": host, "ident": "A", "cookies": len(cookies),

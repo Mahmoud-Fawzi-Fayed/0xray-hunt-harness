@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 
@@ -31,6 +32,27 @@ DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
 MSG_TIMEOUT = int(os.environ.get("HUNT_FIXCHAT_TIMEOUT", "2400"))  # active repro (accounts + re-test + rewrite) needs time
+CONTINUE_TIMEOUT = int(os.environ.get("HUNT_FIXCHAT_CONTINUE", str(MSG_TIMEOUT)))
+BUSY_GRACE = MSG_TIMEOUT + CONTINUE_TIMEOUT + 180
+
+# Never log these engine errors as the 0x avatar text — they rendered as a dead "timeout" bubble.
+_DEAD_AGENT = {"timeout", "rate-limited", "agent-error", "(no reply)"}
+_TIMEOUT_CONTINUE = (
+    "You were cut off because the previous turn hit the time budget. "
+    "Do NOT restart from scratch. Continue the LAST operator request using files already in this directory. "
+    "Honor every constraint the operator already gave. Finish the in-progress work and reply with a short "
+    "summary of what is now in the files."
+)
+_TIMEOUT_USER = (
+    "The last turn ran past the time budget and was stopped so this panel stays live. "
+    "This chat is still open and the files on disk were kept. Send continue and I will resume the same session."
+)
+_RATELIMIT_USER = (
+    "The agent hit a rate limit. This chat is still open — wait a minute and send again; it will resume the same session."
+)
+_EMPTY_USER = (
+    "The last turn ended without a reply. This chat is still open — send continue and I will resume the same session."
+)
 
 
 def _slug(s):
@@ -74,6 +96,108 @@ def _load_meta(root):
         return json.load(open(_meta_path(root)))
     except Exception:  # noqa: BLE001
         return None
+
+
+def _save_meta(root, meta):
+    try:
+        json.dump(meta, open(_meta_path(root), "w"))
+        os.chmod(_meta_path(root), 0o600)
+    except OSError:
+        pass
+
+
+def _save_session(root, meta, r):
+    if r.get("session_id"):
+        meta["session_id"] = r["session_id"]
+        if r.get("model"):
+            meta["model"] = r["model"]
+        _save_meta(root, meta)
+
+
+def _busy_path(root):
+    return os.path.join(root, ".busy")
+
+
+def _touch_busy(root):
+    try:
+        open(_busy_path(root), "w").write(str(time.time()))
+    except OSError:
+        pass
+
+
+def _clear_busy(root):
+    try:
+        os.remove(_busy_path(root))
+    except OSError:
+        pass
+
+
+def _agent_bubble(r):
+    """Never surface a raw engine error (timeout / rate-limited) as the 0x avatar text."""
+    text = (r.get("result") or "").strip()
+    err = (r.get("error") or "").strip()
+    if text and err != "timeout":
+        return "agent", text[:12000]
+    if text:
+        return "agent", text[:12000]
+    if err == "timeout":
+        return "system", _TIMEOUT_USER
+    if err == "rate-limited":
+        return "system", _RATELIMIT_USER
+    if err:
+        return "system", f"Agent error ({err}). This chat is still open — send again to resume."
+    return "system", _EMPTY_USER
+
+
+def _rewrite_dead_logs(root, log):
+    """Heal already-written 'timeout' 0x bubbles (legacy chats) into a recoverable system line."""
+    changed = False
+    for m in log or []:
+        if m.get("role") != "agent":
+            continue
+        t = str(m.get("text") or "").strip()
+        low = t.lower()
+        if low not in _DEAD_AGENT:
+            continue
+        m["role"] = "system"
+        if low == "timeout":
+            m["text"] = _TIMEOUT_USER
+        elif low == "rate-limited":
+            m["text"] = _RATELIMIT_USER
+        else:
+            m["text"] = _EMPTY_USER
+        changed = True
+    if changed:
+        try:
+            json.dump(log[-200:], open(_log_path(root), "w"))
+            os.chmod(_log_path(root), 0o600)
+        except OSError:
+            pass
+    return log
+
+
+def _run_turn(root, task, meta, timeout):
+    import agent as A
+    r = A.run_agent(task, context=None, resume_id=meta.get("session_id"),
+                    model=meta.get("model"), timeout=timeout, attempts=1)
+    _save_session(root, meta, r)
+    return r
+
+
+def _run_turn_recover(root, task, meta, timeout):
+    """One agent turn; on timeout with a live session_id, auto-continue once instead of dying."""
+    r = _run_turn(root, task, meta, timeout)
+    if (r.get("error") or "") != "timeout":
+        return r
+    sid = r.get("session_id") or meta.get("session_id")
+    if not sid:
+        return r
+    meta["session_id"] = sid
+    _touch_busy(root)
+    r2 = _run_turn(root, _TIMEOUT_CONTINUE, meta, min(timeout, CONTINUE_TIMEOUT) or timeout)
+    if not r2.get("error") and (r2.get("result") or "").strip():
+        return r2
+    return r2 if r2.get("error") != "timeout" else r
 
 
 def _save_files(files, root):
@@ -190,6 +314,7 @@ def status(cid, base=DEFAULT_BASE):
         log = json.load(open(_log_path(root)))
     except Exception:  # noqa: BLE001
         log = []
+    log = _rewrite_dead_logs(root, log)
     return {"chat_id": cid, "program": meta.get("program"), "created": meta.get("created"),
             "verdict": meta.get("verdict"), "files": _listing(root), "log": log, "open": True,
             "busy": os.path.exists(_busy_path(root))}
@@ -214,62 +339,79 @@ def list_chats(base=DEFAULT_BASE):
     return {"chats": out}
 
 
-def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None, chat_id=None):
-    """Open a fix chat: save the uploads, start a fresh agent session, return {chat_id, reply, files}.
-    The panel generates chat_id up front (so the URL + Close work immediately); we validate it."""
-    import agent as A
+def _open_dir(program, files, verify_res, base, model, chat_id):
+    """Create the work dir + meta. Shared by start() (sync, selftest) and start_async() (HTTP)."""
     cid = chat_id if _chat_id_ok(chat_id) else str(uuid.uuid4())
     root = _dir(base, program, cid)
     os.makedirs(root, exist_ok=True)
     os.chmod(root, 0o700)
     saved, rejected = _save_files(files, root)
-    task = _task_start(root, finding, verify_res)
-    r = A.run_agent(task, context=None, model=model, timeout=MSG_TIMEOUT, attempts=1)
+    meta = {"chat_id": cid, "program": _slug(program), "session_id": None,
+            "model": model, "created": time.time(),
+            "verdict": (verify_res or {}).get("verdict")}
+    _save_meta(root, meta)
+    return cid, root, meta, saved, rejected
+
+
+def _finish_turn(root, r):
+    role, text = _agent_bubble(r)
+    if os.path.isdir(root):
+        _append_log(root, role, text)
+    return role, text
+
+
+def start(program, finding, files, verify_res, base=DEFAULT_BASE, model=None, chat_id=None):
+    """Open a fix chat (synchronous — used by selftest / CLI). HTTP uses start_async so :8899 stays live."""
+    cid, root, meta, saved, rejected = _open_dir(program, files, verify_res, base, model, chat_id)
+    r = _run_turn_recover(root, _task_start(root, finding, verify_res), meta, MSG_TIMEOUT)
     if not os.path.isdir(root):
         return {"chat_id": cid, "reply": "", "error": "chat was closed while opening",
                 "files": [], "saved": saved, "rejected": rejected, "closed_mid_open": True}
-    meta = {"chat_id": cid, "program": _slug(program), "session_id": r.get("session_id"),
-            "model": r.get("model"), "created": time.time(),
-            "verdict": (verify_res or {}).get("verdict")}
-    try:
-        json.dump(meta, open(_meta_path(root), "w"))
-        os.chmod(_meta_path(root), 0o600)
-    except OSError:
-        pass
-    _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
-    return {"chat_id": cid, "reply": r.get("result") or r.get("error") or "(no reply)",
-            "error": r.get("error"), "files": _listing(root),
-            "saved": saved, "rejected": rejected}
+    role, text = _finish_turn(root, r)
+    return {"chat_id": cid, "reply": text, "error": None if role == "agent" else r.get("error"),
+            "files": _listing(root), "saved": saved, "rejected": rejected}
+
+
+def start_async(program, finding, files, verify_res, base=DEFAULT_BASE, model=None, chat_id=None):
+    """Open a fix chat without holding the HTTP request (nginx /panel/api/verify times out at 650s;
+    a first-turn agent run can take MSG_TIMEOUT). Panel polls status() until busy clears."""
+    cid, root, meta, saved, rejected = _open_dir(program, files, verify_res, base, model, chat_id)
+    task = _task_start(root, finding, verify_res)
+    _touch_busy(root)
+
+    def _run():
+        try:
+            m = _load_meta(root) or meta
+            r = _run_turn_recover(root, task, m, MSG_TIMEOUT)
+            _finish_turn(root, r)
+        except Exception as e:  # noqa: BLE001
+            if os.path.isdir(root):
+                _append_log(root, "system",
+                            f"Agent error ({type(e).__name__}: {e}). This chat is still open — send again.")
+        finally:
+            _clear_busy(root)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"chat_id": cid, "queued": True, "busy": True, "reply": "",
+            "files": _listing(root), "saved": saved, "rejected": rejected}
 
 
 def message(cid, text, base=DEFAULT_BASE, program=None):
     """Send a follow-up: resumes the SAME agent session so it remembers the report + prior edits."""
-    import agent as A
     root = _find_root(cid, base)
     if not root:
         return {"error": "chat not found (closed or expired)"}
     meta = _load_meta(root) or {}
+    _append_log(root, "you", text)
     task = (str(text or "")[:8000] +
             f"\n\n(Reminder: the files are in {root} — edit them in place, this directory only. "
             "Reply with a short summary of changes.)")
-    r = A.run_agent(task, context=None, resume_id=meta.get("session_id"),
-                    model=meta.get("model"), timeout=MSG_TIMEOUT, attempts=1)
+    r = _run_turn_recover(root, task, meta, MSG_TIMEOUT)
     if not os.path.isdir(root):
         return {"reply": "", "error": "chat was closed", "files": [], "closed_mid_run": True}
-    if r.get("session_id"):
-        meta["session_id"] = r["session_id"]
-        try:
-            json.dump(meta, open(_meta_path(root), "w"))
-        except OSError:
-            pass
-    _append_log(root, "you", text)
-    _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
-    return {"reply": r.get("result") or r.get("error") or "(no reply)", "error": r.get("error"),
+    role, text_out = _finish_turn(root, r)
+    return {"reply": text_out, "error": None if role == "agent" else r.get("error"),
             "files": _listing(root)}
-
-
-def _busy_path(root):
-    return os.path.join(root, ".busy")
 
 
 def clear_stale_busy(base=DEFAULT_BASE):
@@ -287,11 +429,29 @@ def clear_stale_busy(base=DEFAULT_BASE):
     return n
 
 
+def _spawn_turn(root, task):
+    """Run one agent turn in a daemon thread. HTTP handlers must return before this starts working."""
+    _touch_busy(root)
+
+    def _run():
+        try:
+            meta = _load_meta(root) or {}
+            r = _run_turn_recover(root, task, meta, MSG_TIMEOUT)
+            _finish_turn(root, r)
+        except Exception as e:  # noqa: BLE001
+            if os.path.isdir(root):
+                _append_log(root, "system",
+                            f"Agent error ({type(e).__name__}: {e}). This chat is still open — send again.")
+        finally:
+            _clear_busy(root)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def message_async(cid, text, base=DEFAULT_BASE):
     """Queue a follow-up and run the agent in the BACKGROUND. Agent edits (esp. active reproduction — making
     accounts, re-running the PoC) take minutes, so we must NOT hold the HTTP request open past a proxy/client
     timeout (the cause of 'error: timeout'). The panel polls status() until 'busy' clears. Returns at once."""
-    import threading
     root = _find_root(cid, base)
     if not root:
         return {"error": "chat not found (closed or expired)"}
@@ -301,40 +461,45 @@ def message_async(cid, text, base=DEFAULT_BASE):
             age = time.time() - float(open(bp).read() or 0)
         except Exception:  # noqa: BLE001
             age = 0
-        if age < MSG_TIMEOUT + 120:
+        if age < BUSY_GRACE:
             return {"queued": False, "busy": True, "note": "agent is still working on the previous message"}
     _append_log(root, "you", str(text or "")[:8000])
-    try:
-        open(bp, "w").write(str(time.time()))
-    except OSError:
-        pass
-
-    def _run():
-        import agent as A
-        meta = _load_meta(root) or {}
-        task = (str(text or "")[:8000] +
-                f"\n\n(Reminder: the files are in {root} — edit them in place, this directory only. "
-                "Reply with a short summary of changes.)")
-        try:
-            r = A.run_agent(task, context=None, resume_id=meta.get("session_id"),
-                            model=meta.get("model"), timeout=MSG_TIMEOUT, attempts=1)
-        except Exception as e:  # noqa: BLE001
-            r = {"error": str(e)[:200]}
-        if os.path.isdir(root):
-            if r.get("session_id"):
-                meta["session_id"] = r["session_id"]
-                try:
-                    json.dump(meta, open(_meta_path(root), "w"))
-                except OSError:
-                    pass
-            _append_log(root, "agent", r.get("result") or r.get("error") or "(no reply)")
-        try:
-            os.remove(bp)
-        except OSError:
-            pass
-
-    threading.Thread(target=_run, daemon=True).start()
+    task = (str(text or "")[:8000] +
+            f"\n\n(Reminder: the files are in {root} — edit them in place, this directory only. "
+            "Reply with a short summary of changes.)")
+    _spawn_turn(root, task)
     return {"queued": True, "busy": True, "chat_id": cid}
+
+
+def resume_orphans(base=DEFAULT_BASE):
+    """Re-queue chats whose last log line is the operator (`you`) and that are not busy.
+
+    A nginx 504 / bridge restart kills the daemon thread after the `you` line is written, so the
+    panel shows 'HTTP 504 — try again' and the turn never finishes. Called on bridge startup."""
+    import glob
+    n = 0
+    for d in glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", "*")):
+        if not os.path.isdir(d) or not _chat_id_ok(os.path.basename(d)):
+            continue
+        if os.path.exists(_busy_path(d)):
+            continue
+        try:
+            log = json.load(open(_log_path(d)))
+        except Exception:  # noqa: BLE001
+            continue
+        if not log or (log[-1] or {}).get("role") != "you":
+            continue
+        last = str((log[-1] or {}).get("text") or "").strip()[:8000]
+        if not last:
+            continue
+        _append_log(d, "system",
+                    "Previous turn was cut off (gateway timeout or bridge restart). Resuming the last message.")
+        task = (last +
+                f"\n\n(Reminder: the files are in {d} — edit them in place, this directory only. "
+                "Honor every constraint in the last operator message. Reply with a short summary.)")
+        _spawn_turn(d, task)
+        n += 1
+    return n
 
 
 def read_file(cid, name, base=DEFAULT_BASE):
@@ -399,13 +564,70 @@ def _selftest():
         assert name == "report.md" and data == b"# draft", (name, data)
         assert read_file(cid, "../../etc/passwd", base=base) == (None, None)
         assert read_file(cid, ".fixchat.json", base=base) == (None, None)
+
+        role, text = _agent_bubble({"result": "", "error": "timeout"})
+        assert role == "system" and text.strip().lower() != "timeout" and "time budget" in text.lower(), text
+        role, text = _agent_bubble({"result": "fixed", "error": None})
+        assert role == "agent" and text == "fixed", (role, text)
+
+        root = _find_root(cid, base)
+        _append_log(root, "agent", "timeout")
+        s = status(cid, base=base)
+        assert not any(x.get("role") == "agent" and str(x.get("text") or "").strip().lower() == "timeout"
+                       for x in s["log"]), s["log"][-3:]
+        assert any("time budget" in (x.get("text") or "") for x in s["log"]), s["log"][-3:]
+
+        os.environ["HUNT_MOCK_ERROR"] = "timeout"
+        os.environ["HUNT_MOCK_RESULT"] = ""
+        q = message_async(cid, "keep going", base=base)
+        assert q.get("queued"), q
+        for _ in range(80):
+            s = status(cid, base=base)
+            if not s.get("busy"):
+                break
+            time.sleep(0.05)
+        assert not s.get("busy"), s
+        assert not any(x.get("role") == "agent" and str(x.get("text") or "").strip().lower() == "timeout"
+                       for x in s["log"]), s["log"][-4:]
+        os.environ.pop("HUNT_MOCK_ERROR", None)
+        os.environ["HUNT_MOCK_RESULT"] = "fixed the report"
+
+        r2 = start_async("acme", {"vuln_class": "idor", "url": "https://x"}, files,
+                         {"verdict": "NEEDS_FIXES", "checks": []}, base=base)
+        assert r2.get("queued") and r2.get("busy") and r2.get("chat_id") and r2["chat_id"] != cid, r2
+        for _ in range(80):
+            s2 = status(r2["chat_id"], base=base)
+            if not s2.get("busy"):
+                break
+            time.sleep(0.05)
+        assert not s2.get("busy"), s2
+
+        orphan = start("acme", {"vuln_class": "idor", "url": "https://x"},
+                       [{"name": "report.md", "b64": _b64.b64encode(b"# d").decode()}],
+                       {"verdict": "NEEDS_FIXES", "checks": []}, base=base)
+        ocid = orphan["chat_id"]
+        oroot = _find_root(ocid, base)
+        _append_log(oroot, "you", "finish the impact section")
+        _clear_busy(oroot)
+        assert resume_orphans(base=base) >= 1
+        for _ in range(80):
+            so = status(ocid, base=base)
+            if not so.get("busy"):
+                break
+            time.sleep(0.05)
+        assert not so.get("busy"), so
+        assert any(x.get("role") == "agent" for x in (so.get("log") or [])), so.get("log")
+        close(ocid, base=base)
+
         c = close(cid, base=base)
         assert c["closed"] and c["dir_removed"], c
         assert message(cid, "hi", base=base).get("error"), "closed chat must be gone"
         assert close("not-a-uuid", base=base).get("error")
+        close(r2["chat_id"], base=base)
     finally:
         os.environ.pop("HUNT_MOCK_AGENT", None)
         os.environ.pop("HUNT_MOCK_RESULT", None)
+        os.environ.pop("HUNT_MOCK_ERROR", None)
     print("fixchat.py self-test: PASS")
     return 0
 

@@ -23,9 +23,11 @@ Run (kept alive by pm2 in the harness):
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,12 +40,20 @@ import observe as O      # noqa: E402
 import notify as NO      # noqa: E402
 
 ENGINE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.3"
+VERSION = "1.6"
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 TOKEN = os.environ.get("HUNT_BRIDGE_TOKEN", "")
 MAX_BODY = int(os.environ.get("HUNT_BRIDGE_MAX_BODY", str(2 * 1024 * 1024)))   # 2 MB general request cap
 VERIFY_MAX_BODY = int(os.environ.get("HUNT_VERIFY_MAX_BODY", str(32 * 1024 * 1024)))  # /verify accepts file uploads
-_ACT_CACHE = {}   # /activity is polled ~every 8s and is CPU-heavy on big logs -> short-TTL cache
+
+# Background snapshot so /stats /hunt/status /activity /capabilities NEVER call pm2/ps on the
+# request path. Panel polls every 8s; a cache-miss stampede of `pm2 jlist` + `ps -eo args` filled
+# the accept queue and the site showed "bridge offline" with empty counters.
+_BG = {"hunts": [], "activity": {"events": [], "models": {}},
+       "stats": {"targets": 0, "running": 0, "findings": 0, "alerts": 0},
+       "caps": None, "ts": 0.0, "ok": False}
+_BG_LOCK = threading.Lock()
+_BG_BUSY = threading.Lock()
 
 
 def _now():
@@ -75,56 +85,261 @@ def _pm2(args, timeout=25):
 
 
 def _hunt_running(base):
-    """[{program, pid, running, restarts, wd_restarts, log_age_s}] from pm2 + watchdog state —
-    so hunts survive bridge restarts/crashes and stuck-revivals are visible on the panel."""
-    import json as _j
-    import os as _o
-    import time as _t
-    r = _pm2(["jlist"])
-    if not r or not r.stdout:
-        return []
-    try:
-        procs = _j.loads(r.stdout)
-    except Exception:
-        return []
-    try:
-        wd = (_j.load(open(_o.path.join(base, "_watchdog.json"))) or {}).get("revived", {}) or {}
-    except Exception:  # noqa: BLE001
-        wd = {}
-    # same markers as scripts/watchdog.py: last log line = between rounds (sleeping), not stuck
-    idle = ("orchestrator done", "orchestrator:", "persist:", "draft-gate:", "=== persist round")
+    """Request-path: last background snapshot. Never blocks on pm2."""
+    with _BG_LOCK:
+        return list(_BG.get("hunts") or [])
+
+
+def _hunts_from_pidfiles(base):
+    """Instant running-hunt list from ~/.pm2/pids — no pm2 jlist (that call wedges under load)."""
+    import glob as _g
     out = []
-    for pr in procs:
-        name = pr.get("name", "")
-        if name.startswith("hunt-") and name not in ("hunt-bridge", "hunt-watchdog"):
-            env = pr.get("pm2_env", {}) or {}
-            slug = name[5:]
-            age, sleeping = None, False
-            interval_m = 180                                      # default 3h if not in args
-            try:
-                args = env.get("args") or []
-                if isinstance(args, str):
-                    args = args.split()
-                interval_m = max(0, int(args[-1]) // 60) if args and str(args[-1]).isdigit() else 180
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                logf = _o.path.join(base, slug, "engine.log")
-                age = int(_t.time() - _o.path.getmtime(logf))
-                with open(logf, "rb") as fh:                     # last line only, no full read
-                    fh.seek(0, 2)
-                    size = fh.tell()
-                    fh.seek(max(0, size - 4096))
-                    tail = fh.read().decode("utf-8", "replace").strip().splitlines()
-                last = tail[-1].split("  ", 1)[-1] if tail else ""
-                sleeping = any(last.startswith(m) for m in idle)
-            except OSError:
-                pass
-            out.append({"program": slug, "pid": pr.get("pid"),
-                        "running": env.get("status") == "online", "restarts": env.get("restart_time", 0),
-                        "wd_restarts": wd.get(name, 0), "log_age_s": age, "sleeping": sleeping,
-                        "interval_m": interval_m})
+    for pf in _g.glob(os.path.expanduser("~/.pm2/pids/hunt-*.pid")):
+        bn = os.path.basename(pf)
+        m = re.match(r"(hunt-.+)-\d+\.pid$", bn)
+        if not m:
+            continue
+        name = m.group(1)
+        if name in ("hunt-bridge", "hunt-watchdog"):
+            continue
+        slug = name[5:]
+        try:
+            pid = int((open(pf).read() or "0").strip() or 0)
+        except (OSError, ValueError):
+            pid = 0
+        running = bool(pid and os.path.exists(f"/proc/{pid}"))
+        age, sleeping, interval_m = None, False, 180
+        logf = os.path.join(os.path.expanduser(base), slug, "engine.log")
+        idle = ("orchestrator done", "orchestrator:", "persist:", "draft-gate:", "=== persist round")
+        try:
+            age = int(time.time() - os.path.getmtime(logf))
+            tail = _tail_bytes(logf, 4096).strip().splitlines()
+            last = tail[-1].split("  ", 1)[-1] if tail else ""
+            sleeping = any(last.startswith(x) for x in idle)
+        except OSError:
+            pass
+        wd = 0
+        try:
+            wd = ((json.load(open(os.path.join(os.path.expanduser(base), "_watchdog.json"))) or {})
+                  .get("revived") or {}).get(name, 0)
+        except Exception:  # noqa: BLE001
+            pass
+        out.append({"program": slug, "pid": pid or None, "running": running, "restarts": 0,
+                    "wd_restarts": wd, "log_age_s": age, "sleeping": sleeping,
+                    "interval_m": interval_m})
     return out
+
+
+def _hunt_running_compute(base):
+    """Panel hunt list. Pid-files only — `pm2 jlist` is too slow on this box and used to wedge :8899."""
+    found = _hunts_from_pidfiles(base)
+    return found or list(_BG.get("hunts") or [])
+
+
+def _tail_bytes(path, nbytes=524288):
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - nbytes))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _tail_lines(path, n, approx=220):
+    """Last n lines without reading the whole file (superhuman engine.log is multiple MB)."""
+    raw = _tail_bytes(path, max(65536, min(2 * 1024 * 1024, int(n) * int(approx))))
+    lines = raw.splitlines()
+    return lines[-n:] if n < len(lines) else lines
+
+
+# destatic deep hunts log `hunt: deep-pentest URL (analysis-driven) model=…` — the old
+# `class@url model= skills=[…]` regex matched none of the current tails, so the panel
+# showed "no hunt steps yet" even when hunts were running.
+_HUNT_SKILLS = re.compile(
+    r"^(\S+)\s+hunt:\s+([a-z0-9_-]+)@(https?://\S+)\s+model=(\S+)\s+skills=\[([^\]]*)\]")
+_HUNT_DEEP = re.compile(
+    r"^(\S+)\s+hunt:\s+deep-pentest\s+(https?://\S+)\s+\(analysis-driven\)\s+model=(\S+)")
+_HUNT_NOTHING = re.compile(
+    r"^(\S+)\s+hunt:\s+nothing on ([a-z0-9_-]+)@(https?://\S+)")
+_HUNT_TIMEOUT = re.compile(
+    r"^(\S+)\s+hunt:\s+timeout on ([a-z0-9_-]+)@(https?://\S+)\s+\(model ([^)]+)\)")
+_HUNT_ERROR = re.compile(
+    r"^(\S+)\s+hunt:\s+error on ([a-z0-9_-]+)@(https?://\S+)\s+\(([^)]*)\)")
+_HUNT_CAND = re.compile(
+    r"^(\S+)\s+hunt:\s+(?:⚠ )?CANDIDATE ([a-z0-9_-]+) @ (\S+)")
+_VAL_STEP = re.compile(
+    r"^(\S+)\s+validate:\s+([a-z0-9_-]+)@(https?://\S+)\s+model=(\S+)")
+_VAL_CONF = re.compile(
+    r"^(\S+)\s+validate:\s+CONFIRMED (\S+) @ (\S+) \((\w+)\)")
+
+
+def _activity_event(line, program):
+    m = _HUNT_SKILLS.search(line)
+    if m:
+        ts, cls, url, model, sk = m.groups()
+        return {"ts": ts, "program": program, "phase": "hunt", "class": cls, "url": url,
+                "model": model, "skills": [s for s in sk.split(",") if s]}
+    m = _HUNT_DEEP.search(line)
+    if m:
+        ts, url, model = m.groups()
+        return {"ts": ts, "program": program, "phase": "hunt", "class": "deep", "url": url,
+                "model": model, "skills": ["hunt-hypothesis"]}
+    m = _HUNT_TIMEOUT.search(line)
+    if m:
+        ts, cls, url, model = m.groups()
+        return {"ts": ts, "program": program, "phase": "hunt", "class": cls, "url": url,
+                "model": model.strip(), "skills": []}
+    m = _HUNT_ERROR.search(line)
+    if m:
+        ts, cls, url, err = m.groups()
+        return {"ts": ts, "program": program, "phase": "hunt", "class": cls, "url": url,
+                "model": "", "skills": [], "error": err}
+    m = _HUNT_NOTHING.search(line)
+    if m:
+        ts, cls, url = m.groups()
+        return {"ts": ts, "program": program, "phase": "hunt", "class": cls, "url": url,
+                "model": "", "skills": []}
+    m = _HUNT_CAND.search(line)
+    if m:
+        ts, cls, url = m.groups()
+        return {"ts": ts, "program": program, "phase": "hunt", "class": cls, "url": url,
+                "model": "", "skills": []}
+    m = _VAL_CONF.search(line)
+    if m:
+        ts, cls, url, sev = m.groups()
+        return {"ts": ts, "program": program, "phase": "confirmed", "class": cls, "url": url,
+                "model": "", "skills": [], "severity": sev}
+    m = _VAL_STEP.search(line)
+    if m:
+        ts, cls, url, model = m.groups()
+        return {"ts": ts, "program": program, "phase": "validate", "class": cls, "url": url,
+                "model": model, "skills": []}
+    return None
+
+
+def _activity_compute(base, n=200, program=""):
+    import glob as _glob
+    base = os.path.expanduser(base)
+    if program:
+        import targets as T
+        logs = [os.path.join(base, T._slug(program), "engine.log")]
+    else:
+        logs = _glob.glob(os.path.join(base, "*", "engine.log"))
+    events, models = [], {}
+    for lg in logs:
+        if not os.path.isfile(lg):
+            continue
+        pn = os.path.basename(os.path.dirname(lg))
+        for line in _tail_bytes(lg, 524288).splitlines():
+            ev = _activity_event(line, pn)
+            if not ev:
+                continue
+            events.append(ev)
+            m = ev.get("model") or ""
+            if m and m != "pool":
+                models[m] = models.get(m, 0) + 1
+            elif m == "pool":
+                models[m] = models.get(m, 0) + 1
+    events.sort(key=lambda e: e["ts"], reverse=True)
+    return {"events": events[:n], "models": models}
+
+
+def _stats_compute(base, hunts):
+    import targets as T
+    wd = os.environ.get("HUNT_WEB_DIR")
+    nf = 0
+    if wd and os.path.isdir(wd):
+        try:
+            nf = len([f for f in os.listdir(wd) if f.startswith("finding-") and f.endswith(".html")])
+        except OSError:
+            nf = 0
+    ap = os.path.join(os.path.expanduser(base), "_alerts", "feed.jsonl")
+    na = 0
+    if os.path.isfile(ap):
+        try:
+            na = sum(1 for _ in open(ap, errors="ignore"))
+        except OSError:
+            na = 0
+    return {"targets": len(T.all_targets(base)),
+            "running": len([h for h in hunts if h.get("running")]),
+            "findings": nf, "alerts": na}
+
+
+def _agent_count():
+    """How many cursor-agent --resume processes are alive. Reads /proc cmdline; never `ps -eo args`
+    (that dump is multi-MB here because hunt prompts embed cookies, and it was stalling /health)."""
+    import glob as _g
+    n = 0
+    for cmd in _g.glob("/proc/[0-9]*/cmdline"):
+        try:
+            raw = open(cmd, "rb").read()
+        except OSError:
+            continue
+        if b"cursor-agent" in raw and b"--resume" in raw:
+            n += 1
+    return n
+
+
+def _caps_compute(base):
+    import sms as _SMS
+    import learn as _L
+    import guardrails as _G
+    with _BG_LOCK:
+        running = [h for h in (_BG.get("hunts") or []) if h.get("running")]
+    return {
+        "sessions": {"chats_on_disk": 0, "transcripts_on_disk": 0, "orphaned": 0,
+                     "orphaned_chats": 0, "pool_dead_ids": 0, "pool_corrupt": 0,
+                     "pool_per_target": int(os.environ.get("HUNT_SESSION_POOL", "3")),
+                     "max_uses": int(os.environ.get("HUNT_SESSION_MAX_USES", "25")),
+                     "agents_running": _agent_count(),
+                     "pooled_in_use": 0,
+                     "targets_running": len(running)},
+        "websearch": {"ready": True, "provider": "duckduckgo-html"},
+        "identity": {"ready": True, "provider": "mail.tm", "max_accounts": _G.max_accounts()},
+        "sms": _SMS.status(),
+        "learn": {"learned_skills": len(_L.learned_index()),
+                  "gaps": len(_L.gaps(base)), "journal": len(_L.journal(base))},
+        "guardrails": {"no_bruteforce": True, "scope_enforced": True,
+                       "max_accounts_per_program": _G.max_accounts()}}
+
+
+def _bg_refresh_once(base, with_caps=True):
+    if not _BG_BUSY.acquire(blocking=False):
+        return
+    try:
+        hunts = _hunt_running_compute(base)
+        with _BG_LOCK:
+            _BG["hunts"] = hunts
+        act = _activity_compute(base, n=200)
+        stats = _stats_compute(base, hunts)
+        caps = None
+        if with_caps:
+            try:
+                caps = _caps_compute(base)
+            except Exception as e:  # noqa: BLE001
+                print(f"hunt-bridge: caps refresh failed: {type(e).__name__}: {e}", flush=True)
+        with _BG_LOCK:
+            _BG["hunts"] = hunts
+            _BG["activity"] = act
+            _BG["stats"] = stats
+            if caps is not None:
+                _BG["caps"] = caps
+            _BG["ts"] = time.time()
+            _BG["ok"] = True
+    except Exception as e:  # noqa: BLE001
+        print(f"hunt-bridge: background refresh failed: {type(e).__name__}: {e}", flush=True)
+    finally:
+        _BG_BUSY.release()
+
+
+def _bg_loop(base):
+    n = 0
+    while True:
+        n += 1
+        _bg_refresh_once(base, with_caps=(n % 3 == 0))  # skip the first tick; ps/pm2 stay off the hot path
+        time.sleep(8)
 
 
 def _descendants(pid):
@@ -325,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
                 for path in (os.path.join(os.path.expanduser(self.base), slug, "engine.log"),
                              os.path.join(os.path.expanduser(self.base), f"hunt-{slug}.log")):
                     if os.path.isfile(path):
-                        lines = open(path, encoding="utf-8", errors="ignore").read().splitlines()
+                        lines = _tail_lines(path, n)
                         break
                 return self._send(200, {"program": slug, "lines": lines[-n:]})
             if p.path == "/findings/list":
@@ -345,101 +560,31 @@ class Handler(BaseHTTPRequestHandler):
                 out.sort(key=lambda x: -x["mtime"])
                 return self._send(200, {"findings": out})
             if p.path == "/stats":
-                import targets as T
-                wd = os.environ.get("HUNT_WEB_DIR")
-                nf = len([f for f in os.listdir(wd) if f.startswith("finding-") and f.endswith(".html")]) \
-                    if wd and os.path.isdir(wd) else 0
-                ap = os.path.join(os.path.expanduser(self.base), "_alerts", "feed.jsonl")
-                na = sum(1 for _ in open(ap, errors="ignore")) if os.path.isfile(ap) else 0
-                return self._send(200, {"targets": len(T.all_targets(self.base)),
-                                        "running": len([h for h in _hunt_running(self.base) if h["running"]]),
-                                        "findings": nf, "alerts": na})
+                with _BG_LOCK:
+                    s = dict(_BG.get("stats") or {})
+                return self._send(200, s or {"targets": 0, "running": 0, "findings": 0, "alerts": 0})
             if p.path == "/activity":
-                import re
-                import glob as _glob
                 q = parse_qs(p.query)
                 try:
                     n = max(1, min(400, int((q.get("n", ["80"])[0]) or 80)))
                 except (ValueError, TypeError):
                     n = 80
-                prog = q.get("program", [""])[0]
-                _ck = (prog, n); _tnow = datetime.now(timezone.utc).timestamp()
-                _cc = _ACT_CACHE.get(_ck)
-                if _cc and _tnow - _cc[0] < 15:
-                    return self._send(200, _cc[1])
+                prog = (q.get("program", [""])[0] or "").strip()
+                with _BG_LOCK:
+                    payload = dict(_BG.get("activity") or {"events": [], "models": {}})
+                events = list(payload.get("events") or [])
                 if prog:
-                    import targets as T
-                    logs = [os.path.join(os.path.expanduser(self.base), T._slug(prog), "engine.log")]
-                else:
-                    logs = _glob.glob(os.path.join(os.path.expanduser(self.base), "*", "engine.log"))
-                HUNT = re.compile(r"(\S+)\s+hunt: ([a-z0-9-]+)@(\S+) model=(\S+) skills=\[([^\]]*)\]")
-                VAL = re.compile(r"(\S+)\s+validate: ([a-z0-9-]+)@(\S+) model=(\S+)")
-                CONF = re.compile(r"(\S+)\s+validate: CONFIRMED (\S+) @ (\S+) \((\w+)\)")
-                events, models = [], {}
-                for lg in logs:
-                    if not os.path.isfile(lg):
-                        continue
-                    pn = os.path.basename(os.path.dirname(lg))
-                    try:                                  # tail only — recent events are at the end; keeps /activity fast as logs grow
-                        with open(lg, "rb") as _fh:
-                            _fh.seek(0, 2); _sz = _fh.tell(); _fh.seek(max(0, _sz - 131072))
-                            _lines = _fh.read().decode("utf-8", "ignore").splitlines()
-                    except OSError:
-                        continue
-                    for line in _lines:
-                        m = HUNT.search(line)
-                        if m:
-                            ts, cls, url, model, sk = m.groups()
-                            events.append({"ts": ts, "program": pn, "phase": "hunt", "class": cls, "url": url,
-                                           "model": model, "skills": [s for s in sk.split(",") if s]})
-                            models[model] = models.get(model, 0) + 1
-                            continue
-                        m = VAL.search(line)
-                        if m:
-                            ts, cls, url, model = m.groups()
-                            events.append({"ts": ts, "program": pn, "phase": "validate", "class": cls,
-                                           "url": url, "model": model, "skills": []})
-                            models[model] = models.get(model, 0) + 1
-                            continue
-                        m = CONF.search(line)
-                        if m:
-                            ts, cls, url, sev = m.groups()
-                            events.append({"ts": ts, "program": pn, "phase": "confirmed", "class": cls,
-                                           "url": url, "model": "", "skills": [], "severity": sev})
-                events.sort(key=lambda e: e["ts"], reverse=True)
-                _payload = {"events": events[:n], "models": models}
-                _ACT_CACHE[_ck] = (_tnow, _payload)
-                return self._send(200, _payload)
+                    events = [e for e in events if e.get("program") == prog]
+                return self._send(200, {"events": events[:n], "models": payload.get("models") or {}})
             if p.path == "/capabilities":
-                import sms as _SMS
-                import learn as _L
-                import guardrails as _G
-                import sessions as _SESS
-                _sinv = _SESS.inventory(self.base)
-                _dead = sum(len(h.get("dead", [])) for h in _sinv["pool_health"].values())
-                _corrupt = sum(1 for h in _sinv["pool_health"].values() if h.get("corrupt"))
-                _live = _SESS.live_resume_ids()
-                _running = set(_sinv.get("running") or [])
-                _pooled_n = sum(len(v or []) for k, v in (_sinv.get("pools") or {}).items()
-                                if k in _running and isinstance(v, list))
-                return self._send(200, {
-                    "sessions": {"chats_on_disk": len(_sinv["chats"]),
-                                 "transcripts_on_disk": len(_sinv["transcripts"]),
-                                 "orphaned": len(_sinv["transcript_orphans"]) + len(_sinv["empty_chats"]) + len(_sinv["husks"]),
-                                 "orphaned_chats": len(_sinv["orphans"]),
-                                 "pool_dead_ids": _dead, "pool_corrupt": _corrupt,
-                                 "pool_per_target": int(os.environ.get("HUNT_SESSION_POOL", "3")),
-                                 "max_uses": int(os.environ.get("HUNT_SESSION_MAX_USES", "25")),
-                                 "agents_running": len(_live),
-                                 "pooled_in_use": _pooled_n,
-                                 "targets_running": len(_running)},
-                    "websearch": {"ready": True, "provider": "duckduckgo-html"},
-                    "identity": {"ready": True, "provider": "mail.tm", "max_accounts": _G.max_accounts()},
-                    "sms": _SMS.status(),
-                    "learn": {"learned_skills": len(_L.learned_index()),
-                              "gaps": len(_L.gaps(self.base)), "journal": len(_L.journal(self.base))},
-                    "guardrails": {"no_bruteforce": True, "scope_enforced": True,
-                                   "max_accounts_per_program": _G.max_accounts()}})
+                with _BG_LOCK:
+                    caps = _BG.get("caps")
+                if not caps:
+                    caps = {"sessions": {}, "websearch": {"ready": True, "provider": "duckduckgo-html"},
+                            "identity": {"ready": True}, "sms": {"enabled": False},
+                            "learn": {"learned_skills": 0, "gaps": 0, "journal": 0},
+                            "guardrails": {"no_bruteforce": True, "scope_enforced": True}}
+                return self._send(200, caps)
             if p.path == "/learn/journal":
                 import learn as _L
                 try:
@@ -635,9 +780,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if p.path == "/verify/fixchat/start":
                 import fixchat as FC
-                r = FC.start(b.get("program") or (b.get("finding") or {}).get("program"),
-                             b.get("finding") or {}, b.get("files") or [],
-                             b.get("verify") or {}, base=self.base, chat_id=b.get("chat_id"))
+                r = FC.start_async(b.get("program") or (b.get("finding") or {}).get("program"),
+                                   b.get("finding") or {}, b.get("files") or [],
+                                   b.get("verify") or {}, base=self.base, chat_id=b.get("chat_id"))
                 return self._send(200, r)
 
             if p.path == "/verify/fixchat/message":
@@ -812,6 +957,8 @@ class _QuietThreadingHTTPServer(ThreadingHTTPServer):
     restart/shutdown never hangs on an in-flight request."""
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128
+    block_on_close = False
 
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
@@ -837,8 +984,20 @@ def main(argv=None):
     if not TOKEN:
         print("WARNING: HUNT_BRIDGE_TOKEN is empty — the bridge will refuse all authed requests "
               "until it is set.", file=sys.stderr)
+    threading.Thread(target=_bg_loop, args=(a.base,), daemon=True).start()
     srv = _QuietThreadingHTTPServer((a.host, a.port), Handler)
     print(f"hunt-bridge {VERSION} listening on http://{a.host}:{a.port} (base={a.base})", flush=True)
+
+    def _resume_later():
+        time.sleep(1)
+        try:
+            import fixchat as _FC2
+            _r = _FC2.resume_orphans(base=a.base)
+            if _r:
+                print(f"hunt-bridge: resumed {_r} fix-chat(s) cut off mid-turn", flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_resume_later, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

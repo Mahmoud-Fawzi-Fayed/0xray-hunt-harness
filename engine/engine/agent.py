@@ -96,15 +96,31 @@ def _run_once(cmd, m, timeout):
     try:
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # SIGTERM first so cursor-agent can flush a result / session_id; SIGKILL only if it won't die.
         try:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)    # kill the whole group, not just the parent
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        stdout, stderr = "", ""
         try:
-            p.communicate(timeout=5)
-        except Exception:  # noqa: BLE001
-            pass
-        return {"result": "", "error": "timeout", "model": m, "duration_s": round(time.time() - t0, 1)}
+            stdout, stderr = p.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                stdout, stderr = p.communicate(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+        data = _parse_result_json(stdout)
+        if data and not data.get("is_error") and (data.get("result") or data.get("text")):
+            return {"result": data.get("result") or data.get("text") or "", "error": None,
+                    "model": data.get("model") or m, "session_id": data.get("session_id"),
+                    "usage": data.get("usage"), "duration_s": round(time.time() - t0, 1)}
+        sid = data.get("session_id") if isinstance(data, dict) else None
+        return {"result": "", "error": "timeout", "model": m, "session_id": sid,
+                "duration_s": round(time.time() - t0, 1)}
     dur = round(time.time() - t0, 1)
     data = _parse_result_json(stdout)
     if not data:
@@ -365,9 +381,10 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
     Returns {result, error, model, session_id, reused, ...}."""
     if os.environ.get("HUNT_MOCK_AGENT") == "1":
         m = _enforce_pool(model or _pick_model())
+        err = (os.environ.get("HUNT_MOCK_ERROR") or "").strip() or None
         return {"result": os.environ.get("HUNT_MOCK_RESULT", "```json\n[]\n```"),
-                "error": None, "model": m or "mock", "duration_s": 0.0, "reused": False,
-                "session_id": resume_id}
+                "error": err, "model": m or "mock", "duration_s": 0.0, "reused": bool(resume_id),
+                "session_id": resume_id or "mock-session"}
 
     if resume_id:                           # explicit resume (fix-chat): bypass the pool entirely
         m = _enforce_pool(model or _pick_model())

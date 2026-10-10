@@ -175,17 +175,23 @@ class Engagement:
         window), oldest-tested first. Without untested-first ordering a deep target re-hunts its
         top-priority slice forever and never reaches the long tail (e.g. paysafe stuck at 181/4606)."""
         tmap = self._tested_map()
+        notes = self.state.get("hunt_notes") if isinstance(self.state.get("hunt_notes"), dict) else {}
         now = time.time()
         ttl = RETEST_HOURS * 3600
         ranked = []                                # (group, -eff_priority, last_tested): sorts untested first
         for s in self.state["surface"]:
             k = self._key(s)
             ep = -self._eff_priority(s)
-            if k not in tmap:
+            last = tmap.get(k)
+            if last is None and k in notes:
+                # A hunt_note is coverage. Relogin used to wipe `tested` and re-queue the same URL.
+                ts = (notes[k] or {}).get("ts") if isinstance(notes[k], dict) else 0
+                last = _as_epoch(ts) or now
+            if last is None:
                 ranked.append((0, ep, 0.0, s))                          # never tested -> cover it first
-            elif ttl > 0 and (now - tmap[k]) >= ttl:
-                ranked.append((1, ep, tmap[k], s))                      # stale -> re-hunt, oldest first
-            # else: tested within the window -> not eligible this pass
+            elif ttl > 0 and (now - last) >= ttl:
+                ranked.append((1, ep, last, s))                         # stale -> re-hunt, oldest first
+            # else: tested / noted within the window -> not eligible this pass
         ranked.sort(key=lambda t: (t[0], t[1], t[2]))
         return [t[3] for t in ranked]
 
@@ -295,6 +301,10 @@ def _selftest():
         kept = e3.worklist()[0]
         e3.note_hunt(kept, "static uuid file, no authz object", ["idor"])
         assert "static uuid" in e3.hunt_note(kept)["analysis"]
+        kept_key = e3._key(kept)
+        e3.state["tested"] = {}
+        e3.save()
+        assert all(e3._key(s) != kept_key for s in e3.worklist()), "a hunt_note is coverage — do not re-queue"
         e.mark_rejected({"url": "http://t/a", "vuln_class": "idor"}, "false positive")
         assert "http://t/a|idor" in e.rejected_keys()
         print("state.py self-test: PASS")

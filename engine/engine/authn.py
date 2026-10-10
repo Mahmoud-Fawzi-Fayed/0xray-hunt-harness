@@ -72,7 +72,8 @@ def status(slug, base=DEFAULT_BASE):
     return {"configured": bool(d), "identities": sorted(d.keys()) if d else []}
 
 
-def save(slug, ident, cookie=None, bearer=None, headers=None, base=DEFAULT_BASE, replace=False):
+def save(slug, ident, cookie=None, bearer=None, headers=None, base=DEFAULT_BASE, replace=False,
+         host=None):
     p = path_for(slug, base)
     d = load(slug, base)
     entry = {} if replace else dict(d.get(ident, {}) or {})
@@ -91,6 +92,8 @@ def save(slug, ident, cookie=None, bearer=None, headers=None, base=DEFAULT_BASE,
             entry.setdefault("headers", {}).update(headers)
     elif replace:
         entry.pop("headers", None)
+    if host:
+        entry["host"] = str(host)
     d[ident] = entry
     json.dump(d, open(p, "w"), indent=2)
     os.chmod(p, 0o600)

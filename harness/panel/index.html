@@ -454,8 +454,21 @@
 <script>
 const API="/panel/api"; let TAIL=true, CURLOG="", VIEW="overview", LOGPICKED=false;
 const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-async function api(path,method="GET",body=null){const o={method,headers:{}};if(body){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body);}
+async function api(path,method="GET",body=null,ms=12000){const o={method,headers:{},signal:AbortSignal.timeout(ms)};if(body){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body);}
   const r=await fetch(API+path,o);let j={};try{j=await r.json();}catch(e){}if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
+async function fcApi(path,method="GET",body=null){
+  let last=null;
+  for(let i=0;i<8;i++){
+    try{return await api(path,method,body,10000);}
+    catch(e){
+      last=e;
+      const m=String((e&&e.message)||e);
+      if(!/504|502|503|timeout|abort|network|Failed to fetch|HTTP 5/i.test(m)) throw e;
+      await new Promise(r=>setTimeout(r,700+i*400));
+    }
+  }
+  throw last;}
+function pingHealth(){fetch(API+"/health",{signal:AbortSignal.timeout(8000)}).then(r=>live(r.ok)).catch(()=>live(false));}
 function msg(id,t,ok){const e=document.getElementById(id);if(e){e.textContent=t;e.className="msg "+(ok?"ok":"err");}}
 // ——— in-page toasts + confirm (no browser alert/confirm popups) ———
 function toast(text,type){const c=document.getElementById("toasts");if(!c){return;}
@@ -546,7 +559,7 @@ async function loadCore(){try{
     return `<tr><td><b>${esc(x.name)}</b></td><td>${(x.in_scope||[]).length}</td><td class="tag">${esc((x.monitor_apexes||[]).slice(0,4).join(", "))}</td>
       <td>${on?`<span class="chip c-run">running</span> <button class="danger sm" onclick="stopHunt('${esc(x.name)}')">Stop</button>`:`<button class="sm" onclick="startHunt('${esc(x.name)}')">Start</button>`}</td>
       <td><button class="ghost sm" onclick="removeTarget('${esc(x.name)}')">Remove</button></td></tr>`;}).join("")||`<tr><td colspan="5" class="empty" style="padding:14px">No targets — add one below.</td></tr>`;
-}catch(e){live(false);}}
+}catch(e){pingHealth();}}
 function modelBars(models,el){const ent=Object.entries(models||{}).sort((a,b)=>b[1]-a[1]);const max=Math.max(1,...ent.map(e=>e[1]));
   el.innerHTML=ent.length?ent.map(([m,c])=>`<div class="mrow"><span class="mono">${esc(m)}</span><span class="n">${c}</span></div><div class="mbar"><i style="width:${Math.round(c/max*100)}%"></i></div>`).join(""):`<div class="empty">no steps yet</div>`;}
 async function loadActivity(){try{const j=await api("/activity?n=120");
@@ -595,7 +608,7 @@ async function loadReview(){try{const j=await api("/review/latest");const el=doc
   const _ts=(j.snapshot&&j.snapshot.ts);let when="";
   if(_ts){const d=new Date(_ts);const mins=Math.max(0,Math.round((Date.now()-d.getTime())/60000));
     const ago=mins<1?"just now":mins<60?mins+"m ago":Math.round(mins/60)+"h ago";
-    when=d.toLocaleString()+" ("+ago+")";}
+    when=d.toISOString().replace("T"," ").replace(/\.\d+Z$/," UTC")+" ("+ago+")";}
   const recs=(r.recommendations||[]).slice(0,6).map(x=>`<div style="padding:6px 0;border-bottom:1px solid #141a25"><b>[${esc(x.where||"?")}·${esc(x.effort||"?")}]</b> ${esc(x.action||"")} <span class="dim">— ${esc(x.why||"")} → ${esc(x.impact||"")}</span></div>`).join("");
   const weak=(r.weaknesses||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");const miss=(r.missing||[]).slice(0,5).map(x=>`<li>${esc(x)}</li>`).join("");
   const appl=(r.applied||[]).map(x=>`<li><b>${esc(x.action)}</b> @ ${esc(x.target)} — ${esc(x.result)}</li>`).join("");
@@ -768,11 +781,31 @@ function mdRender(src){
      .replace(/(<\/(?:ul|ol|div|table|blockquote|pre)>|<hr[^>]*>)\s*(?:<br>)+/g,'$1');
   s=s.replace(/\u0000CB(\d+)\u0000/g,(m,i)=>'<pre class="fc-code">'+cb[+i]+'</pre>');                               // restore code
   return s;}
+function fcDeadReply(t){const s=String(t||"").trim().toLowerCase();return !s||s==="timeout"||s==="rate-limited"||s==="agent-error"||s==="(no reply)";}
+function fcRecoverText(t){const s=String(t||"").trim().toLowerCase();
+  if(s==="timeout")return "The last turn ran past the time budget. This chat is still open and the files were kept — send continue to resume the same session.";
+  if(s==="rate-limited")return "The agent hit a rate limit. This chat is still open — wait a minute and send again.";
+  return "The last turn ended without a reply. This chat is still open — send continue to resume.";}
 function fcLog(role,text,cls){const l=document.getElementById("fc-log");
+  if(role==="agent"&&fcDeadReply(text)){role="system";text=fcRecoverText(text);cls="color:var(--mut)";}
   if(role==="you")l.insertAdjacentHTML("beforeend",`<div class="fc-you">${esc(text)}</div>`);
   else if(role==="agent")l.insertAdjacentHTML("beforeend",`<div class="fc-row"><div class="fc-av">0x</div><div class="fc-md" style="flex:1;min-width:0;padding-top:3px;overflow-wrap:anywhere;word-break:break-word;font-size:13.5px;line-height:1.65;${cls||""}">${mdRender(text)}</div></div>`);
   else l.insertAdjacentHTML("beforeend",`<div class="fc-sys" style="${cls||""}">${esc(text)}</div>`);
   l.scrollTop=l.scrollHeight;}
+function fcLastReply(log){const rows=(log||[]).filter(m=>m.role==="agent"||m.role==="system");
+  return rows.length?rows[rows.length-1]:{role:"system",text:"(no reply)"};}
+async function fcWaitIdle(cid,tick){
+  const t0=Date.now(), maxMs=45*60*1000;
+  return await new Promise((resolve,reject)=>{
+    const iv=setInterval(async()=>{
+      if(FC_ID!==cid){clearInterval(iv);return reject(new Error("chat closed"));}
+      if(Date.now()-t0>maxMs){clearInterval(iv);return reject(new Error("still working — refresh and send continue"));}
+      if(tick)tick();
+      try{const s=await fcApi("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
+        if(!s.busy){clearInterval(iv);resolve(s);}
+      }catch(e){ /* 504/timeout is a dead poll, not a dead chat — keep waiting */ }
+    },3000);
+  });}
 function fcSetReady(ready){const b=document.getElementById("fc-send"),i=document.getElementById("fc-input"),c=document.getElementById("fc-cancel");if(b)b.disabled=false;if(i)i.disabled=false;if(c)c.style.display=FC_OPENING?"inline-block":"none";}
 function fcHash(id){if(id)location.hash="fc="+id;else if(location.hash.startsWith("#fc="))history.replaceState(null,"",location.pathname+location.search);}
 async function fcLoadList(){try{const j=await api("/verify/fixchat/list");const el=document.getElementById("fc-list");const wrap=document.getElementById("fc-wrap");
@@ -807,18 +840,26 @@ async function fcOpen(){if(!VF_LAST){msg("vf-msg","Run Verify first.",false);ret
   try{const req=VF_LAST.req;
     const r=await fetch(API+"/verify/fixchat/start",{method:"POST",headers:{"Content-Type":"application/json"},signal:FC_ABORT.signal,body:JSON.stringify({chat_id:FC_ID,program:req.program,finding:{vuln_class:req.vuln_class,severity:req.severity,url:req.url,title:req.title,steps:req.steps,poc:req.poc,evidence:req.evidence,impact:req.impact},files:req.files||[],verify:VF_LAST.res})});
     const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));
+    if(d.closed_mid_open){clearInterval(FC_TICK);return;}
+    if(d.error&&!d.chat_id){clearInterval(FC_TICK);fcLog("system","could not open the chat: "+d.error+" — click “Open fix chat” again to retry.","color:var(--red)");FC_ID=null;fcHash(null);return;}
+    fcRenderFiles(d.files);
+    let opened=d;
+    if(d.queued||d.busy||!d.reply){
+      const s=await fcWaitIdle(FC_ID,()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.classList.contains("fc-sys")&&l.textContent.includes("Opening fix chat"))l.textContent=`Opening fix chat — the agent is reading your files and the failed checks… (${Math.round((Date.now()-t0)/1000)}s). You can type now — your message sends when it's ready.`;});
+      opened=s;fcRenderFiles(s.files);
+    }
     clearInterval(FC_TICK);
-    if(d.closed_mid_open){return;}                   // user closed while opening — already cleaned up
-    if(d.error&&!d.chat_id){fcLog("system","could not open the chat: "+d.error+" — click “Open fix chat” again to retry.","color:var(--red)");FC_ID=null;fcHash(null);return;}
-    fcRenderFiles(d.files);fcLog("agent",d.reply);
+    const last=fcLastReply(opened.log);if(last&&last.text)fcLog(last.role==="agent"?"agent":"system",last.text,last.role==="agent"?"":"color:var(--mut)");
+    else if(d.reply)fcLog("agent",d.reply);
   }catch(e){clearInterval(FC_TICK);
     if(e.name==="AbortError"){return;}               // cancelled/closed by the user
-    fcLog("system","could not open the chat: "+e.message+" — click “Open fix chat” under the verdict to retry.","color:var(--red)");FC_ID=null;fcHash(null);}
+    if(FC_ID){fcLog("system","status poll failed ("+e.message+") — the chat is still open. Refresh or send continue.","color:var(--amb)");}
+    else{fcLog("system","could not open the chat: "+e.message+" — click “Open fix chat” under the verdict to retry.","color:var(--red)");fcHash(null);}}
   finally{FC_OPENING=false;FC_ABORT=null;fcSetReady(true);
     if(FC_ID&&FC_PENDING){const p=FC_PENDING;FC_PENDING=null;fcSend2(p);}}}
 function fcCancelOpen(){if(FC_ABORT)FC_ABORT.abort();}
 async function fcResume(cid){                       // restore a chat after a page refresh
-  try{const d=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
+  try{const d=await fcApi("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
     FC_ID=cid;const box=document.getElementById("fc-box");box.style.display="block";
     document.getElementById("fc-log").innerHTML="";
     (d.log||[]).forEach(m=>fcLog(m.role==="you"?"you":m.role==="agent"?"agent":"system",m.text,m.role==="agent"?"":"color:var(--mut)"));
@@ -838,25 +879,17 @@ async function fcSend2(t){if(!FC_ID||FC_BUSY)return;
   const t0=Date.now();const cid=FC_ID;
   const tickSys=()=>{const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("agent is working"))l.textContent=`agent is working (may edit files)… (${Math.round((Date.now()-t0)/1000)}s)`;};
   try{
-    const q=await api("/verify/fixchat/message","POST",{chat_id:cid,message:t});   // returns immediately (async)
+    let q;
+    try{q=await fcApi("/verify/fixchat/message","POST",{chat_id:cid,message:t});}
+    catch(e){q={queued:true,busy:true};}             // nginx 504 after the turn already queued — keep polling
     if(q.error)throw new Error(q.error);
     if(q.queued===false&&q.busy){throw new Error(q.note||"agent still busy");}
-    let base=0;try{const s0=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));base=(s0.log||[]).filter(m=>m.role==="agent").length;}catch(e){}
-    const reply=await new Promise((resolve,reject)=>{                              // POLL until the run finishes
-      const iv=setInterval(async()=>{
-        if(FC_ID!==cid){clearInterval(iv);return reject(new Error("chat closed"));}
-        tickSys();
-        try{const s=await api("/verify/fixchat/status?chat_id="+encodeURIComponent(cid));
-          if(!s.busy){clearInterval(iv);
-            (s.files||[]).forEach(x=>{if(FC_MTIMES[x.name]!==undefined&&FC_MTIMES[x.name]!==x.mtime)x._edited=true;});
-            fcRenderFiles(s.files);
-            const ag=(s.log||[]).filter(m=>m.role==="agent");
-            resolve(ag.length?ag[ag.length-1].text:"(no reply)");}
-        }catch(e){clearInterval(iv);reject(e);}
-      },3000);
-    });
+    const s=await fcWaitIdle(cid,tickSys);
+    (s.files||[]).forEach(x=>{if(FC_MTIMES[x.name]!==undefined&&FC_MTIMES[x.name]!==x.mtime)x._edited=true;});
+    fcRenderFiles(s.files);
+    const last=fcLastReply(s.log);
     const sys=document.getElementById("fc-log").lastElementChild;if(sys&&sys.textContent.includes("agent is working"))sys.remove();
-    fcLog("agent",reply);
+    fcLog(last.role==="agent"?"agent":"system",last.text||"(no reply)",last.role==="agent"?"":"color:var(--mut)");
   }catch(e){const sys=document.getElementById("fc-log").lastElementChild;if(sys&&sys.textContent.includes("agent is working"))sys.remove();
     fcLog("system","error: "+e.message+" — try again.","color:var(--red)");}
   finally{FC_BUSY=false;document.getElementById("fc-input").focus();}}
@@ -873,7 +906,7 @@ async function fcClose(){                            // works ALWAYS — even wh
 async function startHunt(p){try{await api("/hunt","POST",{program:p});CURLOG=p;toast("Started hunt: "+p,"ok");setTimeout(refresh,1500);}catch(e){toast(e.message,"warn");loadNotifs();}}
 async function stopHunt(p){try{await api("/hunt/stop","POST",{program:p});toast("Stopped hunt: "+p,"ok");setTimeout(refresh,1000);}catch(e){toast(e.message,"err");}}
 function refresh(){loadCore();loadActivity();loadFindings();loadMarks();loadAlerts();loadNotifs();loadReview();if(CURLOG&&TAIL)loadLog();}
-function tick(){loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="overview")loadReview();if(VIEW==="findings"){loadFindings();loadMarks();loadAlerts();}if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
+function tick(){pingHealth();loadCore();loadNotifs();if(VIEW==="activity"||VIEW==="overview")loadActivity();if(VIEW==="overview")loadReview();if(VIEW==="findings"){loadFindings();loadMarks();loadAlerts();}if(VIEW==="capabilities")loadCaps();if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();}
 document.getElementById("pool").textContent="kimi3 · grok4.6 · grok4.7 · fable";
 refresh();setInterval(tick,8000);setInterval(()=>{if(VIEW==="logs"&&CURLOG&&TAIL)loadLog();},5000);
 try{if(localStorage.getItem("fc-side")==="0")fcSide(false);}catch(e){}
