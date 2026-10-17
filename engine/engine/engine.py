@@ -393,16 +393,24 @@ class Engine:
                 import authsession as _AS
                 _sess = _AS.load(self.scope.name, self.base)
                 if not (_AS.valid(_sess) and not _AS.site_rejects(_sess, program=self.scope.name, base=self.base)):
+                    try:
+                        _AS.relogin(self.scope.name, ident="A", base=self.base)
+                        _sess = _AS.load(self.scope.name, self.base)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if not (_AS.valid(_sess) and not _AS.site_rejects(_sess, program=self.scope.name, base=self.base)):
                     self.eng.log("recon: no live session — not mining object ids")
                     return
             except Exception:  # noqa: BLE001
                 pass
+            js_n = self._jsdiff_surface()
             self.eng.log("recon: worklist covered and a session exists — mining logged-in object ids "
                          "instead of another crawl")
             self._profile()
             added = self._mine_session()
             if not added:
                 added = self._hypothesize()
+            added = (added or 0) + (js_n or 0)
             self.eng.state["recon_ts"] = time.time()
             self.eng.save()
             if not added:
@@ -681,6 +689,50 @@ class Engine:
         if items:
             added = self.eng.add_surface(_deepen(items))
             self.eng.log(f"profile: queued {added} flow url(s)")
+
+    def _jsdiff_surface(self):
+        """Turn novelty's new/changed JS bundles into hunt worklist items (SOP: attack the delta)."""
+        diff = self.eng.state.get("last_novelty") if isinstance(self.eng.state.get("last_novelty"), dict) else {}
+        urls = [u for u in (diff.get("new_js") or []) if isinstance(u, str)]
+        for c in diff.get("changed_js") or []:
+            if isinstance(c, dict) and c.get("url"):
+                urls.append(c["url"])
+            elif isinstance(c, str):
+                urls.append(c)
+        seen_u, urls = set(), [u for u in urls if u not in seen_u and not seen_u.add(u)]
+        if not urls:
+            return 0
+        last = float(self.eng.state.get("jsdiff_ts") or 0)
+        if last and (time.time() - last) < 1800:
+            return 0
+        try:
+            import jsdiff as JD
+        except Exception:  # noqa: BLE001
+            return 0
+        from urllib.parse import urljoin, urlparse
+        seed = (self.scope.seeds or [""])[0]
+        origin = ""
+        if seed:
+            p = urlparse(seed)
+            origin = f"{p.scheme}://{p.hostname}" if p.hostname else ""
+        items = []
+        for u in urls[:6]:
+            if u.startswith("http") and not self.scope.in_scope_host(u):
+                continue
+            text = JD._curl(u) if u.startswith("http") else ""
+            if not text:
+                continue
+            extracted = JD.extract(text)
+            for ep in list(extracted.get("endpoints") or [])[:15]:
+                if ep.startswith("/") and origin:
+                    ep = urljoin(origin + "/", ep.lstrip("/"))
+                if isinstance(ep, str) and ep.startswith("http") and self.scope.in_scope_host(ep):
+                    items.append({"url": ep, "vuln_class": "deep", "source": "jsdiff", "priority": 90})
+        self.eng.state["jsdiff_ts"] = time.time()
+        added = self.eng.add_surface(_deepen(items)) if items else 0
+        self.eng.log(f"jsdiff: {added} new endpoint(s) from {len(urls)} bundle(s)")
+        self.eng.save()
+        return added
 
     def _hypothesize(self):
         """When the worklist and the mine are empty, invent the next tests from the live session.
@@ -1346,7 +1398,11 @@ class Engine:
         """A pool model different from `current` — for timeout failover (a stuck model/endpoint often
         clears on another model)."""
         import random
-        pool = [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+        pool = []
+        for key in ("OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
+            pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
+            if pool:
+                break
         alts = [m for m in pool if m and m != current] or pool
         return random.choice(alts) if alts else None
 

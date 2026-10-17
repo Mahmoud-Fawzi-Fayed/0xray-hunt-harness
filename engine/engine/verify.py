@@ -602,7 +602,11 @@ def _pool_models():
         notify._load_env_file()
     except Exception:  # noqa: BLE001
         pass
-    return [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+    for key in ("OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
+        pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
+        if pool:
+            return pool
+    return []
 
 
 def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_models=4):

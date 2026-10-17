@@ -5,8 +5,8 @@ reports PASS / WARN / FAIL per stage, so "is anything broken?" has a one-command
 
 Stages (critical ones fail the run; others warn):
   env          harness .env present + required keys set
-  cursor-agent the Cursor CLI is installed and reachable
-  models       CURSOR_HUNT_MODELS configured  (+ per-model live ping with --ping)
+  runtime      opencode CLI and/or cursor-agent CLI installed and reachable
+  models       OPENCODE_HUNT_MODELS (preferred) or CURSOR_HUNT_MODELS configured  (+ per-model live ping with --ping)
   bridge       /health up + token auth enforced (401 without, 200 with)
   n8n          hunt-n8n container up + HTTP reachable (the novelty monitor runs here)
   web          nginx + panel reachable over TLS (401 = up & auth-gated)
@@ -84,24 +84,49 @@ def _req(method, path, base=BRIDGE, headers=None, data=None, timeout=12):
 def s_env():
     if not os.path.isfile(ENV_FILE):
         return "FAIL", f"missing {ENV_FILE}"
-    need = ["HUNT_BRIDGE_TOKEN", "SMTP_HOST", "SMTP_TO", "CURSOR_HUNT_MODELS", "HUNT_PUBLIC_URL", "HUNT_WEB_DIR"]
+    need = ["HUNT_BRIDGE_TOKEN", "SMTP_HOST", "SMTP_TO", "HUNT_PUBLIC_URL", "HUNT_WEB_DIR"]
     missing = [k for k in need if not _env(k)]
-    return ("FAIL", f"missing keys: {missing}") if missing else ("PASS", f"{len(need)} required keys set")
+    if missing:
+        return "FAIL", f"missing keys: {missing}"
+    pool = _env("OPENCODE_HUNT_MODELS", "") or _env("CURSOR_HUNT_MODELS", "") or _env("HUNT_MODELS", "")
+    if not pool.strip():
+        return "FAIL", "missing keys: ['OPENCODE_HUNT_MODELS|CURSOR_HUNT_MODELS'] (model pool empty)"
+    return "PASS", f"{len(need)+1} required keys set"
+
+
+def s_runtime():
+    oc, cu = None, None
+    try:
+        p = subprocess.run([_env("OPENCODE_BIN", "/root/.opencode/bin/opencode"), "--version"],
+                           capture_output=True, text=True, timeout=20)
+        if p.returncode == 0:
+            oc = (p.stdout.strip() or p.stderr.strip())[:80]
+    except FileNotFoundError:
+        pass
+    try:
+        p = subprocess.run(["cursor-agent", "--version"], capture_output=True, text=True, timeout=20)
+        if p.returncode == 0:
+            cu = (p.stdout.strip() or p.stderr.strip())[:80]
+    except FileNotFoundError:
+        pass
+    if oc and cu:
+        return "PASS", f"opencode {oc} + cursor-agent {cu}"
+    if oc:
+        return "PASS", f"opencode {oc} (cursor-agent absent — opencode-only pool)"
+    if cu:
+        return "PASS", f"cursor-agent {cu} (opencode absent — cursor-only pool)"
+    return "FAIL", "neither opencode nor cursor-agent on PATH"
 
 
 def s_cursor():
-    try:
-        p = subprocess.run(["cursor-agent", "--version"], capture_output=True, text=True, timeout=20)
-        return ("PASS", f"cursor-agent {p.stdout.strip() or p.stderr.strip()}") if p.returncode == 0 \
-            else ("FAIL", f"exit {p.returncode}: {p.stderr[:80]}")
-    except FileNotFoundError:
-        return "FAIL", "cursor-agent not on PATH"
+    # legacy stage name kept for CI compat — now checks either runtime
+    return s_runtime()
 
 
 def s_models(ping):
-    pool = [m.strip() for m in _env("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+    pool = [m.strip() for m in (_env("OPENCODE_HUNT_MODELS", "") or _env("CURSOR_HUNT_MODELS", "") or _env("HUNT_MODELS", "")).split(",") if m.strip()]
     if not pool:
-        return "FAIL", "CURSOR_HUNT_MODELS empty"
+        return "FAIL", "OPENCODE_HUNT_MODELS|CURSOR_HUNT_MODELS empty"
     if not ping:
         return "PASS", f"{len(pool)} models: {', '.join(pool)} (use --ping to live-test each)"
     import agent

@@ -71,7 +71,7 @@ def _load_env_file():
                 continue
             k, v = line.split("=", 1)
             k = k.strip()
-            if (k.startswith(("SMTP_", "HUNT_", "CURSOR_", "WATCHDOG_", "REVIEW_", "BUGHUNTER_"))
+            if (k.startswith(("SMTP_", "HUNT_", "CURSOR_", "OPENCODE_", "WATCHDOG_", "REVIEW_", "BUGHUNTER_"))
                     and k not in os.environ):
                 os.environ[k] = v.strip()
     except OSError:

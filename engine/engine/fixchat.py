@@ -20,6 +20,7 @@ CLI: python3 fixchat.py selftest
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -42,6 +43,15 @@ _TIMEOUT_CONTINUE = (
     "Do NOT restart from scratch. Continue the LAST operator request using files already in this directory. "
     "Honor every constraint the operator already gave. Finish the in-progress work and reply with a short "
     "summary of what is now in the files."
+)
+_REWRITE_FIRST = (
+    "FIRST reply this turn: save the rewritten report file(s) in this directory. "
+    "Do not start a long live-account reproduction until those files exist. "
+    "Title must say unauthenticated (not authenticated user). Summary, steps, impact, and remediation "
+    "must be distinct sections; remediation must not be empty. Do not quote third-party comment bodies "
+    "or emails. Mention public docs only as 'this is systemic'. If an own-doc unique-marker PoC cannot "
+    "be captured in a few minutes, leave TODO(operator) lines for it. STOP at draft. Then reply with a "
+    "short summary of what is now in the files.\n\n"
 )
 _TIMEOUT_USER = (
     "The last turn ran past the time budget and was stopped so this panel stays live. "
@@ -120,7 +130,90 @@ def _busy_path(root):
 
 def _touch_busy(root):
     try:
-        open(_busy_path(root), "w").write(str(time.time()))
+        json.dump({"ts": time.time(), "cid": os.path.basename(root)}, open(_busy_path(root), "w"))
+    except OSError:
+        pass
+
+
+def _busy_age(root):
+    bp = _busy_path(root)
+    if not os.path.isfile(bp):
+        return None
+    try:
+        raw = open(bp).read().strip()
+        if raw.startswith("{"):
+            return max(0.0, time.time() - float((json.loads(raw) or {}).get("ts") or 0))
+        return max(0.0, time.time() - float(raw or 0))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _agent_alive(root):
+    """True when a cursor-agent process is actually running this chat (uuid in argv)."""
+    cid = os.path.basename(root)
+    if not _chat_id_ok(cid):
+        return False
+    try:
+        out = subprocess.run(["pgrep", "-af", "cursor-agent"], capture_output=True, text=True, timeout=5)
+    except Exception:  # noqa: BLE001
+        return False
+    for ln in (out.stdout or "").splitlines():
+        if cid in ln and "pgrep" not in ln:
+            return True
+    return False
+
+
+def _same_you(root, text):
+    try:
+        log = json.load(open(_log_path(root)))
+    except Exception:  # noqa: BLE001
+        return False
+    last = next((m for m in reversed(log or []) if m.get("role") == "you"), None)
+    if not last:
+        return False
+    a = re.sub(r"\s+", " ", str(last.get("text") or "")).strip()
+    b = re.sub(r"\s+", " ", str(text or "")).strip()
+    return bool(a) and a[:4000] == b[:4000]
+
+
+def _pending_path(root):
+    return os.path.join(root, ".pending")
+
+
+def _save_pending(root, text):
+    try:
+        json.dump({"text": str(text or "")[:8000], "ts": time.time()}, open(_pending_path(root), "w"))
+    except OSError:
+        pass
+
+
+def _take_pending(root):
+    pp = _pending_path(root)
+    try:
+        rec = json.load(open(pp))
+        os.remove(pp)
+        return str(rec.get("text") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_HB_PREFIX = "agent is still working (may edit files)"
+
+
+def _heartbeat_log(root, started):
+    elapsed = int(time.time() - started)
+    line = f"{_HB_PREFIX}… {elapsed}s. Do not resend — this chat is live."
+    try:
+        log = json.load(open(_log_path(root)))
+    except Exception:  # noqa: BLE001
+        log = []
+    if log and log[-1].get("role") == "system" and str(log[-1].get("text") or "").startswith(_HB_PREFIX):
+        log[-1] = {"role": "system", "text": line, "ts": time.time()}
+    else:
+        log.append({"role": "system", "text": line, "ts": time.time()})
+    try:
+        json.dump(log[-200:], open(_log_path(root), "w"))
+        os.chmod(_log_path(root), 0o600)
     except OSError:
         pass
 
@@ -146,6 +239,10 @@ def _agent_bubble(r):
         return "system", _RATELIMIT_USER
     if err:
         return "system", f"Agent error ({err}). This chat is still open — send again to resume."
+    low = text.lower()
+    if "connection lost" in low or "reconnect" in low:
+        return "system", ("Cursor dropped the connection. This chat is still open — "
+                          "the next send resumes the same files. Do not resend while the heartbeat is live.")
     return "system", _EMPTY_USER
 
 
@@ -429,9 +526,30 @@ def clear_stale_busy(base=DEFAULT_BASE):
     return n
 
 
+def _follow_task(root, text, rewrite_first=False):
+    body = str(text or "")[:8000]
+    prefix = _REWRITE_FIRST if rewrite_first else ""
+    return (prefix + body +
+            f"\n\n(Reminder: the files are in {root} — edit them in place, this directory only. "
+            "Honor CONSTRAINTS.md if it exists. Reply with a short summary of changes.)")
+
+
 def _spawn_turn(root, task):
     """Run one agent turn in a daemon thread. HTTP handlers must return before this starts working."""
+    started = time.time()
     _touch_busy(root)
+    stop = threading.Event()
+
+    def _beat():
+        last_hb = 0
+        while not stop.wait(15):
+            if not os.path.isdir(root):
+                return
+            _touch_busy(root)
+            now = time.time()
+            if now - last_hb >= 45:
+                _heartbeat_log(root, started)
+                last_hb = now
 
     def _run():
         try:
@@ -443,8 +561,14 @@ def _spawn_turn(root, task):
                 _append_log(root, "system",
                             f"Agent error ({type(e).__name__}: {e}). This chat is still open — send again.")
         finally:
+            stop.set()
             _clear_busy(root)
+            nxt = _take_pending(root)
+            if nxt and os.path.isdir(root):
+                _append_log(root, "you", nxt)
+                _spawn_turn(root, _follow_task(root, nxt, rewrite_first=True))
 
+    threading.Thread(target=_beat, daemon=True).start()
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -455,49 +579,50 @@ def message_async(cid, text, base=DEFAULT_BASE):
     root = _find_root(cid, base)
     if not root:
         return {"error": "chat not found (closed or expired)"}
-    bp = _busy_path(root)
-    if os.path.exists(bp):                               # already running? (ignore a stale marker from a dead run)
-        try:
-            age = time.time() - float(open(bp).read() or 0)
-        except Exception:  # noqa: BLE001
-            age = 0
-        if age < BUSY_GRACE:
-            return {"queued": False, "busy": True, "note": "agent is still working on the previous message"}
+    age = _busy_age(root)
+    alive = _agent_alive(root)
+    if age is not None and (alive or age < 120):
+        if _same_you(root, text):
+            return {"queued": True, "busy": True, "already": True, "chat_id": cid}
+        _save_pending(root, text)
+        return {"queued": True, "busy": True, "pending": True, "chat_id": cid}
+    if age is not None and not alive:
+        _clear_busy(root)
     _append_log(root, "you", str(text or "")[:8000])
-    task = (str(text or "")[:8000] +
-            f"\n\n(Reminder: the files are in {root} — edit them in place, this directory only. "
-            "Reply with a short summary of changes.)")
-    _spawn_turn(root, task)
+    _spawn_turn(root, _follow_task(root, text, rewrite_first=True))
     return {"queued": True, "busy": True, "chat_id": cid}
 
 
 def resume_orphans(base=DEFAULT_BASE):
-    """Re-queue chats whose last log line is the operator (`you`) and that are not busy.
-
-    A nginx 504 / bridge restart kills the daemon thread after the `you` line is written, so the
-    panel shows 'HTTP 504 — try again' and the turn never finishes. Called on bridge startup."""
+    """Re-queue chats whose last operator turn never got a reply (busy marker gone, last you/cutoff)."""
     import glob
     n = 0
     for d in glob.glob(os.path.join(os.path.expanduser(base), "*", "verify-fixchat", "*")):
         if not os.path.isdir(d) or not _chat_id_ok(os.path.basename(d)):
             continue
-        if os.path.exists(_busy_path(d)):
+        if os.path.exists(_busy_path(d)) and (_agent_alive(d) or (_busy_age(d) or 0) < 120):
             continue
+        if os.path.exists(_busy_path(d)) and not _agent_alive(d):
+            _clear_busy(d)
         try:
             log = json.load(open(_log_path(d)))
         except Exception:  # noqa: BLE001
             continue
-        if not log or (log[-1] or {}).get("role") != "you":
+        last = log[-1] if log else {}
+        role = last.get("role")
+        txt = str(last.get("text") or "")
+        you = next((str(m.get("text") or "") for m in reversed(log or []) if m.get("role") == "you"), "")
+        cutoff = role == "system" and any(k in txt.lower() for k in
+                                          ("cut off", "time budget", "still working", "gateway timeout"))
+        if not you.strip():
             continue
-        last = str((log[-1] or {}).get("text") or "").strip()[:8000]
-        if not last:
+        if role not in ("you", "system") or (role == "system" and not cutoff):
+            continue
+        if role == "agent":
             continue
         _append_log(d, "system",
                     "Previous turn was cut off (gateway timeout or bridge restart). Resuming the last message.")
-        task = (last +
-                f"\n\n(Reminder: the files are in {d} — edit them in place, this directory only. "
-                "Honor every constraint in the last operator message. Reply with a short summary.)")
-        _spawn_turn(d, task)
+        _spawn_turn(d, _follow_task(d, you, rewrite_first=True))
         n += 1
     return n
 
@@ -607,6 +732,12 @@ def _selftest():
                        {"verdict": "NEEDS_FIXES", "checks": []}, base=base)
         ocid = orphan["chat_id"]
         oroot = _find_root(ocid, base)
+        _append_log(oroot, "you", "same ping")
+        _touch_busy(oroot)
+        qsame = message_async(ocid, "same ping", base=base)
+        assert qsame.get("already"), qsame
+        qpend = message_async(ocid, "a different follow-up", base=base)
+        assert qpend.get("pending"), qpend
         _append_log(oroot, "you", "finish the impact section")
         _clear_busy(oroot)
         assert resume_orphans(base=base) >= 1

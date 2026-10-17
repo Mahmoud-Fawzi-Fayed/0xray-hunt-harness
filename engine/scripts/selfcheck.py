@@ -179,17 +179,27 @@ case("learn autolearn offline + corrupt journal + hostile input", _learn_junk)
 
 # --------------------------------------------------------------- model-pool enforcement (regression guard)
 def _pool_guard():
+    saved_oc = os.environ.get("OPENCODE_HUNT_MODELS")
     saved = os.environ.get("CURSOR_HUNT_MODELS")
-    os.environ["CURSOR_HUNT_MODELS"] = "m1,m2,m3"
-    os.environ["HUNT_MOCK_AGENT"] = "1"           # observe model selection without calling cursor-agent
+    os.environ["OPENCODE_HUNT_MODELS"] = "opencode/a,openai/b,opencode/c"
+    os.environ.pop("CURSOR_HUNT_MODELS", None)
+    os.environ["HUNT_MOCK_AGENT"] = "1"           # observe model selection without calling any agent CLI
     try:
         # an off-pool pinned model (e.g. a stale default) must be forced back into the approved pool
         for _ in range(6):
-            assert agent.run_agent("x", model="claude-sonnet-4-6")["model"] in ("m1", "m2", "m3")
+            assert agent.run_agent("x", model="claude-sonnet-4-6")["model"] in ("opencode/a", "openai/b", "opencode/c")
         # model=None rotates the pool
-        assert agent.run_agent("x", model=None)["model"] in ("m1", "m2", "m3")
+        assert agent.run_agent("x", model=None)["model"] in ("opencode/a", "openai/b", "opencode/c")
+        # opencode routing: opencode/* + openai/* -> opencode run, legacy -> cursor-agent
+        assert agent._is_opencode_model("opencode/muse-spark-1.3-contributor-free")
+        assert agent._is_opencode_model("openai/gpt-6-astra-fast")
+        assert not agent._is_opencode_model("kimi-k3-max")
     finally:
         os.environ.pop("HUNT_MOCK_AGENT", None)
+        if saved_oc is not None:
+            os.environ["OPENCODE_HUNT_MODELS"] = saved_oc
+        else:
+            os.environ.pop("OPENCODE_HUNT_MODELS", None)
         if saved is not None:
             os.environ["CURSOR_HUNT_MODELS"] = saved
         else:

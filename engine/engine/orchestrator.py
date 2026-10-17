@@ -112,6 +112,16 @@ class Orchestrator:
         diff = N.Novelty(target, base=self.base).watch(obs)
         tag = "baseline" if diff.get("baseline") else ("CHANGES" if diff.get("has_changes") else "no change")
         self.eng.eng.log(f"novelty: {target} -> {tag}; " + " | ".join(N.summarize(diff))[:200])
+        try:
+            self.eng.eng.state["last_novelty"] = {
+                "new_js": list(diff.get("new_js") or [])[:20],
+                "changed_js": list(diff.get("changed_js") or [])[:20],
+                "has_changes": bool(diff.get("has_changes")),
+                "ts": time.time(),
+            }
+            self.eng.eng.save()
+        except Exception:  # noqa: BLE001
+            pass
         return diff
 
     # ---- step 3: draft gate (dedup) -------------------------------------------

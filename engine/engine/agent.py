@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-agent.py — the engine's LLM dispatch, running on CURSOR agents (not claude).
+agent.py — the engine's LLM dispatch for Kimi Code, OpenCode, and Cursor agents.
 
-The actual hunting/validation is driven by the `cursor-agent` CLI in headless mode
-(`cursor-agent -p ... --output-format json -f`), which is logged in on this box. Everything else
-in the engine (scope, state, orchestration, dedup, novelty) is deterministic code. Swapping to Cursor
-means the whole harness — in-chat, headless, pm2, and n8n-triggered — uses one runtime with no
-separate claude login.
+Runtime is selected per model:
+  - aliases in KIMI_HUNT_MODELS or `kimi-code/*` -> `kimi -p ... --output-format stream-json`
+  - `opencode/*`, `openai/*` -> `opencode run -m <model> --format json`
+  - anything else -> `cursor-agent -p ... --output-format json -f` (legacy pool)
+
+Everything else in the engine (scope, state, orchestration, dedup, novelty) is deterministic code.
 
 Agents are asked to end with a fenced ```json``` block which we parse into structured data.
 
-Model: left to Cursor's default unless CURSOR_HUNT_MODEL is set (e.g. "sonnet-4-thinking", "gpt-5").
+Model pool (approved list, round-robin): KIMI_HUNT_MODELS, OPENCODE_HUNT_MODELS, CURSOR_HUNT_MODELS,
+then HUNT_MODELS. One-off override: CURSOR_HUNT_MODEL.
 """
 import json
 import os
@@ -21,20 +23,84 @@ import threading
 import time
 
 ENGINE = os.path.dirname(os.path.abspath(__file__))
+KIMI_BIN = os.environ.get("KIMI_BIN", "kimi")
 CURSOR_BIN = os.environ.get("CURSOR_AGENT_BIN", "cursor-agent")
+OPENCODE_BIN = os.environ.get("OPENCODE_BIN", "/root/.opencode/bin/opencode")
 
 # Model policy: hunt ONLY on this approved pool, rotating per call for diversity (and to dodge a single
-# model's safety-filter stalls). Configured via CURSOR_HUNT_MODELS (comma list) in harness/.env.
+# model's safety-filter stalls). KIMI_HUNT_MODELS wins, then OPENCODE_HUNT_MODELS, then the legacy pools.
 _RR = {"i": 0}
 
 
-def _pick_model():
+def _load_model_env():
     try:
         import notify
-        notify._load_env_file()                 # make CURSOR_HUNT_MODELS* available regardless of caller
-    except Exception:
+        notify._load_env_file()
+    except Exception:  # noqa: BLE001
         pass
-    pool = [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+    if os.environ.get("KIMI_HUNT_MODELS"):
+        return
+    path = os.path.expanduser(os.environ.get("KIMI_HUNT_CONFIG", "~/.kimi-code/hunt-runtime.json"))
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+        models = data.get("models") if isinstance(data, dict) else None
+        if isinstance(models, list):
+            pool = [str(m).strip() for m in models if str(m).strip()]
+            if pool:
+                os.environ["KIMI_HUNT_MODELS"] = ",".join(pool)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _pool_models():
+    """Approved pool: KIMI_HUNT_MODELS > OPENCODE_HUNT_MODELS > CURSOR_HUNT_MODELS > HUNT_MODELS."""
+    _load_model_env()
+    for key in ("KIMI_HUNT_MODELS", "OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
+        pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
+        if pool:
+            return pool
+    return []
+
+
+def _is_kimi_model(m):
+    m = str(m or "")
+    configured = [x.strip() for x in os.environ.get("KIMI_HUNT_MODELS", "").split(",")]
+    return m.startswith("kimi-code/") or m in configured
+
+
+def _is_opencode_model(m):
+    m = str(m or "")
+    return m.startswith("opencode/") or m.startswith("openai/")
+
+
+def _runtime(m=None, resume_id=None):
+    sid = str(resume_id or "")
+    if sid.startswith("session_"):
+        return "kimi"
+    if sid.startswith("ses_"):
+        return "opencode"
+    if resume_id:
+        return "cursor"
+    if _is_kimi_model(m):
+        return "kimi"
+    if _is_opencode_model(m):
+        return "opencode"
+    return "cursor"
+
+
+def _command_runtime(cmd, m=None):
+    binary = os.path.basename(str((cmd or [""])[0]))
+    if binary == os.path.basename(KIMI_BIN):
+        return "kimi"
+    if binary == os.path.basename(OPENCODE_BIN):
+        return "opencode"
+    if binary == os.path.basename(CURSOR_BIN):
+        return "cursor"
+    return _runtime(m)
+
+
+def _pick_model():
+    pool = _pool_models()
     if pool:
         m = pool[_RR["i"] % len(pool)]
         _RR["i"] += 1
@@ -85,18 +151,97 @@ def _parse_result_json(stdout):
 _RETRYABLE = {"parse:no-json", "rate-limited"}
 
 
+def _rate_limited(text):
+    low = str(text or "").lower()
+    return any(k in low for k in ("rate limit", "usage limit", "quota", "too many requests", "429"))
+
+
+def _parse_opencode_json(stdout):
+    """opencode run --format json prints JSONL events: step_start / text* / step_finish / error.
+
+    We concatenate all `text` payloads, sum usage across every step_finish, require a terminal
+    non-tool-call finish, and preserve error events even when text preceded them.
+    """
+    stdout = (stdout or "").strip().lstrip("\ufeff")
+    if not stdout:
+        return None
+    texts, sid, err_text = [], None, None
+    usage = {"input": 0, "output": 0, "reasoning": 0,
+             "cache": {"read": 0, "write": 0}, "total": 0, "cost": 0.0}
+    finish_reason, finishes = None, 0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        part = obj.get("part") or {}
+        if not isinstance(part, dict):
+            part = {}
+        if not sid:
+            sid = obj.get("sessionID") or part.get("sessionID")
+        if obj.get("type") == "text" and isinstance(part.get("text"), str):
+            texts.append(part["text"])
+        elif isinstance(part.get("text"), str) and part.get("type") == "text":
+            texts.append(part["text"])
+        pf = part.get("part") if isinstance(part.get("part"), dict) else None
+        if isinstance(pf, dict) and isinstance(pf.get("text"), str):
+            texts.append(pf["text"])
+        if obj.get("type") in ("step_finish", "step-finish"):
+            finishes += 1
+            finish_reason = part.get("reason") or obj.get("reason")
+            tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            for key in ("input", "output", "reasoning", "total"):
+                usage[key] += int(tokens.get(key) or 0)
+            cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+            usage["cache"]["read"] += int(cache.get("read") or 0)
+            usage["cache"]["write"] += int(cache.get("write") or 0)
+            usage["cost"] = round(usage["cost"] + float(part.get("cost") or obj.get("cost") or 0), 12)
+        if obj.get("type") == "error":
+            e = obj.get("error") or {}
+            if isinstance(e, dict):
+                data = e.get("data") if isinstance(e.get("data"), dict) else {}
+                err_text = data.get("message") or e.get("message") or json.dumps(e)[:500]
+            else:
+                err_text = str(e)[:500]
+    if not texts and not sid and not finishes and not err_text:
+        return None
+    result = "\n".join(texts).strip()
+    complete = bool(finishes and finish_reason not in (None, "tool-calls", "tool_calls"))
+    out = {"result": result, "session_id": sid, "usage": usage,
+           "complete": complete, "finish_reason": finish_reason}
+    if err_text:
+        out.update(is_error=True, error="rate-limited" if _rate_limited(err_text) else "agent-error",
+                   error_message=err_text)
+        if not result:
+            out["result"] = err_text
+    return out
+
+
 def _run_once(cmd, m, timeout):
     t0 = time.time()
+    is_oc = _is_opencode_model(m) or any(str(x).startswith("ses_") for x in (cmd or []))
     try:
-        # own process group so a timeout can kill cursor-agent AND its worker-server children (no orphans)
+        # own process group so a timeout can kill the agent AND its worker children (no orphans)
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     except FileNotFoundError:
-        return {"result": "", "error": f"{CURSOR_BIN} not found (is the Cursor CLI installed?)",
+        bin_name = OPENCODE_BIN if is_oc else CURSOR_BIN
+        return {"result": "", "error": f"{bin_name} not found (is the agent CLI installed?)",
                 "model": m, "duration_s": round(time.time() - t0, 1)}
+
+    def _parse(stdout):
+        if is_oc:
+            return _parse_opencode_json(stdout)
+        return _parse_result_json(stdout)
+
     try:
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        # SIGTERM first so cursor-agent can flush a result / session_id; SIGKILL only if it won't die.
+        # SIGTERM first so the agent can flush a result / session_id; SIGKILL only if it won't die.
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
@@ -113,26 +258,36 @@ def _run_once(cmd, m, timeout):
                 stdout, stderr = p.communicate(timeout=5)
             except Exception:  # noqa: BLE001
                 pass
-        data = _parse_result_json(stdout)
-        if data and not data.get("is_error") and (data.get("result") or data.get("text")):
-            return {"result": data.get("result") or data.get("text") or "", "error": None,
-                    "model": data.get("model") or m, "session_id": data.get("session_id"),
-                    "usage": data.get("usage"), "duration_s": round(time.time() - t0, 1)}
+        data = _parse(stdout)
         sid = data.get("session_id") if isinstance(data, dict) else None
-        return {"result": "", "error": "timeout", "model": m, "session_id": sid,
+        partial = (data.get("result") or data.get("text") or "") if isinstance(data, dict) else ""
+        if not partial:
+            partial = (stdout or stderr or "")[-300:]
+        return {"result": partial, "partial": True, "error": "timeout", "model": m,
+                "session_id": sid, "usage": data.get("usage") if isinstance(data, dict) else None,
                 "duration_s": round(time.time() - t0, 1)}
     dur = round(time.time() - t0, 1)
-    data = _parse_result_json(stdout)
+    data = _parse(stdout)
     if not data:
         tail = (stdout or stderr or "")[-300:]
         return {"result": tail, "error": "parse:no-json", "model": m, "duration_s": dur}
     res = data.get("result") or data.get("text") or ""
-    low = res.lower()
+    if p.returncode not in (0, None):
+        detail = data.get("error_message") or res or (stderr or "")[-300:]
+        error = data.get("error") or ("rate-limited" if _rate_limited(detail) else "agent-error")
+        return {"result": res or detail, "error": error, "model": data.get("model") or m,
+                "session_id": data.get("session_id"), "usage": data.get("usage"), "duration_s": dur}
     if data.get("is_error") or data.get("subtype") == "error":
-        rl = any(k in low for k in ("rate limit", "usage limit", "quota", "too many requests"))
-        return {"result": res, "error": "rate-limited" if rl else "agent-error", "model": m, "duration_s": dur}
-    if any(k in low for k in ("usage limit", "rate limit", "quota exceeded")):
-        return {"result": res, "error": "rate-limited", "model": m, "duration_s": dur}
+        error = data.get("error") or ("rate-limited" if _rate_limited(data.get("error_message") or res)
+                                      else "agent-error")
+        return {"result": res, "error": error, "model": m, "duration_s": dur,
+                "session_id": data.get("session_id"), "usage": data.get("usage")}
+    if is_oc and not data.get("complete"):
+        return {"result": res, "partial": bool(res), "error": "parse:incomplete-jsonl", "model": m,
+                "session_id": data.get("session_id"), "usage": data.get("usage"), "duration_s": dur}
+    if _rate_limited(res):
+        return {"result": res, "error": "rate-limited", "model": m, "duration_s": dur,
+                "session_id": data.get("session_id"), "usage": data.get("usage")}
     return {"result": res, "error": None, "model": data.get("model") or m,
             "session_id": data.get("session_id"), "usage": data.get("usage"), "duration_s": dur}
 
@@ -152,10 +307,15 @@ MAX_SESSION_USES = int(os.environ.get("HUNT_SESSION_MAX_USES", "25"))
 MAX_SESSION_AGE_MIN = int(os.environ.get("HUNT_SESSION_MAX_AGE_MIN", "360"))
 
 
-def _enforce_pool(m):
-    pool = [x.strip() for x in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if x.strip()]
+def _enforce_pool(m, opencode=None):
+    pool = _pool_models()
     if pool and m and m not in pool:        # never use an off-pool model (e.g. a stale default)
-        return _pick_model()
+        candidates = [x for x in pool if opencode is None or _is_opencode_model(x) == opencode]
+        if not candidates:
+            return None
+        picked = candidates[_RR["i"] % len(candidates)]
+        _RR["i"] += 1
+        return picked
     return m
 
 
@@ -272,7 +432,12 @@ def _ids_to_retire(orphans, kept):
 
 def _session_ancient(sid):
     """True when the conversation itself has not moved in MAX_SESSION_AGE_MIN. Directory mtime is
-    not used — opening the store rewrites it."""
+    not used — opening the store rewrites it. OpenCode sessions (ses_*) are server-side: age is
+    enforced by use-count, not disk ts, so they are never 'ancient' here."""
+    if not sid or MAX_SESSION_AGE_MIN <= 0:
+        return False
+    if str(sid).startswith("ses_"):
+        return False                      # opencode: bounded by HUNT_SESSION_MAX_USES instead
     if not sid or MAX_SESSION_AGE_MIN <= 0:
         return False
     try:
@@ -309,11 +474,14 @@ def _retire_all(ids):
 
 
 def _session_alive(sid):
-    """True iff the session id exists on disk in any cursor store. cursor-agent --resume on a DEAD id
-    does NOT error — it silently starts a zero-context session under the same id (the 'lost connection'
-    symptom), so existence-on-disk is the only reliable liveness check before resuming."""
+    """True iff the session id is resumable. Cursor: exists on disk in any cursor store
+    (--resume on a DEAD id silently starts a zero-context session). OpenCode (ses_*):
+    server-side, resume via `opencode run -s <id>` — trust it unless the slot errored
+    (liveness is enforced by use-count + error-drop, not disk presence)."""
     if not sid:
         return False
+    if str(sid).startswith("ses_"):
+        return True                       # opencode session: resumable via -s
     try:
         import sessions as SESS
         return SESS.is_alive(sid)
@@ -333,12 +501,16 @@ def _acquire(context):
         if not slots:                       # first use in this process: seed from the persisted pool
             models = _load_pool_models(context)
             uses = _load_pool_uses(context)
+            approved = _pool_models()
             for sid in _load_pool_ids(context)[:POOL_SIZE]:
                 used = int(uses.get(sid) or 0)
-                if (not _session_alive(sid) or used >= MAX_SESSION_USES or _session_ancient(sid)):
+                stored_model = models.get(sid)
+                if (not _session_alive(sid) or used >= MAX_SESSION_USES or _session_ancient(sid)
+                        or (approved and stored_model not in approved)
+                        or (stored_model and _is_opencode_model(stored_model) != str(sid).startswith("ses_"))):
                     retire.append(sid)      # do not resume a dead, exhausted, or stale chat
                     continue
-                slots.append({"id": sid, "model": models.get(sid), "uses": used, "inuse": False})
+                slots.append({"id": sid, "model": stored_model, "uses": used, "inuse": False})
         for sl in slots:
             if not sl["inuse"]:
                 sl["inuse"] = True
@@ -367,6 +539,23 @@ def session_stats():
 
 
 def _cmd(task, model, resume_id=None):
+    # OpenCode runtime for opencode/* + openai/* models (verified on this box via `opencode run`):
+    #   fresh:  opencode run "<task>" -m <model> --format json
+    #   resume: opencode run "<task>" -s <sid> -m <model> --format json
+    # Cursor runtime for everything else (legacy pool):
+    #   fresh:  cursor-agent -p <task> --output-format json -f [--model m]
+    #   resume: cursor-agent --resume <sid> -p <task> --output-format json -f
+    resume_oc = bool(resume_id and str(resume_id).startswith("ses_"))
+    if resume_id and model and _is_opencode_model(model) != resume_oc:
+        raise ValueError("resume session runtime does not match model runtime")
+    if resume_oc or (not resume_id and model and _is_opencode_model(model)):
+        base = [OPENCODE_BIN, "run", task]
+        if model:
+            base += ["-m", model]
+        base += ["--format", "json"]
+        if resume_id:
+            base += ["-s", resume_id]
+        return base
     if resume_id:
         return [CURSOR_BIN, "--resume", resume_id, "-p", task, "--output-format", "json", "-f"]
     return [CURSOR_BIN, "-p", task, "--output-format", "json", "-f"] + (["--model", model] if model else [])
@@ -374,11 +563,14 @@ def _cmd(task, model, resume_id=None):
 
 def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, timeout=600, attempts=2,
               resume_id=None):
-    """Run a headless Cursor agent, REUSING a pooled session for `context` (far fewer chat sessions, far
+    """Run a headless hunting agent (opencode OR cursor runtime by model prefix),
+    REUSING a pooled session for `context` (far fewer chat sessions, far
     less rate-limiting). A fresh session opens only on first use, error/limit, or after
     HUNT_SESSION_MAX_USES turns. context=None => a one-shot ephemeral session (e.g. provisioning).
     resume_id => one-shot run resuming THAT session (used by the verify fix-chat; no pool involved).
-    Returns {result, error, model, session_id, reused, ...}."""
+    `max_turns` is retained for caller compatibility but neither supported CLI enforces it; timeout is
+    the execution bound. Returns {result, error, model, session_id, reused, ...}."""
+    _load_model_env()
     if os.environ.get("HUNT_MOCK_AGENT") == "1":
         m = _enforce_pool(model or _pick_model())
         err = (os.environ.get("HUNT_MOCK_ERROR") or "").strip() or None
@@ -387,8 +579,17 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
                 "session_id": resume_id or "mock-session"}
 
     if resume_id:                           # explicit resume (fix-chat): bypass the pool entirely
-        m = _enforce_pool(model or _pick_model())
-        r = _run_once(_cmd(task, m, resume_id=resume_id), m, timeout)
+        resume_oc = str(resume_id).startswith("ses_")
+        m = _enforce_pool(model, opencode=resume_oc) if model else None
+        if model and not m:
+            return {"result": "", "error": "resume-runtime-mismatch", "model": model,
+                    "session_id": resume_id, "reused": True, "duration_s": 0.0}
+        try:
+            cmd = _cmd(task, m, resume_id=resume_id)
+        except ValueError as e:
+            return {"result": str(e), "error": "resume-runtime-mismatch", "model": m or model,
+                    "session_id": resume_id, "reused": True, "duration_s": 0.0}
+        r = _run_once(cmd, m, timeout)
         r.setdefault("model", m)
         r["reused"] = True
         _register_created(r.get("session_id") or resume_id)   # harness-owned: safe to auto-prune later
@@ -399,8 +600,15 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
     sl = _acquire(context) if not ephemeral else {"id": None, "model": None, "uses": 0, "ephemeral": True}
     orphans = []
     try:
+        approved = _pool_models()
         reuse = bool(sl.get("id") and sl["uses"] < MAX_SESSION_USES and not model
                      and not sl.get("transient") and not ephemeral)
+        if reuse and ((approved and sl.get("model") not in approved)
+                      or (sl.get("model") and _is_opencode_model(sl["model"])
+                          != str(sl["id"]).startswith("ses_"))):
+            orphans.append(sl["id"])
+            sl.update(id=None, model=None, uses=0)
+            reuse = False
         if reuse and not _session_alive(sl["id"]):
             # dead pooled session — resuming it silently starts an empty chat under the same id
             orphans.append(sl["id"])
@@ -489,4 +697,60 @@ if __name__ == "__main__":
     assert got and got.get("type") == "result" and "score_0_10" in got["result"], got
     assert _ids_to_retire(["old", "old", None, "kept"], "kept") == ["old"]
     assert _ids_to_retire(["only"], None) == ["only"]
-    print("agent.py (cursor) self-test: PASS")
+    # opencode runtime: routing + JSONL parse (no agent call)
+    assert _is_opencode_model("opencode/muse-spark-1.3-contributor-free")
+    assert _is_opencode_model("openai/gpt-6-astra-fast")
+    assert not _is_opencode_model("kimi-k3-max")
+    c = _cmd("hi", "opencode/mimo-v2.6-flash-free")
+    assert c[0].endswith("opencode") and "-m" in c and "--format" in c, c
+    c = _cmd("hi", "opencode/mimo-v2.6-flash-free", resume_id="ses_abc")
+    assert "-s" in c and "ses_abc" in c, c
+    c = _cmd("hi", "kimi-k3-max")
+    assert "cursor-agent" in c[0], c
+    oc = ('{"type":"step_start","sessionID":"ses_123"}\n'
+          '{"type":"text","sessionID":"ses_123","part":{"type":"text","text":"PONG"}}\n'
+          '{"type":"step_finish","sessionID":"ses_123","part":{"reason":"stop","tokens":{"input":10,"output":2}}}')
+    got = _parse_opencode_json(oc)
+    assert got and got["result"] == "PONG" and got.get("session_id") == "ses_123", got
+    assert _parse_opencode_json("") is None
+    assert _session_alive("ses_abc123") is True
+    assert _session_ancient("ses_abc123") is False
+    os.environ["OPENCODE_HUNT_MODELS"] = "opencode/a,openai/b"
+    os.environ.pop("CURSOR_HUNT_MODELS", None)
+    assert _pool_models() == ["opencode/a", "openai/b"], _pool_models()
+    os.environ.pop("OPENCODE_HUNT_MODELS", None)
+    oc = ('{"type":"step_start","sessionID":"ses_123","part":{"type":"step-start"}}\n'
+          '{"type":"text","sessionID":"ses_123","part":{"type":"text","text":"PONG"}}\n'
+          '{"type":"step_finish","sessionID":"ses_123","part":{"reason":"tool-calls",'
+          '"cost":0.1,"tokens":{"input":10,"output":2,"cache":{"read":3,"write":1}}}}\n'
+          '{"type":"step_finish","sessionID":"ses_123","part":{"reason":"stop",'
+          '"cost":0.2,"tokens":{"input":20,"output":4,"reasoning":2,"cache":{"read":5,"write":0}}}}')
+    got = _parse_opencode_json(oc)
+    assert got and got["complete"] and got["result"] == "PONG", got
+    assert got["usage"] == {"input": 30, "output": 6, "reasoning": 2,
+                            "cache": {"read": 8, "write": 1}, "total": 0, "cost": 0.3}, got
+    incomplete = _parse_opencode_json(
+        '{"type":"text","sessionID":"ses_partial","part":{"type":"text","text":"partial"}}')
+    assert incomplete and not incomplete["complete"] and incomplete["result"] == "partial", incomplete
+    errored = _parse_opencode_json(
+        '{"type":"text","sessionID":"ses_err","part":{"type":"text","text":"working"}}\n'
+        '{"type":"error","sessionID":"ses_err","error":{"data":{"message":"HTTP 429"}}}')
+    assert errored and errored["is_error"] and errored["error"] == "rate-limited", errored
+    assert errored["result"] == "working", errored
+    c = _cmd("hi", None, resume_id="ses_abc")
+    assert c[0] == OPENCODE_BIN and "-s" in c, c
+    try:
+        _cmd("hi", "cursor-model", resume_id="ses_abc")
+        assert False, "cross-runtime resume must be rejected"
+    except ValueError:
+        pass
+    partial_line = '{"type":"text","sessionID":"ses_timeout","part":{"type":"text","text":"partial"}}'
+    timed = _run_once(["/bin/sh", "-c", f"printf '%s\\n' '{partial_line}'; sleep 2"],
+                      "openai/test", 0.05)
+    assert timed["error"] == "timeout" and timed["result"] == "partial" and timed["partial"], timed
+    finish_line = ('{"type":"step_finish","sessionID":"ses_exit",'
+                   '"part":{"reason":"stop","tokens":{"input":1,"output":1}}}')
+    exited = _run_once(["/bin/sh", "-c", f"printf '%s\\n' '{finish_line}'; exit 7"],
+                       "openai/test", 2)
+    assert exited["error"] == "agent-error", exited
+    print("agent.py (cursor+opencode) self-test: PASS")

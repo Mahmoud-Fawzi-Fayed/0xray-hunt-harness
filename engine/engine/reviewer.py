@@ -245,7 +245,7 @@ def gather(base):
         "ts": _now(),
         "box": {"cores": CORES, "load_1_5_15": [round(x, 2) for x in la]},
         "config": {
-            "models": os.environ.get("CURSOR_HUNT_MODELS", ""),
+            "models": os.environ.get("OPENCODE_HUNT_MODELS", "") or os.environ.get("CURSOR_HUNT_MODELS", ""),
             "parallel": os.environ.get("HUNT_PARALLEL", ""),
             "intrusive": os.environ.get("HUNT_INTRUSIVE", ""),
             "deep": os.environ.get("HUNT_DEEP", "1"),
@@ -1263,7 +1263,12 @@ def _coerce_review(agent_result):
 
 
 def _next_model(failed):
-    pool = [m.strip() for m in os.environ.get("CURSOR_HUNT_MODELS", "").split(",") if m.strip()]
+    for key in ("OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
+        pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
+        if pool:
+            break
+    else:
+        pool = []
     for m in pool:
         if m != failed:
             return m

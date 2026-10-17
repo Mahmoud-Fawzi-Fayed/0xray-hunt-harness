@@ -883,7 +883,8 @@ async function fcSend2(t){if(!FC_ID||FC_BUSY)return;
     try{q=await fcApi("/verify/fixchat/message","POST",{chat_id:cid,message:t});}
     catch(e){q={queued:true,busy:true};}             // nginx 504 after the turn already queued — keep polling
     if(q.error)throw new Error(q.error);
-    if(q.queued===false&&q.busy){throw new Error(q.note||"agent still busy");}
+    if(q.already){const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("agent is working"))l.textContent="already working on this — waiting for the reply…";}
+    if(q.pending){const l=document.getElementById("fc-log").lastElementChild;if(l&&l.textContent.includes("agent is working"))l.textContent="queued behind the current turn…";}
     const s=await fcWaitIdle(cid,tickSys);
     (s.files||[]).forEach(x=>{if(FC_MTIMES[x.name]!==undefined&&FC_MTIMES[x.name]!==x.mtime)x._edited=true;});
     fcRenderFiles(s.files);

@@ -97,11 +97,30 @@ API_HINT = re.compile(
     r'register|upload|download|admin|proxy|fetch|gateway|service|session|export|import|search|'
     r'query|user|users|account|order|invoice|file|files|report|_next/data)(/|$)', re.I)
 
+# Browser capture includes top-level navigations, challenge machinery, and brochure pages alongside
+# XHR/fetch. Those are not API surface and otherwise receive a discovery/ranking bonus downstream.
+BROWSER_NOISE = re.compile(
+    r'^/cdn-cgi/challenge-platform(?:/|$)|'
+    r'/(?:blog|pricing|help|about|contact|careers?|press|news(?:room)?|legal|terms|privacy|cookies?|'
+    r'features?|resources?|customer-stories|events?|webinars?|academy|community|company|solutions?)'
+    r'(?:/|$)', re.I)
+
 
 def _testable(item):
     u = item.get("url", "")
     return bool(API_HINT.search(urlparse(u).path)) or "?" in u or \
         item.get("source") == "form" or bool(item.get("param"))
+
+
+def _browser_api_request(req):
+    """Keep runtime API calls, not page navigation, assets, CDN challenges, or marketing paths."""
+    url = (req.get("url") or "").split("#", 1)[0]
+    path = urlparse(url).path or "/"
+    if req.get("type") not in ("xhr", "fetch"):
+        return False
+    if BROWSER_NOISE.search(path) or is_static_asset(url):
+        return False
+    return _testable({"url": url, "source": "browser"})
 
 
 # static assets / downloadable files — never an injection/IDOR target on their own. (A secret leaked
@@ -126,6 +145,8 @@ def is_concrete_target(url):
     if not u or "://" not in u:
         return False
     if "*" in u:                 # literal glob from a robots.txt Disallow or a scope pattern
+        return False
+    if re.match(r'^/cdn-cgi/challenge-platform(?:/|$)', urlparse(u).path or "/", re.I):
         return False
     if is_static_asset(u):
         return False
@@ -184,23 +205,24 @@ def spa_recon(scope, seeds=None, max_js=20, interesting_only=True, log=print):
     """Deterministically map the in-scope surface. Returns (surface_items, oos_hosts).
     seeds: explicit seed URLs (e.g. OSINT-discovered live hosts); defaults to scope.seeds.
     interesting_only filters out marketing/content pages, keeping real attack surface."""
+    # Relative routes retain the origin of the HTML/JS that disclosed them. A shared relative path
+    # can legitimately exist on several seeds; binding everything to the first seed loses that surface.
     found_rel, found_abs, forms, js_urls, secrets = set(), set(), [], set(), []
-    seed_base = ""
     for seed in (seeds or scope.seeds):
         if not scope.in_scope_host(seed):
             log(f"recon: seed {seed} not in scope — skip"); continue
         html, final, hdrs = _get(seed)
         base = f"{urlparse(final).scheme}://{urlparse(final).netloc}"
-        if not seed_base:
-            seed_base = base
         log(f"recon: fetched {seed} ({len(html)} bytes, server={hdrs.get('server','?')})")
         for p in ("/robots.txt", "/sitemap.xml"):
             t, _, _ = _get(base + p)
             for a, b in re.findall(r'(?:Allow|Disallow):\s*(\S+)|<loc>([^<]+)</loc>', t):
                 pp = a or b
                 if pp:
-                    found_rel.add(pp if pp.startswith('/') else (urlparse(pp).path or '/'))
-        _mine(html, found_rel, found_abs)
+                    found_rel.add((base, pp if pp.startswith('/') else (urlparse(pp).path or '/')))
+        rel = set()
+        _mine(html, rel, found_abs)
+        found_rel.update((base, route) for route in rel)
         secrets += scan_secrets(html, final)
         for m in JS_SRC.findall(html):
             ju = urljoin(base, m)
@@ -214,7 +236,10 @@ def spa_recon(scope, seeds=None, max_js=20, interesting_only=True, log=print):
     for ju in list(js_urls)[:max_js]:
         js, _, _ = _get(ju)
         if js:
-            _mine(js, found_rel, found_abs)
+            rel = set()
+            _mine(js, rel, found_abs)
+            ju_origin = f"{urlparse(ju).scheme}://{urlparse(ju).netloc}"
+            found_rel.update((ju_origin, route) for route in rel)
             secrets += scan_secrets(js, ju)
     # dedup secrets by (type, redacted)
     _seen = set()
@@ -226,8 +251,8 @@ def spa_recon(scope, seeds=None, max_js=20, interesting_only=True, log=print):
         log(f"recon:   🔑 SECRET {s['type']} = {s['redacted']} in {s['url']}")
 
     items, oos = [], set()
-    for rel in sorted(found_rel):
-        url = rel if rel.startswith('http') else urljoin(seed_base + '/', rel.lstrip('/'))
+    for origin, rel in sorted(found_rel):
+        url = rel if rel.startswith('http') else urljoin(origin + '/', rel.lstrip('/'))
         if scope.in_scope_host(url):
             items.append({"url": url, "param": "", "source": "js/html"})
     for au in sorted(found_abs):
@@ -436,37 +461,47 @@ def _katana_urls(scope, log, depth=2, timeout=45, max_seeds=30, budget_s=480):
 
 
 def _probe(url, timeout=12):
-    """GET url, return (status_code, body). Status-aware (unlike _get)."""
-    import subprocess
+    """GET via the shared transport so probes honor target UA, auth, proxy, and impersonation."""
     try:
-        out = subprocess.run(["curl", "-s", "-A", _UA, "-m", str(timeout), "-L", "-w", "\\n__ST__%{http_code}", url],
-                             capture_output=True, text=True, timeout=timeout + 5).stdout
-        if "__ST__" in out:
-            body, st = out.rsplit("__ST__", 1)
-            return (int(st.strip()) if st.strip().isdigit() else 0), body
-        return 0, out
+        import netget
+        code, body, _headers = netget.get(
+            url, method="GET", headers={"User-Agent": _ua()}, timeout=timeout,
+            ident=os.environ.get("HUNT_RECON_IDENT") or None,
+            slug=os.environ.get("HUNT_TARGET_SLUG") or None)
+        return int(code or 0), body or ""
     except Exception:
         return 0, ""
 
 
-def prune_inert_params(items, log=print):
+def prune_inert_params(items, log=print, max_keep=None, probe_budget=None):
     """Drop param items whose ENDPOINT is dead (>=400) or whose PARAM is inert (no effect on the
     response beyond echoing itself). Deterministic: marker-normalized body-diff vs the no-param
     baseline — removing the marker first neutralizes the canonical/og:url reflection trap. Keeps
-    only live, processable params. (Active: ~1 request per unique endpoint + 1 per param.)"""
-    kept, dead, inert, base_cache = [], 0, 0, {}
+    only live, processable params. Scans until max_keep live pairs are retained, bounded separately by
+    a hard request budget. (Active: ~1 request per unique endpoint + 1 per param.)"""
+    if probe_budget is None:
+        probe_budget = int(os.environ.get("HUNT_PARAM_PROBE_BUDGET", "240"))
+    kept, dead, inert, base_cache, probes = [], 0, 0, {}, 0
     marker = "zq9k7xp"
     for it in items:
+        if max_keep is not None and len(kept) >= max_keep:
+            break
         base_path = it.get("url", "").split("?", 1)[0]
         param = it.get("param", "")
         if base_path not in base_cache:
+            if probes >= probe_budget:
+                break
             base_cache[base_path] = _probe(base_path)
+            probes += 1
         bcode, bbody = base_cache[base_path]
         if bcode == 0 or bcode >= 400:
             dead += 1
             continue                                   # dead endpoint
+        if probes >= probe_budget:
+            break
         tcode, tbody = _probe(f"{base_path}?{param}={marker}")
-        if tcode >= 400:
+        probes += 1
+        if tcode == 0 or tcode >= 400:
             dead += 1
             continue
         norm = tbody.replace(marker, "")               # strip the param's own echo (canonical/og:url)
@@ -477,6 +512,9 @@ def prune_inert_params(items, log=print):
     if dead or inert:
         log(f"params: inertness-prune dropped {dead} dead-endpoint + {inert} inert param(s) "
             f"-> {len(kept)} live/processable remain")
+    if probes >= probe_budget and (max_keep is None or len(kept) < max_keep):
+        log(f"params: inertness-prune probe budget exhausted ({probes}/{probe_budget}) "
+            f"with {len(kept)} live/processable retained")
     return kept
 
 
@@ -708,7 +746,7 @@ def gather_params(scope, log=print, max_items=80):
             seen.add(key)
             items.append({"url": f"{base}?{p}=FUZZ", "param": p, "method": "GET", "source": src[u]})
     log(f"params: {len(items)} unique (endpoint,param) pair(s) from gau+katana after noise filter")
-    return prune_inert_params(items[:max_items], log)
+    return prune_inert_params(items, log, max_keep=max_items)
 
 
 # ---------------- deep / authenticated recon (the authed API surface curl recon misses) --------------
@@ -819,7 +857,8 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
                 continue
             for r in (reqs or []):
                 u = (r.get("url") or "").split("#")[0]
-                if u and u not in seen and scope.in_scope_host(u) and is_concrete_target(u):
+                if (u and u not in seen and scope.in_scope_host(u) and is_concrete_target(u)
+                        and _browser_api_request(r)):
                     seen.add(u)
                     out.append({"url": u, "method": r.get("method", "GET"), "source": "browser"})
         log(f"browser-recon: {len(out)} in-scope API endpoint(s) from {len(seeds)} seed(s)"
@@ -864,5 +903,67 @@ if __name__ == "__main__":
         assert not is_concrete_target("https://x.com/*?*builder.preview*")
         assert not is_concrete_target("https://x.com/a/b/6697_h.gif?cc=FUZZ")  # static asset
         assert not is_concrete_target("https://x.com/app.js")
+        assert not is_concrete_target("https://x.com/cdn-cgi/challenge-platform/h/b/orchestrate?ray=1")
         assert is_static_asset("https://x.com/main.css") and not is_static_asset("https://x.com/api/css-theme")
+        # Browser surface is API-only: no navigations, marketing, static, or edge challenge traffic.
+        assert _browser_api_request({"url": "https://x.com/api/users", "type": "xhr"})
+        assert not _browser_api_request({"url": "https://x.com/api/users", "type": "document"})
+        assert not _browser_api_request({"url": "https://x.com/cdn-cgi/challenge-platform/x?ray=1", "type": "fetch"})
+        assert not _browser_api_request({"url": "https://x.com/help/account?q=x", "type": "xhr"})
+
+        # Relative routes stay on the seed that disclosed them rather than moving to the first seed.
+        class _Scope:
+            seeds = ["https://one.test", "https://two.test"]
+            @staticmethod
+            def in_scope_host(u):
+                return (urlparse(u).hostname or "") in ("one.test", "two.test")
+        old_get = _get
+        try:
+            globals()["_get"] = lambda u, timeout=20: (
+                ('"/api/one"' if "one.test" in u else '"/api/two"') if not u.endswith(("robots.txt", "sitemap.xml")) else "",
+                u, {})
+            bound, _ = spa_recon(_Scope(), max_js=0, log=lambda _m: None)
+        finally:
+            globals()["_get"] = old_get
+        bound_urls = {it["url"] for it in bound}
+        assert "https://one.test/api/one" in bound_urls, bound_urls
+        assert "https://two.test/api/two" in bound_urls, bound_urls
+        assert "https://one.test/api/two" not in bound_urls, bound_urls
+
+        # Probes use the shared transport and propagate target-specific UA/auth context.
+        import types
+        calls = []
+        old_netget = sys.modules.get("netget")
+        old_env = {k: os.environ.get(k) for k in ("HUNT_USER_AGENT", "HUNT_RECON_IDENT", "HUNT_TARGET_SLUG")}
+        try:
+            sys.modules["netget"] = types.SimpleNamespace(
+                get=lambda url, **kw: (calls.append((url, kw)) or (200, "ok", {})))
+            os.environ["HUNT_USER_AGENT"] = "Recon-Test-UA"
+            os.environ["HUNT_RECON_IDENT"] = "A"
+            os.environ["HUNT_TARGET_SLUG"] = "probe-test"
+            assert _probe("https://x.test/api") == (200, "ok")
+        finally:
+            if old_netget is None:
+                sys.modules.pop("netget", None)
+            else:
+                sys.modules["netget"] = old_netget
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        assert calls[0][1]["headers"]["User-Agent"] == "Recon-Test-UA", calls
+        assert calls[0][1]["ident"] == "A" and calls[0][1]["slug"] == "probe-test", calls
+
+        # Pruning scans past dead early candidates until the live-retention cap or hard probe budget.
+        old_probe = _probe
+        try:
+            globals()["_probe"] = lambda u, timeout=12: ((404, "") if "/dead" in u else
+                                                          (200, "changed") if "?" in u else (200, "base"))
+            candidates = [{"url": f"https://x.test/dead{i}?q=FUZZ", "param": "q"} for i in range(3)]
+            candidates += [{"url": f"https://x.test/live{i}?q=FUZZ", "param": "q"} for i in range(3)]
+            retained = prune_inert_params(candidates, log=lambda _m: None, max_keep=2, probe_budget=10)
+        finally:
+            globals()["_probe"] = old_probe
+        assert len(retained) == 2 and all("/live" in it["url"] for it in retained), retained
         print("recon.py self-test: PASS")

@@ -973,7 +973,8 @@ def _cmd_selftest(_a):
 
     # provision end-to-end with a MOCK agent (no network for signup) returning a canned session
     os.environ["HUNT_MOCK_AGENT"] = "1"
-    os.environ["CURSOR_HUNT_MODELS"] = "m1,m2"
+    os.environ["OPENCODE_HUNT_MODELS"] = "m1,m2"
+    os.environ.pop("CURSOR_HUNT_MODELS", None)
     os.environ["HUNT_MOCK_RESULT"] = ('```json\n{"success":true,"host":"sandbox-login.acme.com",'
                                       '"login_url":"https://sandbox-login.acme.com/login","cookies":{"sid":"TESTSESSION"},'
                                       '"headers":{},"user":"t@acme","notes":"ok"}\n```')
@@ -997,7 +998,7 @@ def _cmd_selftest(_a):
         finally:
             I.new_identity = _real_ni
     finally:
-        for k in ("HUNT_MOCK_AGENT", "HUNT_MOCK_RESULT", "HUNT_MAX_ACCOUNTS"):
+        for k in ("HUNT_MOCK_AGENT", "HUNT_MOCK_RESULT", "HUNT_MAX_ACCOUNTS", "OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS"):
             os.environ.pop(k, None)
     # hostile input never raises
     for bad in (None, "", 123, {"x": 1}):
