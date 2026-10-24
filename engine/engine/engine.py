@@ -27,6 +27,7 @@ sys.path.insert(0, ENGINE_DIR)
 from scope import Scope            # noqa: E402
 from state import Engagement       # noqa: E402
 import agent as A                  # noqa: E402
+import modelroute as MR            # noqa: E402
 
 # OSINT (subdomain/asset enum) is a SEPARATE concern (Claude-OSINT) — not in the engine flow.
 
@@ -614,7 +615,8 @@ class Engine:
                 "At most 15 URLs, in-scope hosts only."
             )
             r = A.run_agent(task, context=self.scope.name, max_turns=30,
-                            timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")))
+                            timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")),
+                            model=MR.model_for("recon"))
             self.eng.state["mine_agent_ts"] = time.time()
             self.eng.save()
             err = r.get("error") or ""
@@ -710,7 +712,8 @@ class Engine:
             "URLs must be in-scope and real. Do not guess endpoints you didn't verify exist."
         )
         r = A.run_agent(task, context=self.scope.name, max_turns=20,
-                        timeout=int(os.environ.get("HUNT_PROFILE_TIMEOUT", "400")))
+                        timeout=int(os.environ.get("HUNT_PROFILE_TIMEOUT", "400")),
+                        model=MR.model_for("profile"))
         f = A.extract_json(r.get("result") or "") or {}
         if not isinstance(f, dict) or not (f.get("narrative") or f.get("flows")):
             self.eng.log("profile: no narrative from the session — continuing without one"
@@ -853,7 +856,8 @@ class Engine:
                 "At most 10 URLs, in-scope hosts only, no static images or marketing pages."
             )
             r = A.run_agent(task, context=self.scope.name, max_turns=25,
-                            timeout=int(os.environ.get("HUNT_HYPO_TIMEOUT", "400")))
+                            timeout=int(os.environ.get("HUNT_HYPO_TIMEOUT", "400")),
+                            model=MR.model_for("explore"))
             self.eng.state["hypo_ts"] = time.time()
             self.eng.save()
             err = r.get("error") or ""
@@ -1670,6 +1674,12 @@ class Engine:
                                 "_model": "authz-idor", "_skills": ["hunt-idor"]}
             except Exception:  # noqa: BLE001
                 pass
+        if not model:
+            ctx = {"vuln_class": it.get("vuln_class"), "params": len(it.get("params") or []),
+                   "auth_required": it.get("auth_required", False),
+                   "previous_result": it.get("_previous_result")}
+            model, _c = MR.smart_model("hunt", ctx)
+            self.eng.log(f"hunt: model={model} (complexity={_c}) for {it.get('vuln_class')}@{it.get('url','?')[:60]}")
         return self._hunt_deep(it, model, timeout)
 
     def _feedback_surface(self, f):
@@ -1749,7 +1759,8 @@ class Engine:
             if _AS:
                 task += _AS.auth_block(sess, prims[0].get("url", ""))
         r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns,
-                        timeout=int(os.environ.get("HUNT_CHAIN_TIMEOUT", "300")))
+                        timeout=int(os.environ.get("HUNT_CHAIN_TIMEOUT", "300")),
+                        model=MR.model_for("exploit"))
         if r.get("error"):
             self.eng.log(f"chain: agent error ({r['error']}) — will retry next round")
             return
@@ -2060,7 +2071,8 @@ class Engine:
                 f'{{"real":true|false,"severity":"low|medium|high|critical","reason":"<why, incl. any scope/intrusive caveat>",'
                 f'"attacker_holds":"nothing|own_session|link_issued_by_product|foreign_id_shown",'
                 f'"id_source":"not_required|enumerated|product_link|archive|in_scope_oracle|own_only|asserted_leak"}}.')
-        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)  # same pool as hunt
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout,
+                        model=MR.model_for("validate"))
         self.eng.log(f"validate: {c['vuln_class']}@{c['url']} model={r.get('model', '?')}"
                      + (f" ERR={r['error']}" if r.get("error") else ""))
         if r.get("error"):

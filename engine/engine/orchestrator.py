@@ -79,7 +79,7 @@ def _draft_md(f, verdict):
 
 class Orchestrator:
     def __init__(self, scope_path, base="~/.bughunter-engagements",
-                 mock=False, do_hunt=True, parallel=3, model="claude-sonnet-4-6"):
+                 mock=False, do_hunt=True, parallel=3, model=None):
         self.base = base
         self.mock = mock
         self.do_hunt = do_hunt
@@ -91,6 +91,8 @@ class Orchestrator:
         agent_timeout = int(os.environ.get("HUNT_AGENT_TIMEOUT", "300"))
         max_hunts = int(os.environ.get("HUNT_MAX_HUNTS", "24"))   # items tested per round (cover more surface)
         parallel = int(os.environ.get("HUNT_PARALLEL", str(parallel)))
+        import modelroute as MR
+        model = model or MR.model_for("hunt")
         self.eng = E.Engine(scope_path, base, model, max_hunts, 40, agent_timeout, mock, False, parallel, False)
 
     # ---- step 1: novelty-first targeting --------------------------------------
