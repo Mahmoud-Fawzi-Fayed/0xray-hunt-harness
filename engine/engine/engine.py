@@ -1381,11 +1381,45 @@ class Engine:
                                  "— marked skipped, moving on (too heavy for the budget)")
                     continue
             if f and f.get("error"):
-                # a transient agent error (parse/rate-limit/timeout) must NOT permanently mark the
-                # endpoint tested — leave it so the next round retries it (with a fresh pool model).
-                self.eng.log(f"hunt: error on {it.get('vuln_class')}@{it['url']} ({f['error']}) "
-                             f"— not marking tested, will retry next round")
-                continue
+                err = f["error"]
+                # rate-limit (429): back off and retry once
+                if "429" in str(err) or "rate" in str(err).lower():
+                    backoff = int(os.environ.get("HUNT_RATE_LIMIT_BACKOFF", "60"))
+                    self.eng.log(f"hunt: rate-limited on {it.get('vuln_class')}@{it['url']} "
+                                 f"— backing off {backoff}s then retrying")
+                    time.sleep(backoff)
+                    f = self._hunt_agent(it)
+                    if f and f.get("error"):
+                        self.eng.log(f"hunt: still failing after backoff ({f['error']}) — skipping")
+                        continue
+                # auth expired (401/403): try session refresh once
+                elif ("401" in str(err) or "403" in str(err)) and self._auth_session:
+                    self.eng.log(f"hunt: auth error on {it['url']} — attempting session refresh")
+                    _AS = _authmod()
+                    if _AS:
+                        try:
+                            rel = _AS.relogin(self.scope.name, ident="A", base=self.base)
+                            if rel.get("ok"):
+                                self._auth_session = _AS.load(self.scope.name, self.base)
+                                self.eng.log("hunt: session refreshed, retrying")
+                                f = self._hunt_agent(it)
+                                if f and not f.get("error"):
+                                    pass  # fall through to normal processing
+                                else:
+                                    self.eng.log(f"hunt: retry after refresh failed — skipping")
+                                    continue
+                            else:
+                                self.eng.log("hunt: session refresh failed — skipping endpoint")
+                                continue
+                        except Exception:
+                            self.eng.log("hunt: session refresh exception — skipping endpoint")
+                            continue
+                    else:
+                        continue
+                else:
+                    self.eng.log(f"hunt: error on {it.get('vuln_class')}@{it['url']} ({err}) "
+                                 f"— not marking tested, will retry next round")
+                    continue
             self.eng.mark_tested(it)
             self._feedback_surface(f)                 # endpoints the agent found mid-hunt -> back into the worklist
             if f and f.get("rate_limited"):

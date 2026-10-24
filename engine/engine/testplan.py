@@ -312,13 +312,108 @@ def state_key(case):
     return f"{method}|{url}|{param}|{category}"
 
 
+VALID_STATUSES = {"pending", "running", "tested", "blocked", "inconclusive", "disproved", "confirmed"}
+_EVIDENCE_REQUIRED = {"tested", "confirmed", "disproved", "inconclusive"}
+
+
+def validate_evidence(status, evidence):
+    """Check evidence meets requirements for the given status. Returns (ok, reason)."""
+    if status not in _EVIDENCE_REQUIRED:
+        return True, ""
+    if not evidence or not str(evidence).strip():
+        return False, f"status '{status}' requires evidence"
+    ev = str(evidence).lower()
+    if status == "confirmed":
+        has_req = any(k in ev for k in ("request", "http", "curl", "post ", "get ", "put "))
+        has_impact = any(k in ev for k in ("response", "returned", "leaked", "accessed",
+                                           "modified", "created", "deleted", "executed"))
+        if not (has_req or has_impact):
+            return False, "confirmed findings must include request/response or impact evidence"
+    if status == "disproved":
+        has_defense = any(k in ev for k in ("403", "401", "denied", "blocked", "rejected",
+                                            "not found", "no access", "forbidden"))
+        if not has_defense:
+            return False, "disproved results must describe the defensive response observed"
+    return True, ""
+
+
 def mark_case(case, status, evidence=None):
-    """Update a test case with execution results."""
+    """Update a test case with execution results. Enforces evidence requirements."""
+    if status not in VALID_STATUSES:
+        raise ValueError(f"invalid status: {status!r}, must be one of {VALID_STATUSES}")
+    ok, reason = validate_evidence(status, evidence)
+    if not ok:
+        raise ValueError(reason)
     case["status"] = status
     case["executed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if evidence:
         case["evidence"] = evidence
     return case
+
+
+def generate_auth_tests(endpoints, identities):
+    """Generate cross-role authorization test cases from endpoints and available identities.
+
+    identities: list of {"email": ..., "role": "user"|"admin"|..., "ident": "A"|"B"}
+    Returns list of auth test case dicts.
+    """
+    if not identities or len(identities) < 2:
+        return []
+    cases = []
+    roles = {i.get("ident", ""): i.get("role", "user") for i in identities}
+    id_pairs = [(a, b) for a in identities for b in identities if a["ident"] != b["ident"]]
+
+    for ep in endpoints:
+        url = ep.get("url", "")
+        method = ep.get("method", "GET")
+        params = _params(ep)
+        id_params = [p for p in params if _ID_PARAMS.search(p)]
+
+        if ep.get("auth_required") or _ADMIN_PATHS.search(url):
+            for owner, accessor in id_pairs:
+                cases.append({
+                    "endpoint": url, "method": method, "category": "bac",
+                    "category_name": "Broken Access Control",
+                    "test": f"Access as {accessor['ident']} (role={roles.get(accessor['ident'],'user')}) "
+                            f"endpoint owned by {owner['ident']} (role={roles.get(owner['ident'],'user')})",
+                    "priority": "high", "priority_score": 8,
+                    "params": params, "auth_required": True,
+                    "confidence": ep.get("confidence", "observed"),
+                    "roles": [owner["ident"], accessor["ident"]],
+                    "owner": owner["ident"], "accessor": accessor["ident"],
+                    "status": "pending",
+                })
+
+        if id_params:
+            for owner, accessor in id_pairs:
+                cases.append({
+                    "endpoint": url, "method": method, "category": "idor",
+                    "category_name": "Insecure Direct Object Reference",
+                    "test": f"Replace {id_params[0]} with {owner['ident']}'s object ID, "
+                            f"request as {accessor['ident']}",
+                    "priority": "high", "priority_score": 9,
+                    "params": params, "auth_required": True,
+                    "confidence": ep.get("confidence", "observed"),
+                    "roles": [owner["ident"], accessor["ident"]],
+                    "owner": owner["ident"], "accessor": accessor["ident"],
+                    "status": "pending",
+                })
+
+        if _ADMIN_PATHS.search(url) and method in ("POST", "PUT", "PATCH", "DELETE"):
+            for ident in identities:
+                if roles.get(ident["ident"]) != "admin":
+                    cases.append({
+                        "endpoint": url, "method": method, "category": "privilege_escalation",
+                        "category_name": "Privilege Escalation",
+                        "test": f"Call admin endpoint as {ident['ident']} (role={roles.get(ident['ident'],'user')})",
+                        "priority": "critical", "priority_score": 11,
+                        "params": params, "auth_required": True,
+                        "confidence": ep.get("confidence", "observed"),
+                        "roles": [ident["ident"]],
+                        "owner": "admin", "accessor": ident["ident"],
+                        "status": "pending",
+                    })
+    return cases
 
 
 def execute_plan(plan_cases, state, run_test_fn=None):
@@ -332,17 +427,29 @@ def execute_plan(plan_cases, state, run_test_fn=None):
         return plan_cases
 
     state.setdefault("tested_checks", {})
+    max_consecutive_failures = int(os.environ.get("HUNT_MAX_CONSECUTIVE_FAILURES", "3"))
+    consecutive_failures = 0
     for case in plan_cases:
         if case.get("status") != "pending":
+            continue
+        if consecutive_failures >= max_consecutive_failures:
+            case["status"] = "blocked"
+            case["evidence"] = f"blocked: {consecutive_failures} consecutive failures — stopping"
             continue
         case["status"] = "running"
         try:
             result = run_test_fn(case)
             status = result.get("status", "inconclusive") if result else "inconclusive"
             evidence = result.get("evidence") if result else None
+            ok, reason = validate_evidence(status, evidence)
+            if not ok:
+                status = "inconclusive"
+                evidence = (evidence or "") + f" [evidence insufficient: {reason}]"
             mark_case(case, status, evidence)
+            consecutive_failures = 0
         except Exception as e:
-            mark_case(case, "blocked", str(e))
+            consecutive_failures += 1
+            mark_case(case, "blocked", f"exception: {e}")
 
         sk = state_key(case)
         ep_key = f"{case.get('method','GET')}|{case.get('endpoint','')}"
@@ -478,15 +585,16 @@ def _selftest(_a=None):
     sk = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
     assert sk == "POST|https://a.com/x|id|idor", sk
 
-    # execute_plan with mock runner
+    # execute_plan with mock runner (evidence must pass validation)
     plan = result["plan"][:]
     st = {}
     def mock_runner(case):
-        return {"status": "confirmed", "evidence": "test proof"}
+        return {"status": "confirmed",
+                "evidence": "HTTP POST request to /api/users returned 200 with leaked user data"}
     execute_plan(plan, st, run_test_fn=mock_runner)
     confirmed = [c for c in plan if c["status"] == "confirmed"]
     assert len(confirmed) > 0, "execute_plan didn't run any cases"
-    assert confirmed[0].get("evidence") == "test proof"
+    assert "request" in confirmed[0].get("evidence", "").lower()
     assert confirmed[0].get("executed_at")
     assert st.get("tested_checks"), "tested_checks not updated"
 
@@ -501,6 +609,53 @@ def _selftest(_a=None):
              {"status": "confirmed", "priority": "high"}]
     assert len(pending_cases(plan2)) == 2
     assert len(pending_cases(plan2, priority="high")) == 1
+
+    # validate_evidence enforcement
+    ok, _ = validate_evidence("confirmed", "just a number 200")
+    assert not ok, "confirmed without request/impact should fail"
+    ok, _ = validate_evidence("confirmed", "HTTP request returned leaked data")
+    assert ok, "valid confirmed evidence should pass"
+    ok, _ = validate_evidence("disproved", "server returned 403 forbidden")
+    assert ok
+    ok, _ = validate_evidence("disproved", "nothing happened")
+    assert not ok, "disproved without defensive response should fail"
+    ok, _ = validate_evidence("tested", "checked endpoint, no issues")
+    assert ok
+    ok, _ = validate_evidence("tested", "")
+    assert not ok
+
+    # mark_case rejects invalid status
+    try:
+        mark_case({"status": "pending"}, "bogus")
+        assert False, "should have raised"
+    except ValueError:
+        pass
+
+    # generate_auth_tests
+    identities = [
+        {"ident": "A", "role": "user", "email": "a@test.com"},
+        {"ident": "B", "role": "user", "email": "b@test.com"},
+    ]
+    auth_cases = generate_auth_tests(mock_endpoints, identities)
+    assert len(auth_cases) > 0, "no auth test cases generated"
+    cats = {c["category"] for c in auth_cases}
+    assert "bac" in cats or "idor" in cats, f"auth tests missing bac/idor: {cats}"
+    assert all(c.get("owner") and c.get("accessor") for c in auth_cases)
+    assert generate_auth_tests([], []) == []  # no identities -> empty
+
+    # consecutive failure blocking
+    fail_count = [0]
+    def failing_runner(case):
+        fail_count[0] += 1
+        raise RuntimeError("mock failure")
+    plan3 = [{"status": "pending", "priority": "high", "endpoint": f"/ep{i}",
+              "method": "GET", "category": "xss", "params": []}
+             for i in range(6)]
+    os.environ["HUNT_MAX_CONSECUTIVE_FAILURES"] = "3"
+    execute_plan(plan3, {}, run_test_fn=failing_runner)
+    blocked = [c for c in plan3 if c["status"] == "blocked"]
+    assert len(blocked) >= 3, f"consecutive failure blocking not working: {[c['status'] for c in plan3]}"
+    os.environ.pop("HUNT_MAX_CONSECUTIVE_FAILURES", None)
 
     print("testplan.py self-test: PASS")
     return 0
