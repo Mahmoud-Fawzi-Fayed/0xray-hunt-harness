@@ -53,7 +53,8 @@ def _match(pattern, host):
 class Scope:
     def __init__(self, in_scope, out_of_scope=None, seeds=None, name="engagement",
                  user_agent="", endpoints=None, roe_extra="", skip_param_mining=False,
-                 proxy="", impersonate="", path_restrictions=None):
+                 proxy="", impersonate="", path_restrictions=None,
+                 out_path_restrictions=None):
         self.in_scope = [p for p in (in_scope or []) if p.strip()]
         self.out_of_scope = [p for p in (out_of_scope or []) if p.strip()]
         self.seeds = seeds or []
@@ -65,6 +66,7 @@ class Scope:
         self.proxy = proxy or ""                    # egress proxy for edge-gated hosts (IP/geo filtered)
         self.impersonate = impersonate or ""        # curl_cffi TLS profile (e.g. safari_ios) via netget
         self.path_restrictions = path_restrictions or {}  # {host: ["/allowed/path"]} from URL-scoped entries
+        self.out_path_restrictions = out_path_restrictions or {}  # {host: ["/excluded/path"]} path-specific exclusions
 
     @classmethod
     def load(cls, path):
@@ -75,7 +77,8 @@ class Scope:
                    user_agent=d.get("user_agent", ""), endpoints=d.get("endpoints", []),
                    roe_extra=d.get("roe_extra", ""), skip_param_mining=d.get("skip_param_mining", False),
                    proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""),
-                   path_restrictions=d.get("path_restrictions", {}))
+                   path_restrictions=d.get("path_restrictions", {}),
+                   out_path_restrictions=d.get("out_path_restrictions", {}))
 
     def _path_prefixes_for(self, host):
         """Resolve path restrictions for a host, checking both exact and wildcard keys."""
@@ -87,6 +90,18 @@ class Scope:
             return prefixes
         # Check wildcard keys: *.example.com should apply to api.example.com
         for key, pfxs in self.path_restrictions.items():
+            if key.startswith("*.") and host.endswith("." + key[2:]):
+                return pfxs
+        return None
+
+    def _out_path_prefixes_for(self, host):
+        """Resolve path-specific exclusions for a host."""
+        if not self.out_path_restrictions:
+            return None
+        prefixes = self.out_path_restrictions.get(host)
+        if prefixes:
+            return prefixes
+        for key, pfxs in self.out_path_restrictions.items():
             if key.startswith("*.") and host.endswith("." + key[2:]):
                 return pfxs
         return None
@@ -106,14 +121,16 @@ class Scope:
             return False          # deny wins
         if not any(_match(p, host) for p in self.in_scope):
             return False
+        try:
+            path = urlparse(target).path or "/"
+        except Exception:
+            path = "/"
         prefixes = self._path_prefixes_for(host)
-        if prefixes:
-            try:
-                path = urlparse(target).path or "/"
-            except Exception:
-                path = "/"
-            if not self._path_allowed(path, prefixes):
-                return False
+        if prefixes and not self._path_allowed(path, prefixes):
+            return False
+        out_pfx = self._out_path_prefixes_for(host)
+        if out_pfx and self._path_allowed(path, out_pfx):
+            return False
         return True
 
     def reject_reason(self, target):
@@ -125,14 +142,16 @@ class Scope:
             return f"{host} matches an out-of-scope rule"
         if not any(_match(p, host) for p in self.in_scope):
             return f"{host} matches no in-scope rule (default deny)"
+        try:
+            path = urlparse(target).path or "/"
+        except Exception:
+            path = "/"
         prefixes = self._path_prefixes_for(host)
-        if prefixes:
-            try:
-                path = urlparse(target).path or "/"
-            except Exception:
-                path = "/"
-            if not self._path_allowed(path, prefixes):
-                return f"{path} outside allowed path(s) for {host}: {prefixes}"
+        if prefixes and not self._path_allowed(path, prefixes):
+            return f"{path} outside allowed path(s) for {host}: {prefixes}"
+        out_pfx = self._out_path_prefixes_for(host)
+        if out_pfx and self._path_allowed(path, out_pfx):
+            return f"{path} matches excluded path(s) for {host}: {out_pfx}"
         return None
 
 
@@ -165,6 +184,14 @@ def _selftest():
     assert s3.in_scope_host("https://api.example.com/api/research/papers")
     assert not s3.in_scope_host("https://api.example.com/admin/users")
     assert not s3.in_scope_host("https://api.example.com/")
+    # out_path_restrictions: path-specific exclusions
+    s5 = Scope(in_scope=["*.acme.com"], out_of_scope=[],
+               out_path_restrictions={"*.acme.com": ["/admin"]})
+    assert s5.in_scope_host("https://api.acme.com/api/v1/users")   # allowed
+    assert not s5.in_scope_host("https://api.acme.com/admin/users") # excluded by path
+    assert s5.in_scope_host("https://api.acme.com/")               # allowed
+    assert s5.reject_reason("https://api.acme.com/admin/panel")     # has reason
+    assert s5.reject_reason("https://api.acme.com/api/v1") is None  # no reason
     # S03: exact-host mode with = prefix
     s4 = Scope(in_scope=["=api.example.com"])
     assert s4.in_scope_host("https://api.example.com/x")
