@@ -66,7 +66,9 @@ def _mcp_call_bb(tool, args_dict, timeout=30):
         )
         resp = urllib.request.urlopen(req, timeout=timeout)
         return json.loads(resp.read().decode())
-    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError):
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError) as exc:
+        import logging
+        logging.getLogger("intake").debug("bb-platforms call %s failed: %s: %s", tool, type(exc).__name__, exc)
         return None
 
 
@@ -78,6 +80,7 @@ def fetch_scope_mcp(platform, slug, log=print):
         log(f"intake: got scope blob with {len(json.dumps(data))} bytes")
         return data
     log("intake: bb-platforms MCP not available, trying search...")
+    # NOTE: search_programs may paginate; we only check the first page here
     search = _mcp_call_bb("search_programs", {"query": slug, "platform": platform})
     if search:
         programs = search if isinstance(search, list) else search.get("programs", [])
@@ -123,6 +126,12 @@ def create_engagement(slug, scope_json, base=DEFAULT_BASE, log=print):
     with open(scope_path, "w") as f:
         json.dump(out, f, indent=2)
 
+    # Also write to _targets/slug.json so guardrails/engine can load it
+    targets_dir = os.path.join(base, "_targets")
+    os.makedirs(targets_dir, exist_ok=True)
+    with open(os.path.join(targets_dir, slug + ".json"), "w") as f:
+        json.dump(out, f, indent=2)
+
     log(f"intake: created engagement {slug}")
     log(f"  scope: {len(out.get('in_scope', []))} in-scope, "
         f"{len(out.get('out_of_scope', []))} out-of-scope, "
@@ -135,7 +144,7 @@ def create_engagement(slug, scope_json, base=DEFAULT_BASE, log=print):
     return scope_path
 
 
-def intake(url_or_slug, platform=None, base=DEFAULT_BASE, scope_file=None, log=print):
+def intake(url_or_slug, platform=None, base=DEFAULT_BASE, scope_file=None, launch=False, log=print):
     """Full intake pipeline: URL → scope → engagement → scope.json path.
 
     Returns dict with {slug, platform, scope_path, in_scope, seeds} or raises.
@@ -191,7 +200,7 @@ def intake(url_or_slug, platform=None, base=DEFAULT_BASE, scope_file=None, log=p
     with open(scope_path) as f:
         resolved = json.load(f)
 
-    return {
+    result = {
         "slug": slug,
         "platform": platform,
         "scope_path": scope_path,
@@ -199,6 +208,10 @@ def intake(url_or_slug, platform=None, base=DEFAULT_BASE, scope_file=None, log=p
         "out_of_scope": resolved.get("out_of_scope", []),
         "seeds": resolved.get("seeds", []),
     }
+    if launch:
+        result["launch_cmd"] = f"python3 engine/engine/engine.py run --program {slug} --base {base}"
+        log(f"intake: to launch pipeline: {result['launch_cmd']}")
+    return result
 
 
 # ---------------------------------------------------------------- CLI
@@ -238,6 +251,9 @@ def _cmd_selftest(_a):
         ("https://yeswehack.com/programs/acme", "yeswehack", "acme"),
         ("https://app.intigriti.com/company/programs/acme", "intigriti", "acme"),
         ("https://random.com/acme", None, None),
+        # I05: query params and fragments
+        ("https://hackerone.com/acme?view=policy", "hackerone", "acme"),
+        ("https://bugcrowd.com/acme#scope", "bugcrowd", "acme"),
     ]
     for url, exp_platform, exp_slug in cases:
         p, s = parse_program_url(url)
@@ -258,6 +274,10 @@ def _cmd_selftest(_a):
     assert "api.acme.com" in loaded["in_scope"], f"missing api host: {loaded['in_scope']}"
     assert "staging.acme.com" in loaded["out_of_scope"], f"missing out: {loaded['out_of_scope']}"
     assert any("acme.com" in s for s in loaded["seeds"]), f"no seeds: {loaded['seeds']}"
+
+    # I03: _targets/slug.json also written
+    targets_path = os.path.join(tmpbase, "_targets", "acme-test.json")
+    assert os.path.isfile(targets_path), f"_targets file not created at {targets_path}"
 
     print("intake.py self-test: PASS")
     return 0

@@ -2011,6 +2011,7 @@ class Engine:
     def run(self, phases):
         self._drop_own_session_oauth()
         failed_phases = []
+        phase_timings = {}
         _eng_timeout = int(os.environ.get("HUNT_ENGAGEMENT_TIMEOUT", "3600") or 3600)
         _eng_start = time.time()
         for ph in ALL_PHASES:
@@ -2020,11 +2021,13 @@ class Engine:
                     failed_phases.extend(p for p in ALL_PHASES if p in phases and p not in failed_phases
                                          and ALL_PHASES.index(p) >= ALL_PHASES.index(ph))
                     break
+                _ph_start = time.time()
                 try:
                     getattr(self, ph)()
                 except Exception as e:
                     failed_phases.append(ph)
                     self.eng.log(f"phase {ph} error (continuing with partial state): {type(e).__name__}: {e}")
+                phase_timings[ph] = round(time.time() - _ph_start, 1)
         if failed_phases:
             self.eng.set_phase("partial")
             self.eng.state["failed_phases"] = failed_phases
@@ -2033,7 +2036,8 @@ class Engine:
         else:
             self.eng.set_phase("done")
             self.eng.log(f"engine done | {self.eng.summary()}")
-        return {"status": "partial" if failed_phases else "done", "failed_phases": failed_phases}
+        return {"status": "partial" if failed_phases else "done", "failed_phases": failed_phases,
+                "phase_timings": phase_timings}
 
 
 # ---- mock fixtures for --mock flow validation (no agents) ----

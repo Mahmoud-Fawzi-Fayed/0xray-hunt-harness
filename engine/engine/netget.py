@@ -27,6 +27,7 @@ _RL_LOCK = threading.Lock()
 _RL_STATE = {}  # host -> {"backoff": float, "consecutive_blocks": int, "last_req": float}
 _RL_MAX_BACKOFF = 30.0
 _RL_BLOCK_PAUSE = 300  # 5 min pause after 5 consecutive 403s
+_RL_MIN_DELAY = 1.0 / max(0.1, float(os.environ.get("HUNT_REQUESTS_PER_SECOND", "10") or 10))
 
 # Defense-in-depth scope guard — set by engine init via set_scope_guard()
 _SCOPE_GUARD = None  # Scope instance or None (disabled)
@@ -59,14 +60,16 @@ def _rate_limit(host, status):
 
 
 def _wait_for_host(host):
-    """Sleep if the host is rate-limited."""
+    """Sleep if the host is rate-limited or min inter-request delay not met."""
     with _RL_LOCK:
         st = _RL_STATE.get(host)
-        if st and st["backoff"] > 0:
-            elapsed = time.time() - st["last_req"]
-            wait = max(0, st["backoff"] - elapsed)
-            if wait > 0:
-                time.sleep(min(wait, _RL_MAX_BACKOFF))
+        if not st:
+            return
+        elapsed = time.time() - st["last_req"]
+        delay = st["backoff"] if st["backoff"] > 0 else _RL_MIN_DELAY
+        wait = max(0, delay - elapsed)
+        if wait > 0:
+            time.sleep(min(wait, _RL_MAX_BACKOFF))
 
 
 def _burp_proxy_if_available():

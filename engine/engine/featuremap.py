@@ -455,6 +455,8 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
         "slug": slug,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "sources": list({ep.get("source", "unknown") for ep in merged}),
+        "by_source": {src: sum(1 for e in merged if e.get("source") == src)
+                      for src in {e.get("source", "unknown") for e in merged}},
         "total_endpoints": len(merged),
         "observed": sum(1 for e in merged if e.get("confidence") == "observed"),
         "documented": sum(1 for e in merged if e.get("confidence") == "documented"),

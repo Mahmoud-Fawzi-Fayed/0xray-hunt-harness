@@ -208,7 +208,7 @@ class Engagement:
             elif ttl > 0 and (now - last) >= ttl:
                 ranked.append((1, ep, last, s))                         # stale -> re-hunt, oldest first
             # else: tested / noted within the window -> not eligible this pass
-        ranked.sort(key=lambda t: (t[0], t[1], t[2]))
+        ranked.sort(key=lambda t: (t[0], t[1], -(1 if t[3].get("param") else 0), t[2]))
         return [t[3] for t in ranked]
 
     @staticmethod

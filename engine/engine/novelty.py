@@ -134,7 +134,12 @@ class Novelty:
 
         old_hosts = {_host_key(h): h for h in base.get("hosts", []) or []}
         new_hosts = {_host_key(h): h for h in obs.get("hosts", []) or []}
-        res["new_hosts"] = [new_hosts[u] for u in sorted(set(new_hosts) - set(old_hosts)) if u]
+        _new_host_keys = sorted(set(new_hosts) - set(old_hosts))
+        _now_iso = datetime.now(timezone.utc).isoformat()
+        for u in _new_host_keys:
+            if u and isinstance(new_hosts[u], dict):
+                new_hosts[u].setdefault("first_seen", _now_iso)
+        res["new_hosts"] = [new_hosts[u] for u in _new_host_keys if u]
         res["removed_hosts"] = [old_hosts[u] for u in sorted(set(old_hosts) - set(new_hosts)) if u]
 
         old_js, new_js = _js_map(base), _js_map(obs)
