@@ -176,9 +176,7 @@ class Engagement:
                     if legacy not in out:
                         out[legacy] = ts
                 elif len(parts) == 3:
-                    new_key = f"GET|{k}"
-                    if new_key not in out:
-                        out[new_key] = ts
+                    out[k] = ts
         elif isinstance(t, list):
             for k in t:
                 out[str(k)] = 0.0
@@ -191,11 +189,14 @@ class Engagement:
         top-priority slice forever and never reaches the long tail (e.g. paysafe stuck at 181/4606)."""
         tmap = self._tested_map()
         notes = self.state.get("hunt_notes") if isinstance(self.state.get("hunt_notes"), dict) else {}
+        skipped = set((self.state.get("skipped") or {}).keys())
         now = time.time()
         ttl = RETEST_HOURS * 3600
         ranked = []                                # (group, -eff_priority, last_tested): sorts untested first
         for s in self.state["surface"]:
             k = self._key(s)
+            if k in skipped:
+                continue
             ep = -self._eff_priority(s)
             last = tmap.get(k)
             if last is None and k in notes:
@@ -230,7 +231,7 @@ class Engagement:
 
     @staticmethod
     def _pat_key(s):
-        return (url_pattern(s.get("url", "")), s.get("param") or "", s.get("vuln_class") or "")
+        return (s.get("method", "GET"), url_pattern(s.get("url", "")), s.get("param") or "", s.get("vuln_class") or "")
 
     def mark_tested(self, item):
         k = self._key(item)
@@ -239,7 +240,6 @@ class Engagement:
             t = {str(x): 0.0 for x in (t or [])}
             self.state["tested"] = t
         t[k] = time.time()                         # record WHEN -> enables the re-hunt window
-        t[self._legacy_key(item)] = t[k]           # backward compat during key format migration
         self.save()
 
     def mark_skipped(self, item, reason="unknown"):

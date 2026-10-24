@@ -68,7 +68,7 @@ def report(slug, base=DEFAULT_BASE):
     leads = [{"url": x.get("url"), "class": x.get("vuln_class"), "severity": x.get("severity"),
               "proof_note": x.get("proof_note", "")} for x in cand]
     return {"program": slug, "phase": d.get("phase"), "surface": len(surface),
-            "tested": len(d.get("tested") or []), "candidates": len(cand), "confirmed": len(conf),
+            "tested": len(tk), "candidates": len(cand), "confirmed": len(conf),
             "coverage_by_class": matrix, "leads": leads}
 
 

@@ -51,7 +51,7 @@ def _match(pattern, host):
 class Scope:
     def __init__(self, in_scope, out_of_scope=None, seeds=None, name="engagement",
                  user_agent="", endpoints=None, roe_extra="", skip_param_mining=False,
-                 proxy="", impersonate=""):
+                 proxy="", impersonate="", path_restrictions=None):
         self.in_scope = [p for p in (in_scope or []) if p.strip()]
         self.out_of_scope = [p for p in (out_of_scope or []) if p.strip()]
         self.seeds = seeds or []
@@ -62,6 +62,7 @@ class Scope:
         self.skip_param_mining = bool(skip_param_mining)  # True => no gau/katana crawl (scanner-forbidden)
         self.proxy = proxy or ""                    # egress proxy for edge-gated hosts (IP/geo filtered)
         self.impersonate = impersonate or ""        # curl_cffi TLS profile (e.g. safari_ios) via netget
+        self.path_restrictions = path_restrictions or {}  # {host: ["/allowed/path"]} from URL-scoped entries
 
     @classmethod
     def load(cls, path):
@@ -71,7 +72,8 @@ class Scope:
                    d.get("seeds", []), d.get("name", "engagement"),
                    user_agent=d.get("user_agent", ""), endpoints=d.get("endpoints", []),
                    roe_extra=d.get("roe_extra", ""), skip_param_mining=d.get("skip_param_mining", False),
-                   proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""))
+                   proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""),
+                   path_restrictions=d.get("path_restrictions", {}))
 
     def in_scope_host(self, target):
         host = _host_of(target)
@@ -79,7 +81,18 @@ class Scope:
             return False
         if any(_match(p, host) for p in self.out_of_scope):
             return False          # deny wins
-        return any(_match(p, host) for p in self.in_scope)
+        if not any(_match(p, host) for p in self.in_scope):
+            return False
+        if self.path_restrictions:
+            prefixes = self.path_restrictions.get(host)
+            if prefixes:
+                try:
+                    path = urlparse(target).path or "/"
+                except Exception:
+                    path = "/"
+                if not any(path.startswith(pfx) for pfx in prefixes):
+                    return False
+        return True
 
     def reject_reason(self, target):
         """Return None if in scope, else a human reason (for logging)."""
@@ -90,6 +103,15 @@ class Scope:
             return f"{host} matches an out-of-scope rule"
         if not any(_match(p, host) for p in self.in_scope):
             return f"{host} matches no in-scope rule (default deny)"
+        if self.path_restrictions:
+            prefixes = self.path_restrictions.get(host)
+            if prefixes:
+                try:
+                    path = urlparse(target).path or "/"
+                except Exception:
+                    path = "/"
+                if not any(path.startswith(pfx) for pfx in prefixes):
+                    return f"{path} outside allowed path(s) for {host}: {prefixes}"
         return None
 
 

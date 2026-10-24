@@ -31,15 +31,20 @@ HOST_RE = re.compile(r"^\*?\.?[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}$")
 WEB_TYPES = {"web-application", "web", "api", "url", "website", "wildcard", "domain", "ip-address", ""}
 
 
-def _host(s):
-    """Normalize one scope entry to a host/wildcard, or None if it isn't host-like."""
+def _host_and_path(s):
+    """Normalize scope entry to (host/wildcard, path_prefix_or_None)."""
     if not isinstance(s, str):
-        return None
+        return None, None
     s = s.strip()
-    if not s or " " in s:                      # "ExpressVPN APIs", "TrustedServer Bonus" -> skip
-        return None
+    if not s or " " in s:
+        return None, None
+    path = None
     if "://" in s:
-        s = urlparse(s).netloc or s
+        parsed = urlparse(s)
+        p = (parsed.path or "").rstrip("*").rstrip("/")
+        if p and p != "/":
+            path = p
+        s = parsed.netloc or s
     s = s.split("/")[0].strip().lower().rstrip(".")
     if s.startswith("*."):
         core = s[2:]
@@ -47,7 +52,13 @@ def _host(s):
         core = s[1:]
     else:
         core = s
-    return s if HOST_RE.match(core) else None
+    return (s if HOST_RE.match(core) else None), path
+
+
+def _host(s):
+    """Normalize one scope entry to a host/wildcard, or None if it isn't host-like."""
+    h, _ = _host_and_path(s)
+    return h
 
 
 def _entries(blob, key):
@@ -71,10 +82,18 @@ def _type_ok(it):
 def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (not just a handful) so
                                             # recon+hunt covers sandbox/vendors/etc, not only the primary host
     in_hosts, out_hosts, dropped = set(), set(), []
+    path_restrictions = {}
 
     def add_in(s):
-        h = _host(s)
-        (in_hosts.add(h) if h else dropped.append(s))
+        h, path = _host_and_path(s)
+        if h:
+            in_hosts.add(h)
+            if path:
+                path_restrictions.setdefault(h, [])
+                if path not in path_restrictions[h]:
+                    path_restrictions[h].append(path)
+        else:
+            dropped.append(s)
 
     if isinstance(blob, list):
         for s in blob:
@@ -101,8 +120,11 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
         if len(seeds) >= seed_limit:
             break
 
-    return {"name": name, "in_scope": sorted(in_hosts), "out_of_scope": sorted(out_hosts),
-            "seeds": seeds, "_dropped_non_host": [d for d in dropped if d][:20]}
+    result = {"name": name, "in_scope": sorted(in_hosts), "out_of_scope": sorted(out_hosts),
+              "seeds": seeds, "_dropped_non_host": [d for d in dropped if d][:20]}
+    if path_restrictions:
+        result["path_restrictions"] = path_restrictions
+    return result
 
 
 def _cmd_convert(a):
