@@ -83,7 +83,7 @@ def _clean_host(h):
     h = str(h or "").strip()
     h = re.sub(r"(?i)^https?://", "", h)          # strip scheme
     h = h.split("/", 1)[0]                         # strip any path
-    h = re.split(r"[\s(,;]", h, 1)[0]             # cut at first space / '(' / ',' / ';' (annotations)
+    h = re.split(r"[\s(,;]", h, maxsplit=1)[0]     # cut at first space / '(' / ',' / ';' (annotations)
     return h.strip().strip(".")
 
 
