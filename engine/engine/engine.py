@@ -45,7 +45,7 @@ def _deepen(items):
         d = dict(it)
         d["vuln_class"] = "deep"
         d.pop("vuln_classes", None)
-        k = (d.get("url", ""), d.get("param", ""))
+        k = (d.get("method", "GET"), d.get("url", ""), d.get("param", ""))
         if k not in seen:
             seen.add(k)
             out.append(d)
@@ -856,7 +856,10 @@ class Engine:
         """Drop a just-written tested mark so a refused nothing is retried, not closed."""
         t = self.eng.state.get("tested")
         if isinstance(t, dict) and item:
-            t.pop(f"{item.get('url')}|{item.get('param','')}|{item.get('vuln_class','')}", None)
+            legacy = f"{item.get('url')}|{item.get('param','')}|{item.get('vuln_class','')}"
+            modern = f"{item.get('method','GET')}|{legacy}"
+            t.pop(legacy, None)
+            t.pop(modern, None)
             self.eng.save()
 
     def _needs_authz_gate(self, url):
@@ -1300,9 +1303,9 @@ class Engine:
                              f"— failover to {alt} ({fbt}s)")
                 f = self._hunt_agent(it, model=alt, timeout=fbt)
                 if f and f.get("error") == "timeout":
-                    self.eng.mark_tested(it)
+                    self.eng.mark_skipped(it, "double_timeout")
                     self.eng.log(f"hunt: INCONCLUSIVE (double-timeout) {it.get('vuln_class')}@{it['url']} "
-                                 "— marked tested, moving on (too heavy for the budget)")
+                                 "— marked skipped, moving on (too heavy for the budget)")
                     continue
             if f and f.get("error"):
                 # a transient agent error (parse/rate-limit/timeout) must NOT permanently mark the

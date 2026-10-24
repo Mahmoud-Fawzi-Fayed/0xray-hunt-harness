@@ -116,7 +116,12 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
         apex = h[2:] if h.startswith("*.") else h
         if apex not in seen and "*" not in apex:
             seen.add(apex)
-            seeds.append("https://" + apex)
+            paths = path_restrictions.get(h, [])
+            if paths:
+                for p in paths:
+                    seeds.append("https://" + apex + p)
+            else:
+                seeds.append("https://" + apex)
         if len(seeds) >= seed_limit:
             break
 

@@ -318,6 +318,10 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
     if scope_hosts:
         all_endpoints.extend(_endpoints_from_js(eng_dir, scope_hosts))
 
+    # Source 5: Burp proxy history
+    if scope_hosts:
+        all_endpoints.extend(_endpoints_from_burp(scope_hosts))
+
     merged = merge_endpoints(all_endpoints)
     features = group_by_feature(merged)
     features = annotate_test_opportunities(features)

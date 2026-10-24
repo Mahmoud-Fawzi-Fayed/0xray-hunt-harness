@@ -90,7 +90,7 @@ class Scope:
                     path = urlparse(target).path or "/"
                 except Exception:
                     path = "/"
-                if not any(path.startswith(pfx) for pfx in prefixes):
+                if not any(path == pfx or path.startswith(pfx + "/") or pfx.endswith("/") and path.startswith(pfx) for pfx in prefixes):
                     return False
         return True
 
@@ -110,7 +110,7 @@ class Scope:
                     path = urlparse(target).path or "/"
                 except Exception:
                     path = "/"
-                if not any(path.startswith(pfx) for pfx in prefixes):
+                if not any(path == pfx or path.startswith(pfx + "/") or pfx.endswith("/") and path.startswith(pfx) for pfx in prefixes):
                     return f"{path} outside allowed path(s) for {host}: {prefixes}"
         return None
 
