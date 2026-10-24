@@ -367,19 +367,25 @@ class Orchestrator:
             except Exception as e:  # noqa: BLE001
                 self.eng.eng.log(f"auth: provisioning skipped ({type(e).__name__}: {e})")
         phases = ["recon", "rank", "map"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
-        self.eng.run(phases)
+        engine_result = self.eng.run(phases) or {}
+        failed = engine_result.get("failed_phases") or []
+        if failed:
+            self.eng.eng.log(f"orchestrator: engine phases failed: {failed} — results may be incomplete")
         drafted, held = self.draft_gate()
         new_drafts = [d for d in drafted if d.get("new")]
         if new_drafts:
-            self._email_drafts(new_drafts)             # email each finding ONCE — only drafts NEW this round
+            self._email_drafts(new_drafts)
         elif not self.eng.eng.state.get("confirmed"):
             self.eng.eng.log("orchestrator: no confirmed finding THIS pass — NOT a conclusion. "
                              "Invent the next test from live bytes / re-recon for new surface "
                              "(redteam-mindset: DO NOT STOP).")
-        summary = {**self.eng.eng.summary(), "drafted": len(drafted), "held_dups": len(held),
+        status = "partial" if failed else "done"
+        summary = {**self.eng.eng.summary(), "status": status,
+                   "failed_phases": failed,
+                   "drafted": len(drafted), "held_dups": len(held),
                    "held_policy": len(getattr(self, "_policy", []) or []),
                    "submitted": 0, "dir": self.eng.eng.dir}
-        self.eng.eng.log(f"orchestrator done | {summary}")
+        self.eng.eng.log(f"orchestrator {status} | {summary}")
         return summary
 
     def _status_email(self, msg):

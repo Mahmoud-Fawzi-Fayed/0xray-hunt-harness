@@ -28,6 +28,19 @@ _RL_STATE = {}  # host -> {"backoff": float, "consecutive_blocks": int, "last_re
 _RL_MAX_BACKOFF = 30.0
 _RL_BLOCK_PAUSE = 300  # 5 min pause after 5 consecutive 403s
 
+# Defense-in-depth scope guard — set by engine init via set_scope_guard()
+_SCOPE_GUARD = None  # Scope instance or None (disabled)
+
+
+def set_scope_guard(scope):
+    """Set the module-level scope guard. Called by engine at init."""
+    global _SCOPE_GUARD
+    _SCOPE_GUARD = scope
+
+
+class ScopeViolation(Exception):
+    """Raised when a request targets an out-of-scope host."""
+
 
 def _rate_limit(host, status):
     """Update per-host rate state after a response."""
@@ -88,9 +101,14 @@ def _pick_proxy(proxy, proxy_list):
     return proxy
 
 
-def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug=None, allow_redirects=False):
+def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug=None, allow_redirects=False,
+        _bypass_scope=False):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
+    if _SCOPE_GUARD and not _bypass_scope:
+        reason = _SCOPE_GUARD.reject_reason(url)
+        if reason:
+            return 0, "", {"_error": f"scope violation: {reason}"}
     ua, imp, proxy, proxy_list = _cfg()
     h = dict(headers or {})
     if ua:

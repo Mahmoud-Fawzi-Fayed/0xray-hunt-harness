@@ -200,6 +200,12 @@ class Engine:
         self.allow_intrusive = bool(allow_intrusive) or os.environ.get("HUNT_INTRUSIVE") == "1"
         self.expand = expand
         self.parallel = max(1, parallel)
+        # Defense-in-depth: arm netget scope guard so no HTTP request can escape scope
+        try:
+            import netget
+            netget.set_scope_guard(self.scope)
+        except Exception:
+            pass
         self.eng.log(f"engine start | scope={self.scope.name} in={self.scope.in_scope} "
                      f"out={self.scope.out_of_scope} seeds={self.scope.seeds} mock={mock} "
                      f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}")
@@ -1999,14 +2005,23 @@ class Engine:
 
     def run(self, phases):
         self._drop_own_session_oauth()
+        failed_phases = []
         for ph in ALL_PHASES:
             if ph in phases:
                 try:
                     getattr(self, ph)()
-                except Exception as e:                    # one phase failing must not abort the rest
+                except Exception as e:
+                    failed_phases.append(ph)
                     self.eng.log(f"phase {ph} error (continuing with partial state): {type(e).__name__}: {e}")
-        self.eng.set_phase("done")
-        self.eng.log(f"engine done | {self.eng.summary()}")
+        if failed_phases:
+            self.eng.set_phase("partial")
+            self.eng.state["failed_phases"] = failed_phases
+            self.eng.save()
+            self.eng.log(f"engine partial | failed: {failed_phases} | {self.eng.summary()}")
+        else:
+            self.eng.set_phase("done")
+            self.eng.log(f"engine done | {self.eng.summary()}")
+        return {"status": "partial" if failed_phases else "done", "failed_phases": failed_phases}
 
 
 # ---- mock fixtures for --mock flow validation (no agents) ----

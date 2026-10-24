@@ -113,6 +113,18 @@ def _endpoints_from_surface(state):
 
 
 # ---------------------------------------------------------------- source: Burp proxy history
+def _host_matches_scope(host, scope_hosts):
+    """Check if host matches any scope host (exact or subdomain, not substring)."""
+    if not host:
+        return False
+    host = host.lower().rstrip(".")
+    for sh in scope_hosts:
+        sh = sh.lower().rstrip(".")
+        if host == sh or host.endswith("." + sh):
+            return True
+    return False
+
+
 def _endpoints_from_burp(scope_hosts):
     """Extract endpoints from Burp proxy history via MCP (if available)."""
     try:
@@ -132,7 +144,7 @@ def _endpoints_from_burp(scope_hosts):
             method = entry.get("method") or "GET"
             from urllib.parse import urlparse
             host = urlparse(url).hostname or ""
-            if not any(h in host for h in scope_hosts):
+            if not _host_matches_scope(host, scope_hosts):
                 continue
             key = f"{method}:{url}"
             if key in seen:
@@ -388,19 +400,26 @@ def write_artifacts(slug, profile, eng_dir, base=DEFAULT_BASE, state=None):
                         f"| {a.get('confidence','')} |\n")
             f.write("\n")
 
-        # coverage summary
-        tested = set()
-        untested = set()
+        # coverage summary — observed means seen in traffic/profile, NOT security-tested
+        observed = set()
+        inferred = set()
         for feat in fmap["features"]:
             for a in feat["actions"]:
                 key = f"{a.get('method')}:{a.get('url','')[:80]}"
                 if a.get("confidence") == "observed":
-                    tested.add(key)
+                    observed.add(key)
                 else:
-                    untested.add(key)
+                    inferred.add(key)
+
+        # check actual tested count from state
+        tested_count = 0
+        if state:
+            tested_count = len(state.get("tested") or {})
+
         f.write("## Coverage\n\n")
-        f.write(f"- **Tested/observed:** {len(tested)} endpoints\n")
-        f.write(f"- **Inferred/untested:** {len(untested)} endpoints\n")
+        f.write(f"- **Observed in traffic/profile:** {len(observed)} endpoints\n")
+        f.write(f"- **Inferred from JS/docs:** {len(inferred)} endpoints\n")
+        f.write(f"- **Security-tested (from state):** {tested_count} operations\n")
         all_opps = set()
         for feat in fmap["features"]:
             all_opps.update(feat.get("test_opportunities", []))
@@ -529,6 +548,8 @@ def _cmd_selftest(_a):
     assert "# Feature Map" in md
     assert "| Method |" in md
     assert "## Coverage" in md
+    assert "Observed in traffic" in md
+    assert "Security-tested" in md
     assert "Test opportunities" in md
 
     # Test with empty inputs (should not crash)
