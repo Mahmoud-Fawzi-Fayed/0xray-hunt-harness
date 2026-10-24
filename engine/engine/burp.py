@@ -182,6 +182,23 @@ def write_project_mcp_config(output_path=None):
     return output_path
 
 
+def query_proxy_history(timeout=15):
+    """Query Burp proxy history via `claude mcp call`. Returns list of entries or []."""
+    if not is_burp_available():
+        return []
+    try:
+        result = subprocess.run(
+            ["claude", "mcp", "call", "burp", "get_proxy_http_history"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout) if result.stdout.strip() else []
+        return data if isinstance(data, list) else []
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, OSError):
+        return []
+
+
 def agent_burp_preamble():
     """Return the Burp MCP preamble text to inject into hunt agent prompts.
     Only returns content if Burp is available or registered."""

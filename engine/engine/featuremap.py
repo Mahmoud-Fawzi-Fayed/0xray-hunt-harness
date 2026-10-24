@@ -124,16 +124,10 @@ def _endpoints_from_burp(scope_hosts):
 
     eps = []
     try:
-        import subprocess
-        result = subprocess.run(
-            ["claude", "mcp", "call", "burp", "get_proxy_http_history"],
-            capture_output=True, text=True, timeout=15
-        )
-        if result.returncode != 0:
-            return []
-        entries = json.loads(result.stdout) if result.stdout.strip() else []
+        from burp import query_proxy_history
+        entries = query_proxy_history()
         seen = set()
-        for entry in (entries if isinstance(entries, list) else []):
+        for entry in entries:
             url = entry.get("url") or ""
             method = entry.get("method") or "GET"
             from urllib.parse import urlparse
@@ -344,7 +338,8 @@ def write_artifacts(slug, profile, eng_dir, base=DEFAULT_BASE, state=None):
     if state is None:
         try:
             import state as ST
-            state = ST.load(slug, base)
+            eng = ST.Engagement(base, slug)
+            state = eng.state
         except Exception:  # noqa: BLE001
             state = {}
 
