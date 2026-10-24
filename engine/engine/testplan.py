@@ -315,8 +315,21 @@ def state_key(case):
 VALID_STATUSES = {"pending", "running", "tested", "blocked", "inconclusive", "disproved", "confirmed"}
 _EVIDENCE_REQUIRED = {"tested", "confirmed", "disproved", "inconclusive"}
 
+_CATEGORY_EVIDENCE = {
+    "idor": ["user", "other user", "owner", "access", "id", "object"],
+    "bac": ["role", "admin", "forbidden", "unauthorized", "access", "privilege"],
+    "xss": ["reflect", "script", "payload", "alert", "inject", "stored", "dom"],
+    "sqli": ["sql", "error", "database", "query", "extract", "union", "syntax"],
+    "ssrf": ["internal", "localhost", "127.0.0", "metadata", "server", "oob"],
+    "upload": ["file", "upload", "content-type", "extension", "mime", "shell"],
+    "open_redirect": ["redirect", "location", "external", "domain", "url"],
+    "mass_assignment": ["param", "role", "admin", "privilege", "field", "assign"],
+    "auth_bypass": ["bypass", "token", "session", "auth", "login", "password"],
+    "rate_limit": ["rate", "limit", "429", "throttle", "brute", "attempt"],
+}
 
-def validate_evidence(status, evidence):
+
+def validate_evidence(status, evidence, category=None):
     """Check evidence meets requirements for the given status. Returns (ok, reason)."""
     if status not in _EVIDENCE_REQUIRED:
         return True, ""
@@ -329,12 +342,27 @@ def validate_evidence(status, evidence):
                                            "modified", "created", "deleted", "executed"))
         if not (has_req or has_impact):
             return False, "confirmed findings must include request/response or impact evidence"
+        if category and category in _CATEGORY_EVIDENCE:
+            cat_kw = _CATEGORY_EVIDENCE[category]
+            if not any(k in ev for k in cat_kw):
+                return False, f"'{category}' confirmation should reference: {', '.join(cat_kw[:3])}"
     if status == "disproved":
         has_defense = any(k in ev for k in ("403", "401", "denied", "blocked", "rejected",
                                             "not found", "no access", "forbidden"))
         if not has_defense:
             return False, "disproved results must describe the defensive response observed"
     return True, ""
+
+
+def resume_plan(plan_cases):
+    """Reset any 'running' cases back to 'pending' (for interrupted plans)."""
+    reset = 0
+    for case in (plan_cases or []):
+        if case.get("status") == "running":
+            case["status"] = "pending"
+            case.pop("executed_at", None)
+            reset += 1
+    return reset
 
 
 def mark_case(case, status, evidence=None):
@@ -441,7 +469,7 @@ def execute_plan(plan_cases, state, run_test_fn=None):
             result = run_test_fn(case)
             status = result.get("status", "inconclusive") if result else "inconclusive"
             evidence = result.get("evidence") if result else None
-            ok, reason = validate_evidence(status, evidence)
+            ok, reason = validate_evidence(status, evidence, category=case.get("category"))
             if not ok:
                 status = "inconclusive"
                 evidence = (evidence or "") + f" [evidence insufficient: {reason}]"
@@ -590,14 +618,43 @@ def _selftest(_a=None):
     plan = copy.deepcopy(result["plan"])
     st = {}
     def mock_runner(case):
-        return {"status": "confirmed",
-                "evidence": "HTTP POST request to /api/users returned 200 with leaked user data"}
+        cat = case.get("category", "")
+        ev = "HTTP POST request to /api/users returned 200 — "
+        if cat == "idor":
+            ev += "accessed other user's object with different owner id"
+        elif cat == "bac":
+            ev += "non-admin role accessed admin endpoint, privilege escalation"
+        elif cat == "xss":
+            ev += "reflected script payload in response body"
+        elif cat == "sqli":
+            ev += "SQL syntax error in database query response"
+        elif cat == "mass_assignment":
+            ev += "role param accepted, privilege escalated via field assignment"
+        elif cat == "sensitive_data":
+            ev += "response leaked user PII data"
+        elif cat == "auth_bypass":
+            ev += "bypass auth token validation, session accessed"
+        elif cat in ("open_redirect", "ssrf"):
+            ev += "redirect to external domain location confirmed"
+        elif cat == "upload":
+            ev += "file upload with shell extension accepted"
+        elif cat == "rate_limit":
+            ev += "no rate limit after 100 attempts, brute throttle missing"
+        else:
+            ev += "response returned sensitive data accessed"
+        return {"status": "confirmed", "evidence": ev}
     execute_plan(plan, st, run_test_fn=mock_runner)
     confirmed = [c for c in plan if c["status"] == "confirmed"]
     assert len(confirmed) > 0, "execute_plan didn't run any cases"
     assert "request" in confirmed[0].get("evidence", "").lower()
     assert confirmed[0].get("executed_at")
     assert st.get("tested_checks"), "tested_checks not updated"
+
+    # resume_plan resets running → pending
+    running_plan = [{"status": "running"}, {"status": "confirmed"}, {"status": "pending"}]
+    n = resume_plan(running_plan)
+    assert n == 1 and running_plan[0]["status"] == "pending"
+    assert running_plan[1]["status"] == "confirmed"  # untouched
 
     # plan_coverage
     cov = plan_coverage(plan)

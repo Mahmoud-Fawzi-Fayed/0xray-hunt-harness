@@ -272,8 +272,106 @@ def _cmd_selftest(_a):
         check("p", bad, url=bad, base=base)  # type: ignore
         _host_of(bad)                        # type: ignore
     os.environ.pop("HUNT_MAX_ACCOUNTS", None)
+
+    # denial_summary
+    ds = denial_summary("acme", base)
+    assert isinstance(ds, dict)
+    assert ds.get("total_denials", 0) >= 0
+
+    # redact_sensitive
+    assert "***" in redact_sensitive("Bearer eyJhbGciOiJ...")
+    assert "***" in redact_sensitive("password=secret123")
+    assert "safe text" == redact_sensitive("safe text")
+
     print("guardrails.py self-test: PASS")
     return 0
+
+
+def load_program_policy(program, base=None):
+    """Load a complete program policy: scope + rules + limits."""
+    scope = _load_scope(program, base)
+    s = scope or {}
+    try:
+        import scope as _scope_mod
+        ins = [_norm_scope_pattern(p) for p in (s.get("in_scope") or [])]
+        oos = [_norm_scope_pattern(p) for p in (s.get("out_of_scope") or [])]
+        scope_obj = _scope_mod.Scope(ins, oos,
+                                      path_restrictions=s.get("path_restrictions", {}),
+                                      out_path_restrictions=s.get("out_path_restrictions", {}),
+                                      user_agent=s.get("user_agent", ""),
+                                      proxy=s.get("proxy", ""),
+                                      impersonate=s.get("impersonate", ""))
+    except Exception:
+        scope_obj = None
+    return {
+        "scope": scope_obj,
+        "scope_raw": s,
+        "self_register_ok": s.get("self_register_ok", False),
+        "rate_limit": int(os.environ.get("HUNT_REQUESTS_PER_SECOND", "10")),
+        "max_accounts": max_accounts(),
+        "read_only": s.get("read_only", True),
+        "forbidden_techniques": list(BRUTE_ACTIONS),
+        "required_headers": {"User-Agent": s.get("user_agent", "")},
+        "roe_extra": s.get("roe_extra", ""),
+        "skip_param_mining": s.get("skip_param_mining", False),
+    }
+
+
+def denial_summary(program=None, base=None):
+    """Return counts of denials by type for a program."""
+    recs = read_audit(program, n=2000, base=base)
+    denials = [r for r in recs if not r.get("allowed")]
+    by_reason = {}
+    for d in denials:
+        reason = d.get("reason", "unknown")
+        key = reason.split(":")[0].strip() if ":" in reason else reason
+        by_reason[key] = by_reason.get(key, 0) + 1
+    return {"total_denials": len(denials), "by_type": by_reason}
+
+
+_SENSITIVE_RE = re.compile(
+    r"(Bearer\s+)\S+|"
+    r"((?:password|passwd|secret|token|api[_-]?key|authorization|session[_-]?id|csrf[_-]?token)\s*[=:]\s*)\S+|"
+    r"(eyJ[A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+    re.I)
+
+
+def redact_sensitive(text):
+    """Strip common secret patterns from text."""
+    if not isinstance(text, str):
+        return text
+    def _repl(m):
+        if m.group(1):
+            return m.group(1) + "***"
+        if m.group(2):
+            return m.group(2) + "***"
+        return "***"
+    return _SENSITIVE_RE.sub(_repl, text)
+
+
+# Request budget tracking
+_request_budget_count = 0
+_request_budget_limit = None
+
+
+def check_request_budget():
+    """Check if request budget is exhausted. Returns (ok, reason)."""
+    global _request_budget_count, _request_budget_limit
+    if _request_budget_limit is None:
+        _request_budget_limit = int(os.environ.get("HUNT_REQUEST_BUDGET", "10000"))
+    _request_budget_count += 1
+    if _request_budget_count > _request_budget_limit:
+        return False, f"request budget exhausted ({_request_budget_count}/{_request_budget_limit})"
+    return True, "ok"
+
+
+def get_request_count():
+    return _request_budget_count
+
+
+def reset_request_count():
+    global _request_budget_count
+    _request_budget_count = 0
 
 
 def main(argv=None):

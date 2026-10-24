@@ -15,8 +15,10 @@ import threading
 import time
 from http.server import HTTPServer
 
-ENGINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "engine")
+TESTS = os.path.dirname(os.path.abspath(__file__))
+ENGINE = os.path.join(TESTS, "..", "engine")
 sys.path.insert(0, ENGINE)
+sys.path.insert(0, TESTS)
 
 from vuln_app import VulnHandler
 
