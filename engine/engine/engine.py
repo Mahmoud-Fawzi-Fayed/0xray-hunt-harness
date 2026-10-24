@@ -146,8 +146,8 @@ def _endpoint_quality(s):
     return q
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
-ALL_PHASES = ["recon", "rank", "map", "hunt", "validate", "chain", "report"]
-DEFAULT_PHASES = ["recon", "rank", "map"]
+ALL_PHASES = ["recon", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
+DEFAULT_PHASES = ["recon", "rank", "map", "plan"]
 
 # generic infra/hosting/CDN fingerprints that are NOT worth auto-drafting a skill for (too generic)
 INFRA_TECH = {"nginx", "apache", "cloudflare", "akamai", "fastly", "varnish", "iis", "openresty",
@@ -206,6 +206,19 @@ class Engine:
             netget.set_scope_guard(self.scope)
         except Exception:
             pass
+        # Ensure _targets/slug.json exists so guardrails can load scope for this program
+        tgt_dir = os.path.join(os.path.expanduser(base), "_targets")
+        os.makedirs(tgt_dir, exist_ok=True)
+        tgt_path = os.path.join(tgt_dir, self.scope.name + ".json")
+        if not os.path.exists(tgt_path):
+            import json as _j
+            scope_data = {"name": self.scope.name, "in_scope": self.scope.in_scope,
+                          "out_of_scope": self.scope.out_of_scope}
+            if self.scope.path_restrictions:
+                scope_data["path_restrictions"] = self.scope.path_restrictions
+            if getattr(self.scope, "out_path_restrictions", None):
+                scope_data["out_path_restrictions"] = self.scope.out_path_restrictions
+            _j.dump(scope_data, open(tgt_path, "w"), indent=2)
         self.eng.log(f"engine start | scope={self.scope.name} in={self.scope.in_scope} "
                      f"out={self.scope.out_of_scope} seeds={self.scope.seeds} mock={mock} "
                      f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}")
@@ -1200,6 +1213,33 @@ class Engine:
             '"proof_note":"<empty or why limited>"}')
         self._preamble = "\n".join(p for p in parts if p)
         return self._preamble
+
+    # ---------------- plan ----------------
+    def plan(self):
+        """Generate security test plan from feature map and state."""
+        self.eng.set_phase("plan")
+        import testplan as TP
+        fmap_path = os.path.join(self.eng.dir, "feature-map.json")
+        fmap = {}
+        if os.path.isfile(fmap_path):
+            try:
+                fmap = json.load(open(fmap_path))
+            except (json.JSONDecodeError, OSError):
+                pass
+        if not fmap.get("endpoints"):
+            import featuremap as FM
+            fmap = FM.build_feature_map(self.eng.scope.name, eng_dir=self.eng.dir, state=self.eng.state)
+        result = TP.build_test_plan(fmap, state=self.eng.state,
+                                    scope={"in_scope": self.eng.scope.in_scope,
+                                           "out_of_scope": self.eng.scope.out_of_scope})
+        self.eng.state["test_plan"] = result["plan"]
+        self.eng.state["test_plan_summary"] = result["summary"]
+        plan_path = os.path.join(self.eng.dir, "test-plan.md")
+        with open(plan_path, "w") as f:
+            f.write(result["markdown"])
+        self.eng.log(f"test plan: {result['summary']['total_cases']} cases "
+                     f"({result['summary']['pending']} pending, "
+                     f"{result['summary']['coverage_pct']}% covered)")
 
     # ---------------- hunt ----------------
     def hunt(self):

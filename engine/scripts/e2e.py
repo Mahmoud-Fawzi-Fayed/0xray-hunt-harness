@@ -347,7 +347,8 @@ def s_capabilities(live):
 def s_guardrails():
     import guardrails as GR
     base = tempfile.mkdtemp(); os.makedirs(os.path.join(base, "_targets"))
-    json.dump({"name": "z", "in_scope": ["*.z.com"], "out_of_scope": ["admin.z.com"]},
+    json.dump({"name": "z", "in_scope": ["*.z.com"], "out_of_scope": ["admin.z.com"],
+               "self_register_ok": True},
               open(os.path.join(base, "_targets", "z.json"), "w"))
     a = GR.check("z", "register", url="https://api.z.com/s", base=base)[0]
     b = GR.check("z", "register", url="https://evil.com/s", base=base)[0]
