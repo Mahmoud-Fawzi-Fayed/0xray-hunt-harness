@@ -22,7 +22,7 @@ sys.path.insert(0, ENGINE)
 SKIP_TYPES = {"image", "font", "stylesheet", "media"}
 
 
-def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000, max_req=500, pages=5):
+def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000, max_req=500, pages=5, scope=None):
     """Render url and return captured requests [{method,url,type}] (XHR/fetch/doc/script/other), scope-filtered.
     `pages`>0 adds a BOUNDED, read-only deepening pass: scroll (lazy-loaded XHR) + visit up to `pages` more
     same-/in-scope in-app links (GET navigations only, never logout/delete/pay), under a hard time budget —
@@ -51,6 +51,29 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             except Exception:  # noqa: BLE001
                 pass
         pg = ctx.new_page()
+        # Block browser requests to out-of-scope hosts at the network layer
+        _scope_obj = None
+        if scope:
+            try:
+                import scope as _scope_mod
+                if isinstance(scope, _scope_mod.Scope):
+                    _scope_obj = scope
+                elif isinstance(scope, dict):
+                    _scope_obj = _scope_mod.Scope(scope.get("in_scope", []), scope.get("out_of_scope", []),
+                                                  path_restrictions=scope.get("path_restrictions", {}),
+                                                  out_path_restrictions=scope.get("out_path_restrictions", {}))
+            except Exception:
+                pass
+        if _scope_obj:
+            def _scope_route(route):
+                try:
+                    if not _scope_obj.in_scope_host(route.request.url):
+                        route.abort()
+                        return
+                except Exception:
+                    pass
+                route.continue_()
+            pg.route("**/*", _scope_route)
 
         def on_req(r):
             try:

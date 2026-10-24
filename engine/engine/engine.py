@@ -146,8 +146,8 @@ def _endpoint_quality(s):
     return q
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
-ALL_PHASES = ["recon", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
-DEFAULT_PHASES = ["recon", "rank", "map", "plan"]
+ALL_PHASES = ["recon", "explore", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
+DEFAULT_PHASES = ["recon", "explore", "rank", "map", "plan"]
 
 # generic infra/hosting/CDN fingerprints that are NOT worth auto-drafting a skill for (too generic)
 INFRA_TECH = {"nginx", "apache", "cloudflare", "akamai", "fastly", "varnish", "iis", "openresty",
@@ -1029,6 +1029,25 @@ class Engine:
             self.eng.log(f"deep-recon: browser capture ({trigger}) -> {added} new authed work unit(s)")
         except Exception as e:  # noqa: BLE001
             self.eng.log(f"deep-recon: browser skipped ({type(e).__name__}: {e})")
+
+    # ---------------- explore (functional discovery) ----------------
+    def explore(self):
+        self.eng.set_phase("explore")
+        try:
+            import explorer as EX
+            result = EX.analyze(self.eng.state, scope={"in_scope": self.scope.in_scope})
+            self.eng.state["app_model"] = result
+            self.eng.state.setdefault("surface", [])
+            for ep in result.get("api_surface", []):
+                self.eng.state["surface"].append({
+                    "url": ep["path"], "method": ep.get("method", "GET"),
+                    "params": ep.get("params", []), "confidence": "inferred",
+                    "source": "explorer/" + ep.get("source", "unknown"),
+                })
+            self.eng.save()
+            self.eng.log(f"explore: {result['stats']}")
+        except Exception as e:
+            self.eng.log(f"explore: skipped ({type(e).__name__}: {e})")
 
     # ---------------- rank ----------------
     def rank(self):
