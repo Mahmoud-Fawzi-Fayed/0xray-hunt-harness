@@ -586,7 +586,8 @@ def _selftest(_a=None):
     assert sk == "POST|https://a.com/x|id|idor", sk
 
     # execute_plan with mock runner (evidence must pass validation)
-    plan = result["plan"][:]
+    import copy
+    plan = copy.deepcopy(result["plan"])
     st = {}
     def mock_runner(case):
         return {"status": "confirmed",

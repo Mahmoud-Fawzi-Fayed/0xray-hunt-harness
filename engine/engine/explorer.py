@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import urlparse
 
 ENGINE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE)
@@ -242,6 +243,14 @@ def analyze(state, scope=None):
 
     roles = sorted(all_roles) if all_roles else ["anonymous", "authenticated"]
 
+    # Build structured inventory
+    burp_eps = [ep for ep in all_api_endpoints if ep.get("source") not in ("form-action", "button-action", "js-api-call")]
+    browser_only = [ep for ep in all_api_endpoints if ep.get("source") in ("form-action", "button-action", "js-api-call")]
+    inventory = build_inventory(
+        browser_caps, burp_eps, list(js_routes),
+        state, role=state.get("current_role"),
+    )
+
     return {
         "pages": pages,
         "workflows": workflows,
@@ -249,6 +258,7 @@ def analyze(state, scope=None):
         "hidden_features": hidden,
         "api_surface": api_surface,
         "feature_flags": sorted(all_features),
+        "inventory": inventory,
         "stats": {
             "pages_discovered": len(pages),
             "api_endpoints": len(api_surface),
@@ -256,6 +266,176 @@ def analyze(state, scope=None):
             "hidden_paths": len(hidden),
             "workflows": len(workflows),
             "roles": len(roles),
+            "inventory_features": inventory["stats"]["features"],
+            "inventory_operations": inventory["stats"]["operations"],
+        },
+    }
+
+
+_API_SPEC_PATHS = {
+    "/swagger.json", "/swagger.yaml", "/swagger-ui", "/swagger",
+    "/openapi.json", "/openapi.yaml", "/api-docs", "/v2/api-docs", "/v3/api-docs",
+    "/graphql", "/graphiql", "/playground",
+}
+
+_AUTH_INDICATORS = {"login", "signin", "auth", "token", "oauth", "session", "jwt"}
+_SESSION_PATTERNS = {
+    "jwt": re.compile(r"bearer|authorization|jwt", re.I),
+    "cookie": re.compile(r"set-cookie|session_?id|csrf", re.I),
+    "bearer": re.compile(r"api[_-]?key|x-api-key", re.I),
+}
+
+
+def _path_prefix(url, depth=2):
+    """Extract path prefix for feature grouping (first N segments)."""
+    try:
+        p = urlparse(url).path or "/"
+    except Exception:
+        p = "/"
+    parts = [s for s in p.split("/") if s]
+    return "/" + "/".join(parts[:depth]) if parts else "/"
+
+
+def _detect_api_specs(all_urls, api_surface):
+    """Find known API spec/introspection endpoints in captured URLs."""
+    specs = []
+    all_paths = set()
+    for u in all_urls:
+        try:
+            all_paths.add(urlparse(u).path.rstrip("/").lower())
+        except Exception:
+            pass
+    for ep in api_surface:
+        p = ep.get("path", "")
+        try:
+            all_paths.add(urlparse(p).path.rstrip("/").lower())
+        except Exception:
+            pass
+    for spec_path in _API_SPEC_PATHS:
+        if spec_path in all_paths:
+            specs.append({"path": spec_path, "type": "graphql" if "graph" in spec_path else "openapi"})
+    return specs
+
+
+def _detect_session_mechanism(browser_caps):
+    """Infer session mechanism from captured data."""
+    text = json.dumps(browser_caps)
+    for mech, pat in _SESSION_PATTERNS.items():
+        if pat.search(text):
+            return mech
+    return "unknown"
+
+
+def build_inventory(browser_captures, burp_endpoints, js_routes, state, role=None):
+    """Build a normalized application inventory model.
+
+    Returns structured inventory: features → operations → workflows → auth model.
+    """
+    ops_by_prefix = {}
+    op_id = 0
+
+    def _add_op(url, method, params, source, confidence, auth_req=False, status=None, evidence=None):
+        nonlocal op_id
+        op_id += 1
+        prefix = _path_prefix(url)
+        op = {
+            "id": op_id,
+            "url": url,
+            "method": (method or "GET").upper(),
+            "params": params or [],
+            "auth_required": auth_req,
+            "source": source,
+            "confidence": confidence,
+            "roles_tested": [role] if role else [],
+            "evidence": evidence,
+        }
+        if status is not None:
+            op["status"] = status
+        ops_by_prefix.setdefault(prefix, []).append(op)
+        return op
+
+    # Browser captures
+    for cap in (browser_captures or []):
+        src = cap.get("source", "")
+        if src == "form":
+            raw_inputs = cap.get("inputs") or []
+            params = [i if isinstance(i, str) else i.get("name", "") for i in raw_inputs
+                      if (i if isinstance(i, str) else i.get("name"))]
+            _add_op(cap.get("action", ""), cap.get("method", "POST"), params,
+                     "form", "observed", evidence="browser_capture")
+        elif src == "button" and cap.get("formaction"):
+            _add_op(cap["formaction"], cap.get("formmethod", "POST"), [],
+                     "button", "observed", evidence="browser_capture")
+        elif src in ("fetch", "xhr"):
+            _add_op(cap.get("url", ""), cap.get("method", "GET"), [],
+                     "js-api", "observed", status=cap.get("status"), evidence="browser_capture")
+
+    # Burp endpoints
+    for ep in (burp_endpoints or []):
+        url = ep.get("url") or ep.get("path", "")
+        auth = ep.get("auth_required", False)
+        status = ep.get("status")
+        _add_op(url, ep.get("method", "GET"), ep.get("params", []),
+                 "burp", "observed", auth_req=auth or (status in (401, 403)),
+                 status=status, evidence="burp_history")
+
+    # JS routes
+    for route in (js_routes or []):
+        r = route if isinstance(route, str) else route.get("path", "")
+        if r:
+            _add_op(r, "GET", [], "js-analysis", "inferred", evidence="js_discovery")
+
+    # Build features from grouped operations
+    features = []
+    for prefix, ops in sorted(ops_by_prefix.items()):
+        name_parts = [s for s in prefix.split("/") if s]
+        name = "-".join(name_parts) if name_parts else "root"
+        features.append({
+            "name": name,
+            "path_prefix": prefix,
+            "operations": ops,
+            "workflows": [],
+        })
+
+    # Detect auth-related features and build workflows
+    auth_ops = []
+    for feat in features:
+        is_auth = any(kw in feat["path_prefix"].lower() for kw in _AUTH_INDICATORS)
+        if is_auth:
+            auth_ops.extend(feat["operations"])
+            feat["workflows"].append({
+                "name": f"{feat['name']}-flow",
+                "steps": [op["url"] for op in feat["operations"]],
+            })
+
+    # Detect API specs from all collected URLs
+    all_urls = set()
+    for feat in features:
+        for op in feat["operations"]:
+            if op["url"]:
+                all_urls.add(op["url"])
+    api_specs = _detect_api_specs(all_urls, [])
+
+    # Auth model
+    login_eps = [op["url"] for op in auth_ops if op["url"]]
+    roles_discovered = set()
+    for feat in features:
+        for op in feat["operations"]:
+            roles_discovered.update(op.get("roles_tested", []))
+    roles_discovered.discard(None)
+
+    return {
+        "features": features,
+        "api_specs": api_specs,
+        "auth_model": {
+            "login_endpoints": sorted(set(login_eps)),
+            "roles_discovered": sorted(roles_discovered) or ["anonymous"],
+            "session_mechanism": _detect_session_mechanism(browser_captures or []),
+        },
+        "stats": {
+            "features": len(features),
+            "operations": op_id,
+            "api_specs": len(api_specs),
         },
     }
 
@@ -350,6 +530,36 @@ def _cmd_selftest(_a):
     # Test empty state doesn't crash
     empty = analyze({})
     assert empty["stats"]["pages_discovered"] == 0
+
+    # Test build_inventory directly
+    inv = build_inventory(
+        browser_captures=[
+            {"source": "form", "action": "/api/login", "method": "POST", "inputs": ["email", "password"]},
+            {"source": "fetch", "url": "/api/v1/users/me", "method": "GET", "status": 200},
+            {"source": "fetch", "url": "/graphql", "method": "POST"},
+        ],
+        burp_endpoints=[
+            {"url": "/api/v1/orders", "method": "GET", "params": ["page"], "status": 200},
+            {"url": "/api/v1/orders", "method": "POST", "params": ["item_id", "qty"], "status": 401,
+             "auth_required": True},
+        ],
+        js_routes=["/api/internal/debug", "/admin/settings"],
+        state={},
+        role="user_a",
+    )
+    assert inv["features"], "should have features"
+    assert inv["stats"]["operations"] >= 5, inv["stats"]
+    assert inv["api_specs"], f"should detect /graphql: {inv['api_specs']}"
+    assert inv["auth_model"]["roles_discovered"] == ["user_a"], inv["auth_model"]
+    # Auth model detects login endpoint
+    assert any("login" in ep for ep in inv["auth_model"]["login_endpoints"]), inv["auth_model"]
+    # Operations have role tracking
+    ops = [op for f in inv["features"] for op in f["operations"]]
+    assert all(op.get("roles_tested") == ["user_a"] for op in ops), "all ops should track role"
+
+    # Verify analyze() includes inventory
+    assert result.get("inventory"), "analyze should include inventory"
+    assert result["inventory"]["features"], "inventory should have features"
 
     print("explorer.py self-test: PASS")
     return 0
