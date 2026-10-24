@@ -219,7 +219,7 @@ def intake(url_or_slug, platform=None, base=DEFAULT_BASE, scope_file=None, launc
         "seeds": resolved.get("seeds", []),
     }
     if launch:
-        result["launch_cmd"] = f"python3 engine/engine/engine.py run --scope {result['scope_path']} --base {base}"
+        result["launch_cmd"] = f"python3 engine/engine/engine.py --scope {result['scope_path']} --base {base}"
         log(f"intake: to launch pipeline: {result['launch_cmd']}")
     return result
 

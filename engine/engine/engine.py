@@ -1022,7 +1022,7 @@ class Engine:
             # Store rich browser capture data for featuremap consumption
             self.eng.state.setdefault("browser_capture", [])
             for it in (caps or []):
-                if it.get("inputs") or it.get("source") in ("form", "button"):
+                if it.get("inputs") or it.get("source") in ("form", "button", "fetch", "xhr"):
                     self.eng.state["browser_capture"].append(it)
             self.eng.state["browser_recon_ts"] = time.time()
             self.eng.save()
@@ -1039,8 +1039,11 @@ class Engine:
             self.eng.state["app_model"] = result
             self.eng.state.setdefault("surface", [])
             for ep in result.get("api_surface", []):
+                url = ep.get("path") or ep.get("url") or ""
+                if not url:
+                    continue
                 self.eng.state["surface"].append({
-                    "url": ep["path"], "method": ep.get("method", "GET"),
+                    "url": url, "method": ep.get("method", "GET"),
                     "params": ep.get("params", []), "confidence": "inferred",
                     "source": "explorer/" + ep.get("source", "unknown"),
                 })

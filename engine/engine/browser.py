@@ -164,7 +164,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             })).filter(f => f.action).slice(0, 50)""") or []
             for form in forms:
                 reqs.append({"method": form["method"], "url": form["action"],
-                             "type": "form", "inputs": form.get("inputs", [])})
+                             "source": "form", "inputs": form.get("inputs", [])})
         except Exception:
             pass
         try:
@@ -181,7 +181,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             for btn in buttons:
                 if btn.get("action"):
                     reqs.append({"method": btn.get("method", "GET"), "url": btn["action"],
-                                 "type": "button", "function": btn.get("text", "")})
+                                 "source": "button", "function": btn.get("text", "")})
         except Exception:
             pass
         try:
@@ -190,7 +190,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                 u = call.get("url", "")
                 if u and u.startswith("http"):
                     reqs.append({"method": call.get("method", "GET"), "url": u,
-                                 "type": call.get("src", "fetch")})
+                                 "source": call.get("src", "fetch")})
         except Exception:
             pass
         b.close()

@@ -40,8 +40,20 @@ def _impersonating():
 
 def _get_impersonate(url, timeout=20):
     import netget
-    _code, text, hdrs = netget.get(url, timeout=timeout, ident=os.environ.get("HUNT_RECON_IDENT") or None)
-    return text, url, {k: v for k, v in (hdrs or {}).items() if not k.startswith("_")}
+    current = url
+    for _ in range(6):
+        code, text, hdrs = netget.get(current, timeout=timeout,
+                                      ident=os.environ.get("HUNT_RECON_IDENT") or None)
+        clean = {k: v for k, v in (hdrs or {}).items() if not k.startswith("_")}
+        if code == 0:
+            return "", url, clean
+        location = (hdrs or {}).get("location", "")
+        if code not in (301, 302, 303, 307, 308) or not location:
+            return text, current, clean
+        if (hdrs or {}).get("_redirect_blocked"):
+            return "", url, clean
+        current = urljoin(current, location)
+    return "", url, {}
 
 try:
     import requests
@@ -1002,6 +1014,28 @@ if __name__ == "__main__":
                     os.environ[key] = value
         assert calls[0][1]["headers"]["User-Agent"] == "Recon-Test-UA", calls
         assert calls[0][1]["ident"] == "A" and calls[0][1]["slug"] == "probe-test", calls
+
+        # Impersonated recon follows only scoped redirects and returns the final body/URL.
+        old_netget = sys.modules.get("netget")
+        redirect_calls = []
+        try:
+            def _redirects(u, **kw):
+                redirect_calls.append(u)
+                if u == "https://x.test/":
+                    return 302, "", {"location": "/login"}
+                return 200, "login-body", {"server": "test"}
+            sys.modules["netget"] = types.SimpleNamespace(get=_redirects)
+            body, final, hdrs = _get_impersonate("https://x.test/")
+            assert (body, final, hdrs.get("server")) == ("login-body", "https://x.test/login", "test")
+            assert redirect_calls == ["https://x.test/", "https://x.test/login"], redirect_calls
+            sys.modules["netget"] = types.SimpleNamespace(
+                get=lambda u, **kw: (0, "", {"_error": "scope violation"}))
+            assert _get_impersonate("https://x.test/") == ("", "https://x.test/", {})
+        finally:
+            if old_netget is None:
+                sys.modules.pop("netget", None)
+            else:
+                sys.modules["netget"] = old_netget
 
         # Pruning scans past dead early candidates until the live-retention cap or hard probe budget.
         old_probe = _probe

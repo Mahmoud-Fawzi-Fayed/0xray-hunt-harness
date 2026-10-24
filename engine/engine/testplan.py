@@ -302,6 +302,83 @@ def _render_markdown(cases, summary, slug, scope=None):
     return "\n".join(lines)
 
 
+def state_key(case):
+    """Convert a test case to the state.py tested-key format: method|url|param|category."""
+    url = case.get("endpoint", "")
+    method = case.get("method", "GET")
+    params = case.get("params") or []
+    param = params[0] if params else ""
+    category = case.get("category", "")
+    return f"{method}|{url}|{param}|{category}"
+
+
+def mark_case(case, status, evidence=None):
+    """Update a test case with execution results."""
+    case["status"] = status
+    case["executed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if evidence:
+        case["evidence"] = evidence
+    return case
+
+
+def execute_plan(plan_cases, state, run_test_fn=None):
+    """Execute pending test cases from a plan.
+
+    run_test_fn(case) -> {"status": "confirmed"|"disproved"|"inconclusive"|"blocked",
+                          "evidence": str}
+    If run_test_fn is None, returns the plan unchanged (plan-only mode).
+    """
+    if not run_test_fn:
+        return plan_cases
+
+    state.setdefault("tested_checks", {})
+    for case in plan_cases:
+        if case.get("status") != "pending":
+            continue
+        case["status"] = "running"
+        try:
+            result = run_test_fn(case)
+            status = result.get("status", "inconclusive") if result else "inconclusive"
+            evidence = result.get("evidence") if result else None
+            mark_case(case, status, evidence)
+        except Exception as e:
+            mark_case(case, "blocked", str(e))
+
+        sk = state_key(case)
+        ep_key = f"{case.get('method','GET')}|{case.get('endpoint','')}"
+        state["tested_checks"].setdefault(ep_key, [])
+        if case["category"] not in state["tested_checks"][ep_key]:
+            state["tested_checks"][ep_key].append(case["category"])
+
+    return plan_cases
+
+
+def pending_cases(plan_cases, priority=None):
+    """Return pending test cases, optionally filtered by priority."""
+    cases = [c for c in plan_cases if c.get("status") == "pending"]
+    if priority:
+        cases = [c for c in cases if c.get("priority") == priority]
+    return cases
+
+
+def plan_coverage(plan_cases):
+    """Return coverage stats from an executed plan."""
+    by_status = {}
+    for c in plan_cases:
+        by_status.setdefault(c.get("status", "unknown"), []).append(c)
+    total = len(plan_cases)
+    done = len(by_status.get("confirmed", [])) + len(by_status.get("disproved", [])) + len(by_status.get("inconclusive", []))
+    return {
+        "total": total, "executed": done,
+        "confirmed": len(by_status.get("confirmed", [])),
+        "disproved": len(by_status.get("disproved", [])),
+        "inconclusive": len(by_status.get("inconclusive", [])),
+        "blocked": len(by_status.get("blocked", [])),
+        "pending": len(by_status.get("pending", [])),
+        "coverage_pct": round(100 * done / max(total, 1), 1),
+    }
+
+
 # ---------------------------------------------------------------- CLI
 
 def _cmd_plan(a):
@@ -396,6 +473,34 @@ def _selftest(_a=None):
     empty = build_test_plan({"endpoints": []})
     assert empty["summary"]["total_cases"] == 0
     assert empty["markdown"]
+
+    # state_key bridge
+    sk = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
+    assert sk == "POST|https://a.com/x|id|idor", sk
+
+    # execute_plan with mock runner
+    plan = result["plan"][:]
+    st = {}
+    def mock_runner(case):
+        return {"status": "confirmed", "evidence": "test proof"}
+    execute_plan(plan, st, run_test_fn=mock_runner)
+    confirmed = [c for c in plan if c["status"] == "confirmed"]
+    assert len(confirmed) > 0, "execute_plan didn't run any cases"
+    assert confirmed[0].get("evidence") == "test proof"
+    assert confirmed[0].get("executed_at")
+    assert st.get("tested_checks"), "tested_checks not updated"
+
+    # plan_coverage
+    cov = plan_coverage(plan)
+    assert cov["confirmed"] > 0
+    assert cov["pending"] == 0
+    assert cov["coverage_pct"] == 100.0
+
+    # pending_cases filter
+    plan2 = [{"status": "pending", "priority": "high"}, {"status": "pending", "priority": "low"},
+             {"status": "confirmed", "priority": "high"}]
+    assert len(pending_cases(plan2)) == 2
+    assert len(pending_cases(plan2, priority="high")) == 1
 
     print("testplan.py self-test: PASS")
     return 0

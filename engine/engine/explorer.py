@@ -168,7 +168,7 @@ def analyze(state, scope=None):
                 all_api_endpoints.append({
                     "method": form["method"],
                     "path": form["url"],
-                    "params": [i.get("name", "") for i in form["inputs"] if i.get("name")],
+                    "params": [i if isinstance(i, str) else i.get("name", "") for i in form.get("inputs", []) if (i if isinstance(i, str) else i.get("name"))],
                     "source": "form-action",
                 })
 
