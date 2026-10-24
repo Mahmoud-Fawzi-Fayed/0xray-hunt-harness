@@ -70,6 +70,20 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             except Exception:  # noqa: BLE001
                 pass
         pg.on("request", on_req)
+        # Intercept fetch/XHR at JS level to capture calls triggered by interactions
+        pg.add_init_script("""
+        window.__xray_api = [];
+        const _f = window.fetch;
+        window.fetch = function(u, o) {
+            try { window.__xray_api.push({url:''+u, method:(o&&o.method||'GET').toUpperCase(), src:'fetch'}); } catch(e){}
+            return _f.apply(this, arguments);
+        };
+        const _xo = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(m, u) {
+            try { window.__xray_api.push({url:''+u, method:m.toUpperCase(), src:'xhr'}); } catch(e){}
+            return _xo.apply(this, arguments);
+        };
+        """)
         try:
             pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
             pg.wait_for_timeout(int(wait * 1000))
@@ -114,6 +128,40 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                         pass
         except Exception as e:  # noqa: BLE001
             reqs.append({"_nav_error": str(e)[:160]})
+        # Extract forms, buttons, and intercepted API calls
+        try:
+            forms = pg.evaluate("""() => Array.from(document.querySelectorAll('form')).map(f => ({
+                action: f.action, method: (f.method||'GET').toUpperCase(),
+                inputs: Array.from(f.querySelectorAll('input,select,textarea'))
+                    .map(i => i.name).filter(n => n).slice(0, 20)
+            })).filter(f => f.action).slice(0, 50)""") or []
+            for form in forms:
+                reqs.append({"method": form["method"], "url": form["action"],
+                             "type": "form", "inputs": form.get("inputs", [])})
+        except Exception:
+            pass
+        try:
+            buttons = pg.evaluate("""() => Array.from(document.querySelectorAll(
+                'button[formaction], [role=button][data-url], a[href^="javascript"]'
+            )).map(b => ({
+                action: b.getAttribute('formaction') || b.getAttribute('data-url') || '',
+                text: (b.innerText||'').trim().slice(0,60)
+            })).filter(b => b.action).slice(0, 30)""") or []
+            for btn in buttons:
+                if btn.get("action"):
+                    reqs.append({"method": "POST", "url": btn["action"],
+                                 "type": "button", "function": btn.get("text", "")})
+        except Exception:
+            pass
+        try:
+            api_calls = pg.evaluate("() => (window.__xray_api || []).slice(0, 200)") or []
+            for call in api_calls:
+                u = call.get("url", "")
+                if u and u.startswith("http"):
+                    reqs.append({"method": call.get("method", "GET"), "url": u,
+                                 "type": call.get("src", "fetch")})
+        except Exception:
+            pass
         b.close()
     if scope_hosts:
         def ok(x):

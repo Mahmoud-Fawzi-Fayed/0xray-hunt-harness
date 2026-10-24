@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
-![skills](https://img.shields.io/badge/skills-89-blue)
-![engine modules](https://img.shields.io/badge/engine%20modules-40-blue)
+![skills](https://img.shields.io/badge/skills-90-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-41-blue)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
@@ -36,7 +36,7 @@ flowchart TB
     N["n8n monitor<br/>watches for NEW surface"]
     BR["Host bridge :8899<br/>token-gated control"]
     EN["Engine<br/>recon → rank → hunt → validate → dedup"]
-    SK["89 skills<br/>hunt-xss, hunt-idor, hunt-mcp, ..."]
+    SK["90 skills<br/>hunt-xss, hunt-idor, hunt-mcp, ..."]
     TG["Targets<br/>one scope file per program"]
     OUT["Draft finding<br/>published + emailed (with CC)"]
 
@@ -111,7 +111,7 @@ qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent �
 | [`harness/`](harness/) | the glue: n8n `docker-compose`, the novelty-monitor workflow, launch scripts |
 | [`harness/.env.example`](harness/.env.example) | every setting documented — copy to `.env` and fill in |
 | [`.claude/`](.claude/) | Claude Code agents + skills (hunt, report, triage, research) |
-| [`engine/`](engine/) | the full engine (40 modules) + 89 skills |
+| [`engine/`](engine/) | the full engine (41 modules) + 90 skills |
 | [`MANUAL.md`](MANUAL.md) | the deep operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
@@ -179,16 +179,28 @@ The harness teaches itself. When it encounters an unknown stack, vuln class, or 
 3. `evolve_skill()` auto-refines learned skills with proven vectors and FP patterns
 4. Skills are pull-on-demand references — agents reason from the live response first
 
+## Program Intake
+
+Universal program URL → engagement pipeline:
+
+```bash
+python3 engine/engine/intake.py start "https://hackerone.com/acme"
+python3 engine/engine/intake.py start --platform bugcrowd --slug acme
+```
+
+Supports H1, Bugcrowd, YesWeHack, Intigriti. Auto-detects platform from URL, fetches scope via bb-platforms MCP, converts to engine scope.json, creates engagement directory.
+
 ## Deep Functional Mapping
 
 Before hunting, the harness maps the target's full attack surface:
 
 - **Feature → Action → Endpoint → Method → Parameters → Auth → Test Opportunities**
-- Sources: profile agent, browser capture, JS bundle analysis, Burp proxy history, OpenAPI introspection
+- Sources: profile agent, browser capture (forms/buttons/XHR), JS bundle analysis (fetch/axios detection), Burp proxy history, OpenAPI introspection
 - Outputs: `feature-map.json`, `feature-map.md`, `endpoints.jsonl` per engagement
+- Coverage section distinguishes observed-in-traffic from security-tested endpoints
 - Annotates test opportunities: IDOR/BOLA, SSRF, auth-bypass, payment-logic, file-upload, GraphQL, etc.
 
-## Skills catalog (89)
+## Skills catalog (90)
 
 Each `hunt-*` skill is a playbook: *what actually pays*, how to detect it, the minimum proof, and a
 dedup gate. Plus auto-learned tech skills that evolve from hunt outcomes.

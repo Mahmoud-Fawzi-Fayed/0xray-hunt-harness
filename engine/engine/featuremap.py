@@ -164,32 +164,47 @@ def _endpoints_from_burp(scope_hosts):
 
 
 # ---------------------------------------------------------------- source: JS bundle routes
+_JS_ROUTE_RE = re.compile(
+    r"""(?:['"`])(/(?:api|v[0-9]+|graphql|auth|admin|internal|ws|webhook|"""
+    r"""upload|download|export|import|users?|account|settings|dashboard|"""
+    r"""profile|search|billing|payment|order|cart|checkout|invite|team|"""
+    r"""org|project|resource|notification|config|health|status|metrics|"""
+    r"""log|audit|report|manage|tokens?|session|register|verify|reset|"""
+    r"""callback|hook|event|message|comment|review|file|image|media|asset)"""
+    r"""[/a-zA-Z0-9_\-{}:.]*?)(?:['"`])""",
+    re.I
+)
+
+_JS_FETCH_RE = re.compile(
+    r"""(?:fetch|axios\.(?:get|post|put|patch|delete)|\.(?:get|post|put|patch|delete))\s*\(\s*"""
+    r"""[`'"]((?:https?://[^'"`\s]+|/[^'"`\s]+))['"`]"""
+    r"""(?:\s*,\s*\{[^}]*method\s*:\s*['"](\w+)['"])?""",
+    re.I
+)
+
+
 def _endpoints_from_js(eng_dir, scope_hosts):
     """Extract API routes from JS bundle analysis (jsdiff output)."""
     eps = []
     js_dir = os.path.join(eng_dir, "js")
     if not os.path.isdir(js_dir):
         return eps
-    route_re = re.compile(
-        r"""(?:['"`])(/(?:api|v[0-9]+|graphql|auth|admin|internal|ws|webhook|upload|download|export|import)"""
-        r"""[/a-zA-Z0-9_\-{}:.]*?)(?:['"`])""",
-        re.I
-    )
     seen = set()
     for fname in os.listdir(js_dir):
         if not fname.endswith((".js", ".map", ".json")):
             continue
         try:
             with open(os.path.join(js_dir, fname), "r", errors="replace") as f:
-                content = f.read(500_000)
+                content = f.read(1_000_000)
         except OSError:
             continue
-        for match in route_re.finditer(content):
+        # Pattern 1: route string literals
+        for match in _JS_ROUTE_RE.finditer(content):
             path = match.group(1)
             if path in seen or len(path) > 200:
                 continue
             seen.add(path)
-            for host in scope_hosts[:1]:
+            for host in scope_hosts:
                 eps.append({
                     "method": "GET", "url": f"https://{host}{path}",
                     "function": "JS-discovered route",
@@ -198,6 +213,67 @@ def _endpoints_from_js(eng_dir, scope_hosts):
                     "source": "js-bundle",
                     "confidence": "inferred",
                 })
+        # Pattern 2: fetch/axios calls with method detection
+        for match in _JS_FETCH_RE.finditer(content):
+            url_str = match.group(1)
+            method = (match.group(2) or "GET").upper()
+            if url_str.startswith("/"):
+                for host in scope_hosts:
+                    full_url = f"https://{host}{url_str}"
+                    key = f"{method}:{full_url}"
+                    if key not in seen:
+                        seen.add(key)
+                        eps.append({
+                            "method": method, "url": full_url,
+                            "function": "JS fetch/axios call",
+                            "params": re.findall(r"\{(\w+)\}", url_str),
+                            "auth_required": True,
+                            "source": "js-fetch",
+                            "confidence": "inferred",
+                        })
+            elif url_str.startswith("http"):
+                key = f"{method}:{url_str}"
+                if key not in seen:
+                    from urllib.parse import urlparse
+                    host = urlparse(url_str).hostname or ""
+                    if _host_matches_scope(host, scope_hosts):
+                        seen.add(key)
+                        eps.append({
+                            "method": method, "url": url_str,
+                            "function": "JS fetch/axios call",
+                            "params": re.findall(r"\{(\w+)\}", url_str),
+                            "auth_required": True,
+                            "source": "js-fetch",
+                            "confidence": "inferred",
+                        })
+    return eps
+
+
+# ---------------------------------------------------------------- source: browser capture
+def _endpoints_from_browser_capture(state):
+    """Extract endpoints from browser capture results stored in state."""
+    eps = []
+    seen = set()
+    for item in (state.get("browser_capture") or []):
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or ""
+        method = (item.get("method") or "GET").upper()
+        key = f"{method}:{url}"
+        if not url or key in seen:
+            continue
+        seen.add(key)
+        ep = {
+            "method": method, "url": url,
+            "function": item.get("function") or "",
+            "params": list(item.get("params") or item.get("inputs") or []),
+            "auth_required": True,
+            "source": item.get("source") or "browser-capture",
+            "confidence": "observed",
+        }
+        if item.get("source") == "form":
+            ep["function"] = f"form: {item.get('function', '')}"
+        eps.append(ep)
     return eps
 
 
@@ -327,6 +403,10 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
     # Source 5: Burp proxy history
     if scope_hosts:
         all_endpoints.extend(_endpoints_from_burp(scope_hosts))
+
+    # Source 6: browser capture (forms, buttons, XHR)
+    if state:
+        all_endpoints.extend(_endpoints_from_browser_capture(state))
 
     merged = merge_endpoints(all_endpoints)
     features = group_by_feature(merged)

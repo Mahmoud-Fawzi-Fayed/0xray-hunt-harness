@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
 Engine: `~/0xray-hunt-harness/engine/engine/`. Config/secrets: `~/0xray-hunt-harness/harness/.env`.
-Recon tools: `~/go/bin/` (add to PATH). Skills: `~/0xray-hunt-harness/engine/skills/` (89 skills).
+Recon tools: `~/go/bin/` (add to PATH). Skills: `~/0xray-hunt-harness/engine/skills/` (90 skills). Modules: 41.
 Findings publish to `https://finding.redtracefai.com` + email `x00xrayx00x@gmail.com`. STOP at draft.
 
 ## Model routing
@@ -12,6 +12,7 @@ Findings publish to `https://finding.redtracefai.com` + email `x00xrayx00x@gmail
 
 ## Pipeline (every target, in order)
 
+0. **Intake** — `intake.py start <program-url>`. H1/Bugcrowd/YWH URL → scope.json → engagement.
 1. **Scope** — `targets.py show --program <p>`. Fetch via `bb-platforms` MCP if not registered.
 2. **Profile** — `/profile target.com`. Understand app, roles, crown jewels, API surface before hunting.
 3. **Novelty** — `novelty.py watch`. Hunt new/changed surface first. `jsdiff.py` on redeployed bundles.
