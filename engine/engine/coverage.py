@@ -67,14 +67,16 @@ def report(slug, base=DEFAULT_BASE):
               for c, v in sorted(by_class.items())}
     leads = [{"url": x.get("url"), "class": x.get("vuln_class"), "severity": x.get("severity"),
               "proof_note": x.get("proof_note", "")} for x in cand]
+    security_tested = len(d.get("tested_checks") or {})
     return {"program": slug, "phase": d.get("phase"), "surface": len(surface),
-            "tested": len(tk), "candidates": len(cand), "confirmed": len(conf),
+            "tested": len(tk), "security_tested": security_tested,
+            "candidates": len(cand), "confirmed": len(conf),
             "coverage_by_class": matrix, "leads": leads}
 
 
 def fmt(r):
     L = [f"# Coverage — {r['program']} (phase={r.get('phase')})",
-         f"surface={r['surface']}  tested={r['tested']}  candidates={r['candidates']}  confirmed={r['confirmed']}",
+         f"surface={r['surface']}  tested={r['tested']}  security_tested={r.get('security_tested',0)}  candidates={r['candidates']}  confirmed={r['confirmed']}",
          "", "  class              tested/total   endpoints"]
     for c, v in r["coverage_by_class"].items():
         L.append(f"  {c:18s} {v['tested']}/{v['total']:<11} {v['endpoints']}")

@@ -31,6 +31,8 @@ def _match(pattern, host):
     p = pattern.strip().lower()
     if not p or not host:
         return False
+    if p.startswith("="):
+        return host == p[1:]
     if p.startswith("re:"):
         try:
             return re.search(p[3:], host) is not None
@@ -163,6 +165,11 @@ def _selftest():
     assert s3.in_scope_host("https://api.example.com/api/research/papers")
     assert not s3.in_scope_host("https://api.example.com/admin/users")
     assert not s3.in_scope_host("https://api.example.com/")
+    # S03: exact-host mode with = prefix
+    s4 = Scope(in_scope=["=api.example.com"])
+    assert s4.in_scope_host("https://api.example.com/x")
+    assert not s4.in_scope_host("https://sub.api.example.com")
+    assert not s4.in_scope_host("https://example.com")
     print("scope.py self-test: PASS")
 
 

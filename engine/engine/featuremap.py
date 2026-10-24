@@ -125,6 +125,25 @@ def _host_matches_scope(host, scope_hosts):
     return False
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _normalize_path_params(path):
+    """Replace numeric and UUID path segments with :id/:uuid for dedup."""
+    parts = path.split("/")
+    out = []
+    for p in parts:
+        if not p:
+            out.append(p)
+        elif p.isdigit() or (len(p) > 1 and p.lstrip("-").isdigit()):
+            out.append(":id")
+        elif _UUID_RE.match(p):
+            out.append(":uuid")
+        else:
+            out.append(p)
+    return "/".join(out)
+
+
 def _endpoints_from_burp(scope_hosts):
     """Extract endpoints from Burp proxy history via MCP (if available)."""
     try:
@@ -143,13 +162,15 @@ def _endpoints_from_burp(scope_hosts):
             url = entry.get("url") or ""
             method = entry.get("method") or "GET"
             from urllib.parse import urlparse
-            host = urlparse(url).hostname or ""
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
             if not _host_matches_scope(host, scope_hosts):
                 continue
-            key = f"{method}:{url}"
-            if key in seen:
+            norm_path = _normalize_path_params(parsed.path or "/")
+            dedup_key = f"{method}:{host}{norm_path}"
+            if dedup_key in seen:
                 continue
-            seen.add(key)
+            seen.add(dedup_key)
             eps.append({
                 "method": method, "url": url,
                 "function": "",
@@ -170,10 +191,13 @@ _JS_ROUTE_RE = re.compile(
     r"""profile|search|billing|payment|order|cart|checkout|invite|team|"""
     r"""org|project|resource|notification|config|health|status|metrics|"""
     r"""log|audit|report|manage|tokens?|session|register|verify|reset|"""
-    r"""callback|hook|event|message|comment|review|file|image|media|asset)"""
-    r"""[/a-zA-Z0-9_\-{}:.]*?)(?:['"`])""",
+    r"""callback|hook|event|message|comment|review|file|image|media|asset|"""
+    r"""pages|_next|__api)"""
+    r"""[/a-zA-Z0-9_\-{}:.\[\]]*?)(?:['"`])""",
     re.I
 )
+
+_JS_REST_PARAM_RE = re.compile(r"""(?:['"`])(/[a-zA-Z0-9_/-]*/:[\w]+[/a-zA-Z0-9_\-:.]*)(?:['"`])""")
 
 _JS_FETCH_RE = re.compile(
     r"""(?:fetch|axios\.(?:get|post|put|patch|delete)|\.(?:get|post|put|patch|delete))\s*\(\s*"""
@@ -209,6 +233,21 @@ def _endpoints_from_js(eng_dir, scope_hosts):
                     "method": "GET", "url": f"https://{host}{path}",
                     "function": "JS-discovered route",
                     "params": re.findall(r"\{(\w+)\}", path),
+                    "auth_required": True,
+                    "source": "js-bundle",
+                    "confidence": "inferred",
+                })
+        # Pattern 1b: REST-style parameterized routes (/users/:id)
+        for match in _JS_REST_PARAM_RE.finditer(content):
+            path = match.group(1)
+            if path in seen or len(path) > 200:
+                continue
+            seen.add(path)
+            for host in scope_hosts[:1]:
+                eps.append({
+                    "method": "GET", "url": f"https://{host}{path}",
+                    "function": "JS REST-param route",
+                    "params": re.findall(r":(\w+)", path),
                     "auth_required": True,
                     "source": "js-bundle",
                     "confidence": "inferred",

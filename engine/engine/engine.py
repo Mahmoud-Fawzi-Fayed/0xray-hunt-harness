@@ -2011,8 +2011,15 @@ class Engine:
     def run(self, phases):
         self._drop_own_session_oauth()
         failed_phases = []
+        _eng_timeout = int(os.environ.get("HUNT_ENGAGEMENT_TIMEOUT", "3600") or 3600)
+        _eng_start = time.time()
         for ph in ALL_PHASES:
             if ph in phases:
+                if time.time() - _eng_start > _eng_timeout:
+                    self.eng.log(f"engagement timeout ({_eng_timeout}s) — stopping before {ph}")
+                    failed_phases.extend(p for p in ALL_PHASES if p in phases and p not in failed_phases
+                                         and ALL_PHASES.index(p) >= ALL_PHASES.index(ph))
+                    break
                 try:
                     getattr(self, ph)()
                 except Exception as e:

@@ -136,6 +136,12 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
         result["path_restrictions"] = path_restrictions
     if out_path_restrictions:
         result["out_path_restrictions"] = out_path_restrictions
+    # S07: pass through program policy keys so rules aren't lost during intake
+    if isinstance(blob, dict):
+        for key in ("self_register_ok", "roe_extra", "skip_param_mining",
+                     "user_agent", "proxy", "impersonate"):
+            if key in blob:
+                result[key] = blob[key]
     return result
 
 
@@ -170,6 +176,14 @@ def _selftest(_a=None):
     sc2 = convert(paddle, "paddle")
     assert "api.paddle.com" in sc2["in_scope"] and "buy.paddle.com" in sc2["out_of_scope"], sc2
     assert "https://api.paddle.com" in sc2["seeds"], sc2
+
+    # S07: program policy keys pass through
+    policy_blob = {"in_scope": ["a.com"], "self_register_ok": True,
+                   "roe_extra": "no automated scanning", "skip_param_mining": True}
+    sc_pol = convert(policy_blob, "pol")
+    assert sc_pol["self_register_ok"] is True, sc_pol
+    assert sc_pol["roe_extra"] == "no automated scanning", sc_pol
+    assert sc_pol["skip_param_mining"] is True, sc_pol
 
     sc3 = convert(["a.com", "https://b.com/x", "not a host"], "list")
     assert sc3["in_scope"] == ["a.com", "b.com"], sc3

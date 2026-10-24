@@ -101,10 +101,15 @@ def _pick_proxy(proxy, proxy_list):
     return proxy
 
 
-def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug=None, allow_redirects=False,
+_DEFAULT_TIMEOUT = int(os.environ.get("HUNT_REQUEST_TIMEOUT", "30") or 30)
+
+
+def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, slug=None, allow_redirects=False,
         _bypass_scope=False):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
+    if timeout is None:
+        timeout = _DEFAULT_TIMEOUT
     if _SCOPE_GUARD and not _bypass_scope:
         reason = _SCOPE_GUARD.reject_reason(url)
         if reason:

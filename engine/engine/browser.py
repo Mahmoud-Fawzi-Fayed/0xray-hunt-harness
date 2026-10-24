@@ -75,8 +75,12 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
         window.__xray_api = [];
         const _f = window.fetch;
         window.fetch = function(u, o) {
-            try { window.__xray_api.push({url:''+u, method:(o&&o.method||'GET').toUpperCase(), src:'fetch'}); } catch(e){}
-            return _f.apply(this, arguments);
+            var entry = {url:''+u, method:(o&&o.method||'GET').toUpperCase(), src:'fetch'};
+            try { window.__xray_api.push(entry); } catch(e){}
+            return _f.apply(this, arguments).then(function(r) {
+                try { entry.status = r.status; } catch(e){}
+                return r;
+            });
         };
         const _xo = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(m, u) {

@@ -233,13 +233,20 @@ class Engagement:
     def _pat_key(s):
         return (s.get("method", "GET"), url_pattern(s.get("url", "")), s.get("param") or "", s.get("vuln_class") or "")
 
-    def mark_tested(self, item):
+    def mark_tested(self, item, checks=None):
         k = self._key(item)
         t = self.state.get("tested")
         if not isinstance(t, dict):                # migrate legacy list -> timestamped dict
             t = {str(x): 0.0 for x in (t or [])}
             self.state["tested"] = t
         t[k] = time.time()                         # record WHEN -> enables the re-hunt window
+        if checks:
+            tc = self.state.setdefault("tested_checks", {})
+            existing = tc.get(k, [])
+            for c in checks:
+                if c and c not in existing:
+                    existing.append(c)
+            tc[k] = existing
         self.save()
 
     def mark_skipped(self, item, reason="unknown"):
