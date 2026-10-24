@@ -1339,7 +1339,31 @@ class Engine:
         if collapsed:
             self.eng.log(f"hunt: {collapsed} duplicate object-id URL(s) collapsed to one pattern each")
         self._honor_review_skips()
-        wl = self.eng.worklist()[: self.max_hunts]
+        # --- test-plan-driven hunting: prioritize planned cases over raw worklist ---
+        import testplan as TP
+        plan_cases = self.eng.state.get("test_plan") or []
+        pending = TP.pending_cases(plan_cases) if plan_cases else []
+        _plan_index = {}  # state_key -> case, for post-hunt status update
+        if pending:
+            prio_order = {"high": 0, "medium": 1, "low": 2}
+            pending.sort(key=lambda c: prio_order.get(c.get("priority", "low"), 3))
+            plan_urls = set()
+            for c in pending:
+                sk = TP.state_key(c)
+                _plan_index[sk] = c
+                plan_urls.add(c.get("endpoint", ""))
+            raw_wl = self.eng.worklist()
+            plan_items, other_items = [], []
+            for it in raw_wl:
+                if it.get("url") in plan_urls:
+                    plan_items.append(it)
+                else:
+                    other_items.append(it)
+            wl = (plan_items + other_items)[: self.max_hunts]
+            self.eng.log(f"hunt: {len(plan_items)} items from test plan, {len(other_items)} from worklist")
+        else:
+            wl = self.eng.worklist()[: self.max_hunts]
+        self._plan_index = _plan_index
         todo = []
         skipped_static = 0
         for it in wl:
@@ -1421,6 +1445,20 @@ class Engine:
                                  f"— not marking tested, will retry next round")
                     continue
             self.eng.mark_tested(it)
+            # --- update test plan case status ---
+            if self._plan_index:
+                _sk = f"{it.get('method','GET')}|{it.get('url','')}|{it.get('param','')}|{it.get('vuln_class','')}"
+                _pc = self._plan_index.get(_sk)
+                if _pc:
+                    try:
+                        if f and f.get("vulnerable"):
+                            TP.mark_case(_pc, "confirmed", evidence=f.get("evidence") or f.get("proof_note") or "confirmed by hunt agent")
+                        elif f and f.get("skipped"):
+                            TP.mark_case(_pc, "blocked", evidence=f.get("skipped") or "skipped by hunt agent")
+                        else:
+                            TP.mark_case(_pc, "disproved", evidence=(f or {}).get("analysis") or "no vulnerability found by hunt agent")
+                    except (ValueError, TypeError):
+                        pass  # evidence validation failed — leave as pending
             self._feedback_surface(f)                 # endpoints the agent found mid-hunt -> back into the worklist
             if f and f.get("rate_limited"):
                 self.eng.log("hunt: ⚠ model usage limit hit — remaining results may be partial")
@@ -1476,6 +1514,12 @@ class Engine:
                 self._remember(it, analysis, classes, result="nothing", finding=f)
                 tail = f" — {str(analysis)[:160]}" if analysis else ""
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}{tail}")
+        # --- persist updated test plan statuses ---
+        if plan_cases and self._plan_index:
+            cov = TP.plan_coverage(plan_cases)
+            self.eng.state["test_plan"] = plan_cases
+            self.eng.log(f"hunt: test plan updated — {cov.get('executed',0)}/{cov.get('total',0)} executed, "
+                         f"{cov.get('confirmed',0)} confirmed, {cov.get('disproved',0)} disproved")
 
     def _hunt_deep(self, it, model=None, timeout=None):
         """ANALYSIS-DRIVEN per-endpoint pentest: the agent reads the endpoint's source/JS, reasons about what

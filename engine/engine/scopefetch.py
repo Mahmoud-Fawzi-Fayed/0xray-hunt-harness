@@ -110,11 +110,12 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
             for s in _entries(blob, key):
                 h, path = _host_and_path(s)
                 if h:
-                    out_hosts.add(h)
                     if path:
                         out_path_restrictions.setdefault(h, [])
                         if path not in out_path_restrictions[h]:
                             out_path_restrictions[h].append(path)
+                    else:
+                        out_hosts.add(h)
 
     seeds, seen = [], set()
     for h in sorted(in_hosts):
@@ -139,7 +140,8 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
     # S07: pass through program policy keys so rules aren't lost during intake
     if isinstance(blob, dict):
         for key in ("self_register_ok", "roe_extra", "skip_param_mining",
-                     "user_agent", "proxy", "impersonate"):
+                     "user_agent", "proxy", "impersonate",
+                     "rate_limit", "prohibited_actions", "required_headers", "auth_restrictions"):
             if key in blob:
                 result[key] = blob[key]
     return result
@@ -187,6 +189,12 @@ def _selftest(_a=None):
 
     sc3 = convert(["a.com", "https://b.com/x", "not a host"], "list")
     assert sc3["in_scope"] == ["a.com", "b.com"], sc3
+
+    # Path-only exclusion must NOT block the whole host
+    sc4 = convert({"in_scope": ["*.example.com"], "out_of_scope": ["https://example.com/admin"]}, "pathex")
+    assert "example.com" not in sc4["out_of_scope"], f"path-only exclusion blocked whole host: {sc4}"
+    assert sc4.get("out_path_restrictions", {}).get("example.com") == ["/admin"], sc4
+
     print("scopefetch.py self-test: PASS")
     return 0
 
