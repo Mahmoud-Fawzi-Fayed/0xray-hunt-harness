@@ -1678,8 +1678,8 @@ class Engine:
             ctx = {"vuln_class": it.get("vuln_class"), "params": len(it.get("params") or []),
                    "auth_required": it.get("auth_required", False),
                    "previous_result": it.get("_previous_result")}
-            model, _c = MR.smart_model("hunt", ctx)
-            self.eng.log(f"hunt: model={model} (complexity={_c}) for {it.get('vuln_class')}@{it.get('url','?')[:60]}")
+            model, _eff, _budget = MR.route("hunt", ctx)
+            self.eng.log(f"hunt: model={model} effort={_eff} (budget={_budget['max_tokens']}) for {it.get('vuln_class')}@{it.get('url','?')[:60]}")
         return self._hunt_deep(it, model, timeout)
 
     def _feedback_surface(self, f):

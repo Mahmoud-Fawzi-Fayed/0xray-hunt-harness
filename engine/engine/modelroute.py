@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-modelroute.py — dynamic model selection based on task complexity.
+modelroute.py — dynamic model selection AND effort control based on task complexity.
 
-Routes tasks to the cheapest model that can handle them reliably.
-Three tiers:
-  Haiku 5.5  — simple/fast: recon, scope, dedup, novelty, parsing
-  Sonnet 5.5 — balanced: mapping, planning, coverage, profiling
-  Opus 4.6   — deep reasoning: vuln hunting, exploit verification, auth testing
+Routes tasks to the cheapest model that can handle them, at the lowest effort that
+produces reliable results. Two dimensions:
 
-Override with HUNT_MODEL_OVERRIDE env var to force a specific model for all tasks.
-Per-tier override: HUNT_MODEL_HAIKU, HUNT_MODEL_SONNET, HUNT_MODEL_OPUS.
+  Model (which):   Haiku 5.5 → Sonnet 5.5 → Opus 4.6
+  Effort (how hard): low (1K tokens) → medium (4K) → high (16K + 8K thinking)
+
+Escalation ladder (try cheapest first, upgrade on unclear results):
+  Haiku+low → Haiku+medium → Sonnet+medium → Sonnet+high → Opus+high
+
+Env overrides:
+  HUNT_MODEL_OVERRIDE  — force all tasks to one model
+  HUNT_EFFORT_OVERRIDE — force all tasks to one effort level
+  HUNT_MAX_TOKENS      — cap max_tokens across all tasks
+  HUNT_MODEL_HAIKU/SONNET/OPUS — per-tier model override
 
 CLI:
   python3 engine/engine/modelroute.py route --task hunt
@@ -99,6 +105,41 @@ _COMPLEX_CLASSES = frozenset({
 
 DEFAULT_MODEL = SONNET
 
+# ---------------------------------------------------------------------------
+# Effort levels — how hard the model thinks (token budgets)
+# ---------------------------------------------------------------------------
+TASK_EFFORT = {
+    # Low effort — simple, deterministic
+    "recon": "low", "novelty": "low", "dedup": "low", "scope_check": "low",
+    "dns": "low", "parse": "low", "filter": "low", "observe": "low",
+    "intake": "low", "tempmail": "low", "sms_check": "low",
+
+    # Medium effort — needs some analysis
+    "map": "medium", "plan": "medium", "profile": "medium", "explore": "medium",
+    "coverage": "medium", "report_format": "medium", "browser_analyze": "medium",
+    "inventory": "medium", "learn": "medium", "testplan": "medium",
+
+    # High effort — deep reasoning required
+    "hunt": "high", "verify": "high", "exploit": "high", "auth_test": "high",
+    "impact": "high", "bypass": "high", "report_draft": "high",
+    "hunt_deep": "high", "validate": "high",
+}
+
+TOKEN_BUDGETS = {
+    "low":    {"max_tokens": 1024,  "thinking_budget": 0},
+    "medium": {"max_tokens": 4096,  "thinking_budget": 2048},
+    "high":   {"max_tokens": 16384, "thinking_budget": 8192},
+}
+
+# Progressive escalation: try cheapest first, upgrade on failure
+ESCALATION_LADDER = [
+    (HAIKU,  "low"),
+    (HAIKU,  "medium"),
+    (SONNET, "medium"),
+    (SONNET, "high"),
+    (OPUS,   "high"),
+]
+
 
 def _tier_model(tier):
     """Resolve tier to model, respecting per-tier env overrides."""
@@ -107,6 +148,73 @@ def _tier_model(tier):
     if tier == OPUS:
         return os.environ.get("HUNT_MODEL_OPUS", OPUS)
     return os.environ.get("HUNT_MODEL_SONNET", SONNET)
+
+
+def effort_for(task, complexity=None):
+    """Get the effort level for a task.
+
+    Args:
+        task: task type string or phase name
+        complexity: optional override - "low", "medium", "high"
+    Returns effort level string.
+    """
+    override = os.environ.get("HUNT_EFFORT_OVERRIDE")
+    if override and override in TOKEN_BUDGETS:
+        return override
+
+    if complexity and complexity in TOKEN_BUDGETS:
+        return complexity
+
+    task_s = str(task or "")
+    resolved = PHASE_TASK.get(task_s, task_s)
+    return TASK_EFFORT.get(resolved, "medium")
+
+
+def budget_for(task, complexity=None):
+    """Get token budget dict for a task. Keys: max_tokens, thinking_budget."""
+    eff = effort_for(task, complexity)
+    cap = os.environ.get("HUNT_MAX_TOKENS")
+    budget = dict(TOKEN_BUDGETS[eff])
+    if cap:
+        try:
+            budget["max_tokens"] = min(budget["max_tokens"], int(cap))
+        except ValueError:
+            pass
+    return budget
+
+
+def route(task, context=None):
+    """Unified router: returns (model_id, effort, token_budget) for a task.
+
+    Combines smart_model (model selection) with effort_for (thinking budget).
+    """
+    model, complexity = smart_model(task, context)
+    eff = effort_for(task, complexity)
+    budget = dict(TOKEN_BUDGETS[eff])
+    cap = os.environ.get("HUNT_MAX_TOKENS")
+    if cap:
+        try:
+            budget["max_tokens"] = min(budget["max_tokens"], int(cap))
+        except ValueError:
+            pass
+    return model, eff, budget
+
+
+def escalate(current_model, current_effort):
+    """Return the next (model, effort) on the escalation ladder, or None at top.
+
+    Escalation order:
+      Haiku+low → Haiku+medium → Sonnet+medium → Sonnet+high → Opus+high
+    """
+    cur = (_tier_model(current_model) if current_model not in (HAIKU, SONNET, OPUS)
+           else current_model)
+    found = False
+    for m, e in ESCALATION_LADDER:
+        if found:
+            return _tier_model(m), e
+        if m == cur and e == current_effort:
+            found = True
+    return None  # already at top
 
 
 def model_for(task, complexity=None):
@@ -138,6 +246,12 @@ def model_for(task, complexity=None):
 def model_for_phase(phase):
     """Convenience: get model for an engine phase name."""
     return model_for(PHASE_TASK.get(phase, phase))
+
+
+def route_for_phase(phase, context=None):
+    """Convenience: get (model, effort, budget) for an engine phase."""
+    task = PHASE_TASK.get(phase, phase)
+    return route(task, context)
 
 
 def estimate_complexity(task, context=None):
@@ -245,12 +359,15 @@ def usage_summary():
         snap[tier]["cost_usd"] = round(inp_cost + out_cost, 4)
 
     saved = opus_equivalent - total_cost
+    total_calls = sum(u["calls"] for u in snap.values())
     return {
         "tiers": snap,
+        "total_calls": total_calls,
         "total_cost_usd": round(total_cost, 4),
         "all_opus_cost_usd": round(opus_equivalent, 4),
         "saved_usd": round(max(0, saved), 4),
         "saving_pct": round(saved / opus_equivalent * 100, 1) if opus_equivalent > 0 else 0,
+        "effort_levels": dict(TOKEN_BUDGETS),
     }
 
 
@@ -266,7 +383,10 @@ def reset_usage():
 # ---------------------------------------------------------------------------
 def _cmd_route(a):
     m = model_for(a.task, complexity=a.complexity)
-    print(json.dumps({"task": a.task, "complexity": a.complexity, "model": m}))
+    eff = effort_for(a.task, complexity=a.complexity)
+    budget = budget_for(a.task, complexity=a.complexity)
+    print(json.dumps({"task": a.task, "complexity": a.complexity,
+                      "model": m, "effort": eff, "budget": budget}))
     return 0
 
 
@@ -281,7 +401,10 @@ def _cmd_estimate(a):
     if a.previous:
         ctx["previous_result"] = a.previous
     m, c = smart_model(a.task, ctx)
-    print(json.dumps({"task": a.task, "context": ctx, "complexity": c, "model": m}))
+    eff = effort_for(a.task, c)
+    budget = dict(TOKEN_BUDGETS[eff])
+    print(json.dumps({"task": a.task, "context": ctx, "complexity": c,
+                      "model": m, "effort": eff, "budget": budget}))
     return 0
 
 
@@ -352,10 +475,55 @@ def _cmd_selftest(_a):
     assert s["saving_pct"] > 0
     reset_usage()
 
+    # Effort routing
+    assert effort_for("recon") == "low"
+    assert effort_for("map") == "medium"
+    assert effort_for("hunt") == "high"
+    assert effort_for("unknown") == "medium"  # default
+    assert effort_for("recon", complexity="high") == "high"  # override
+
+    # Effort env override
+    os.environ["HUNT_EFFORT_OVERRIDE"] = "low"
+    assert effort_for("hunt") == "low"
+    del os.environ["HUNT_EFFORT_OVERRIDE"]
+
+    # Token budgets
+    b = budget_for("recon")
+    assert b["max_tokens"] == 1024 and b["thinking_budget"] == 0
+    b = budget_for("hunt")
+    assert b["max_tokens"] == 16384 and b["thinking_budget"] == 8192
+
+    # HUNT_MAX_TOKENS cap
+    os.environ["HUNT_MAX_TOKENS"] = "2048"
+    b = budget_for("hunt")
+    assert b["max_tokens"] == 2048  # capped
+    del os.environ["HUNT_MAX_TOKENS"]
+
+    # Unified route()
+    m, eff, bud = route("recon")
+    assert m == HAIKU and eff == "low" and bud["max_tokens"] == 1024
+    m, eff, bud = route("hunt", {"vuln_class": "xss"})
+    assert m == SONNET and eff == "medium", (m, eff)
+    m, eff, bud = route("hunt", {"vuln_class": "idor"})
+    assert m == OPUS and eff == "high", (m, eff)
+
+    # Escalation ladder
+    next_step = escalate(HAIKU, "low")
+    assert next_step == (HAIKU, "medium"), next_step
+    next_step = escalate(HAIKU, "medium")
+    assert next_step == (SONNET, "medium"), next_step
+    next_step = escalate(SONNET, "medium")
+    assert next_step == (SONNET, "high"), next_step
+    next_step = escalate(SONNET, "high")
+    assert next_step == (OPUS, "high"), next_step
+    assert escalate(OPUS, "high") is None  # top of ladder
+
     # Hostile input
     for bad in (None, "", 123, {"x": 1}):
         model_for(bad)
         estimate_complexity(bad, bad)
+        effort_for(bad)
+        route(bad, bad)
 
     print("modelroute.py self-test: PASS")
     return 0
