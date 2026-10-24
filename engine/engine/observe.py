@@ -120,11 +120,19 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
         for s in subs[:cap_hosts]:
             if time.time() - t0 > deadline_s:
                 break
-            code = _run(["curl", "-sL", "-o", "/dev/null", "-w", "%{http_code}", "-m", "10",
-                         f"https://{s}"], timeout=15).strip()
+            hdr_out = _run(["curl", "-sL", "-D", "-", "-o", "/dev/null", "-m", "10",
+                           f"https://{s}"], timeout=15).strip()
+            code, tech = "", []
+            for hl in hdr_out.splitlines():
+                if hl.startswith("HTTP/"):
+                    parts = hl.split()
+                    code = parts[1] if len(parts) > 1 else ""
+                lw = hl.lower()
+                if lw.startswith(("x-powered-by:", "server:")):
+                    tech.append(hl.split(":", 1)[1].strip())
             if code and code != "000":
                 hosts.append({"url": f"https://{s}", "status": int(code) if code.isdigit() else code,
-                              "title": "", "tech": []})
+                              "title": "", "tech": tech})
     if not hosts:
         hosts = [{"url": f"https://{host}", "status": None, "title": "", "tech": []}]
 

@@ -171,11 +171,12 @@ def _endpoints_from_burp(scope_hosts):
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
+            status = entry.get("status") or entry.get("statusCode") or 0
             eps.append({
                 "method": method, "url": url,
                 "function": "",
                 "params": list(entry.get("params") or []),
-                "auth_required": True,
+                "auth_required": int(status) in (401, 403) if str(status).isdigit() else False,
                 "source": "burp-proxy",
                 "confidence": "observed",
             })

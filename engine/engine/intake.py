@@ -118,6 +118,10 @@ def create_engagement(slug, scope_json, base=DEFAULT_BASE, log=print):
     base = os.path.expanduser(base)
     converted = scopefetch.convert(scope_json, slug)
 
+    # I07: validate conversion produced at least one in-scope host
+    if not converted.get("in_scope"):
+        raise RuntimeError(f"Scope for '{slug}' has no valid in-scope hosts after conversion")
+
     # Write scope.json
     eng_dir = os.path.join(base, slug)
     os.makedirs(eng_dir, exist_ok=True)
@@ -186,6 +190,12 @@ def intake(url_or_slug, platform=None, base=DEFAULT_BASE, scope_file=None, launc
                     scope_blob = json.load(f)
                 break
 
+    # I08: warn if platform-returned name differs from slug
+    if scope_blob and isinstance(scope_blob, dict):
+        returned_name = scope_blob.get("name") or scope_blob.get("handle") or ""
+        if returned_name and returned_name.lower() != (slug or "").lower():
+            log(f"intake: warning — platform returned name '{returned_name}', expected '{slug}'")
+
     if not scope_blob:
         raise RuntimeError(
             f"Could not fetch scope for '{url_or_slug}'. Options:\n"
@@ -223,6 +233,7 @@ def _cmd_start(a):
             platform=a.platform,
             base=a.base,
             scope_file=a.scope_file,
+            launch=getattr(a, "launch", False),
         )
         print(json.dumps(result, indent=2))
         return 0
@@ -293,6 +304,7 @@ def main(argv=None):
     ps.add_argument("--slug", help="Program slug (alternative to URL)")
     ps.add_argument("--scope-file", help="Local scope JSON file instead of MCP fetch")
     ps.add_argument("--base", default=DEFAULT_BASE)
+    ps.add_argument("--launch", action="store_true", help="Include launch command in output")
     ps.set_defaults(fn=_cmd_start)
 
     pp = sub.add_parser("parse-url", help="Parse platform + slug from a URL")
