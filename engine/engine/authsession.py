@@ -945,7 +945,8 @@ def _cmd_selftest(_a):
     import tempfile
     base = tempfile.mkdtemp()
     os.makedirs(os.path.join(base, "_targets"), exist_ok=True)
-    json.dump({"name": "acme", "in_scope": ["*.acme.com", "sandbox-login.acme.com", "api.acme.com", "www.acme.com"]},
+    json.dump({"name": "acme", "in_scope": ["*.acme.com", "sandbox-login.acme.com", "api.acme.com", "www.acme.com"],
+               "self_register_ok": True},
               open(os.path.join(base, "_targets", "acme.json"), "w"))
     scope = G._load_scope("acme", base)
 

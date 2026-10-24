@@ -21,14 +21,25 @@ ENGINE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE)
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
+BB_PLATFORMS_URL = os.environ.get("BB_PLATFORMS_URL", "http://127.0.0.1:3333/call")
 
 # Platform URL patterns → (platform, slug)
+# Anchored to hostname boundary to prevent false matches
 _PLATFORM_PATTERNS = [
-    (re.compile(r"hackerone\.com/(?:programs/)?([a-zA-Z0-9_-]+)", re.I), "hackerone"),
-    (re.compile(r"bugcrowd\.com/(?:engagements/)?([a-zA-Z0-9_-]+)", re.I), "bugcrowd"),
-    (re.compile(r"yeswehack\.com/programs/([a-zA-Z0-9_-]+)", re.I), "yeswehack"),
-    (re.compile(r"intigriti\.com/(?:company/)?programs?/([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)?)", re.I), "intigriti"),
+    (re.compile(r"(?:^|://)(?:www\.)?hackerone\.com/(?:programs/)?([a-zA-Z0-9_-]+)/?(?:\?|#|$)", re.I), "hackerone"),
+    (re.compile(r"(?:^|://)(?:www\.)?bugcrowd\.com/(?:engagements/)?([a-zA-Z0-9_-]+)/?(?:\?|#|$)", re.I), "bugcrowd"),
+    (re.compile(r"(?:^|://)(?:www\.)?yeswehack\.com/programs/([a-zA-Z0-9_-]+)/?(?:\?|#|$)", re.I), "yeswehack"),
+    (re.compile(r"(?:^|://)(?:www\.|app\.)?intigriti\.com/(?:company/)?programs?/([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)?)/?(?:\?|#|$)", re.I), "intigriti"),
 ]
+
+
+def _normalize_slug(slug):
+    """Canonicalize slug: lowercase, strip unsafe chars, prevent path traversal."""
+    slug = re.sub(r'[^a-zA-Z0-9_-]', '-', slug.strip().lower())
+    slug = re.sub(r'-+', '-', slug).strip('-')
+    if not slug or slug in ('.', '..') or '/' in slug:
+        raise ValueError(f"Invalid program slug: {slug!r}")
+    return slug[:80]
 
 
 def parse_program_url(url):
@@ -43,31 +54,20 @@ def parse_program_url(url):
 
 
 def _mcp_call_bb(tool, args_dict, timeout=30):
-    """Call a bb-platforms MCP tool. Returns parsed JSON or None."""
-    args_json = json.dumps(args_dict)
+    """Call a bb-platforms MCP tool via its HTTP endpoint. Returns parsed JSON or None."""
+    import urllib.request
+    import urllib.error
     try:
-        # Use subprocess to call the MCP tool via claude mcp infrastructure
-        # bb-platforms is typically an HTTP MCP server
-        result = subprocess.run(
-            ["python3", "-c", f"""
-import json, urllib.request
-# Try direct MCP HTTP call to bb-platforms
-tool = {json.dumps(tool)}
-args = {json.dumps(args_dict)}
-# bb-platforms MCP is typically at localhost or configured endpoint
-url = "http://127.0.0.1:3333/call"
-req = urllib.request.Request(url, data=json.dumps({{"tool": tool, "arguments": args}}).encode(),
-                             headers={{"Content-Type": "application/json"}})
-resp = urllib.request.urlopen(req, timeout=20)
-print(resp.read().decode())
-"""],
-            capture_output=True, text=True, timeout=timeout
+        payload = json.dumps({"tool": tool, "arguments": args_dict}).encode()
+        req = urllib.request.Request(
+            BB_PLATFORMS_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout)
-    except Exception:
-        pass
-    return None
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        return json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError):
+        return None
 
 
 def fetch_scope_mcp(platform, slug, log=print):
@@ -110,6 +110,7 @@ def fetch_scope_file(path, log=print):
 
 def create_engagement(slug, scope_json, base=DEFAULT_BASE, log=print):
     """Create engagement directory with scope.json. Returns scope file path."""
+    slug = _normalize_slug(slug)
     import scopefetch
     base = os.path.expanduser(base)
     converted = scopefetch.convert(scope_json, slug)

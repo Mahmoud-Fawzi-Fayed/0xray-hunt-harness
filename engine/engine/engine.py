@@ -1006,6 +1006,11 @@ class Engine:
                     exp.append(e)
             exp = [e for e in exp if R.is_concrete_target(e.get("url", ""))]
             added = self.eng.add_surface(_deepen(exp)) if exp else 0
+            # Store rich browser capture data for featuremap consumption
+            self.eng.state.setdefault("browser_capture", [])
+            for it in (caps or []):
+                if it.get("inputs") or it.get("source") in ("form", "button"):
+                    self.eng.state["browser_capture"].append(it)
             self.eng.state["browser_recon_ts"] = time.time()
             self.eng.save()
             self.eng.log(f"deep-recon: browser capture ({trigger}) -> {added} new authed work unit(s)")

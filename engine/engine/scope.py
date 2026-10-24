@@ -75,6 +75,27 @@ class Scope:
                    proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""),
                    path_restrictions=d.get("path_restrictions", {}))
 
+    def _path_prefixes_for(self, host):
+        """Resolve path restrictions for a host, checking both exact and wildcard keys."""
+        if not self.path_restrictions:
+            return None
+        # Exact host match first
+        prefixes = self.path_restrictions.get(host)
+        if prefixes:
+            return prefixes
+        # Check wildcard keys: *.example.com should apply to api.example.com
+        for key, pfxs in self.path_restrictions.items():
+            if key.startswith("*.") and host.endswith("." + key[2:]):
+                return pfxs
+        return None
+
+    @staticmethod
+    def _path_allowed(path, prefixes):
+        return any(
+            path == pfx or path.startswith(pfx + "/") or (pfx.endswith("/") and path.startswith(pfx))
+            for pfx in prefixes
+        )
+
     def in_scope_host(self, target):
         host = _host_of(target)
         if not host:
@@ -83,15 +104,14 @@ class Scope:
             return False          # deny wins
         if not any(_match(p, host) for p in self.in_scope):
             return False
-        if self.path_restrictions:
-            prefixes = self.path_restrictions.get(host)
-            if prefixes:
-                try:
-                    path = urlparse(target).path or "/"
-                except Exception:
-                    path = "/"
-                if not any(path == pfx or path.startswith(pfx + "/") or pfx.endswith("/") and path.startswith(pfx) for pfx in prefixes):
-                    return False
+        prefixes = self._path_prefixes_for(host)
+        if prefixes:
+            try:
+                path = urlparse(target).path or "/"
+            except Exception:
+                path = "/"
+            if not self._path_allowed(path, prefixes):
+                return False
         return True
 
     def reject_reason(self, target):
@@ -103,15 +123,14 @@ class Scope:
             return f"{host} matches an out-of-scope rule"
         if not any(_match(p, host) for p in self.in_scope):
             return f"{host} matches no in-scope rule (default deny)"
-        if self.path_restrictions:
-            prefixes = self.path_restrictions.get(host)
-            if prefixes:
-                try:
-                    path = urlparse(target).path or "/"
-                except Exception:
-                    path = "/"
-                if not any(path == pfx or path.startswith(pfx + "/") or pfx.endswith("/") and path.startswith(pfx) for pfx in prefixes):
-                    return f"{path} outside allowed path(s) for {host}: {prefixes}"
+        prefixes = self._path_prefixes_for(host)
+        if prefixes:
+            try:
+                path = urlparse(target).path or "/"
+            except Exception:
+                path = "/"
+            if not self._path_allowed(path, prefixes):
+                return f"{path} outside allowed path(s) for {host}: {prefixes}"
         return None
 
 
@@ -138,6 +157,12 @@ def _selftest():
     s2 = Scope(in_scope=["*.test.example.com"])
     assert s2.in_scope_host("a.test.example.com")
     assert not s2.in_scope_host("test.example.com")
+    # S02: wildcard path restrictions apply to resolved subdomains
+    s3 = Scope(in_scope=["*.example.com"],
+               path_restrictions={"*.example.com": ["/api/research"]})
+    assert s3.in_scope_host("https://api.example.com/api/research/papers")
+    assert not s3.in_scope_host("https://api.example.com/admin/users")
+    assert not s3.in_scope_host("https://api.example.com/")
     print("scope.py self-test: PASS")
 
 

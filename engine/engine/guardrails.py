@@ -97,7 +97,7 @@ def in_scope(url, scope):
         import scope as _scope_mod
         ins_n = [_norm_scope_pattern(p) for p in ins]
         oos_n = [_norm_scope_pattern(p) for p in (s.get("out_of_scope") or [])]
-        return _scope_mod.Scope(ins_n, oos_n).in_scope_host(url)
+        return _scope_mod.Scope(ins_n, oos_n, path_restrictions=s.get("path_restrictions", {})).in_scope_host(url)
     except Exception:                      # fallback: local matcher (deny-wins), never break the gate
         for bad in s.get("out_of_scope") or []:
             if _host_matches(host, bad):
@@ -193,7 +193,7 @@ def check(program, action, url=None, scope=None, base=None, log=True):
             return False, reason
 
     if action in ("register", "identity"):
-        if scope is not None and scope.get("self_register_ok") is False:
+        if scope is None or scope.get("self_register_ok") is not True:
             reason = f"refused: self-registration disabled for {program!r} (program rules)"
             if log:
                 audit(program, action, False, reason, url, base=base)
@@ -231,7 +231,7 @@ def _cmd_selftest(_a):
     base = tempfile.mkdtemp()
     os.makedirs(os.path.join(base, "_targets"), exist_ok=True)
     json.dump({"name": "acme", "in_scope": ["*.acme.com", "https://api.acme.com"],
-               "out_of_scope": ["admin.acme.com"]},
+               "out_of_scope": ["admin.acme.com"], "self_register_ok": True},
               open(os.path.join(base, "_targets", "acme.json"), "w"))
 
     # scope matching

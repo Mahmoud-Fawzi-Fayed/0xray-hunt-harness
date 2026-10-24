@@ -278,6 +278,9 @@ def _cmd_selftest(_a):
     base = tempfile.mkdtemp()
     save("p", {"email": "a@b.c", "token": "t"}, base=base)
     assert saved("p", base)[0]["email"] == "a@b.c"
+    os.makedirs(os.path.join(base, "_targets"), exist_ok=True)
+    json.dump({"name": "p", "in_scope": ["*.example.com"], "self_register_ok": True},
+              open(os.path.join(base, "_targets", "p.json"), "w"))
     os.environ["HUNT_MAX_ACCOUNTS"] = "0"
     r = new_identity("p", base=base)                                  # cap 0 => refused before any network
     assert r.get("error") and "cap" in r["error"], r

@@ -83,6 +83,7 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
                                             # recon+hunt covers sandbox/vendors/etc, not only the primary host
     in_hosts, out_hosts, dropped = set(), set(), []
     path_restrictions = {}
+    out_path_restrictions = {}
 
     def add_in(s):
         h, path = _host_and_path(s)
@@ -107,9 +108,13 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
             add_in(s)
         for key in ("out_of_scope", "out_of_scope_explicit", "outOfScope"):
             for s in _entries(blob, key):
-                h = _host(s)
+                h, path = _host_and_path(s)
                 if h:
                     out_hosts.add(h)
+                    if path:
+                        out_path_restrictions.setdefault(h, [])
+                        if path not in out_path_restrictions[h]:
+                            out_path_restrictions[h].append(path)
 
     seeds, seen = [], set()
     for h in sorted(in_hosts):
@@ -129,6 +134,8 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
               "seeds": seeds, "_dropped_non_host": [d for d in dropped if d][:20]}
     if path_restrictions:
         result["path_restrictions"] = path_restrictions
+    if out_path_restrictions:
+        result["out_path_restrictions"] = out_path_restrictions
     return result
 
 

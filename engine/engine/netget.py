@@ -130,6 +130,7 @@ def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug
         host = ""
     _wait_for_host(host)
     chosen_proxy = _pick_proxy(proxy, proxy_list)
+    _non_idempotent = method.upper() in ("POST", "PUT", "PATCH", "DELETE")
     # Try curl_cffi first (TLS impersonation), fall back to requests
     try:
         from curl_cffi import requests as cr
@@ -138,12 +139,22 @@ def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
         r = cr.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
         _rate_limit(host, r.status_code)
-        return r.status_code, r.text, {k.lower(): v for k, v in r.headers.items()}
+        rh = {k.lower(): v for k, v in r.headers.items()}
+        # Validate redirect destination against scope
+        if _SCOPE_GUARD and not _bypass_scope and r.status_code in (301, 302, 303, 307, 308):
+            loc = rh.get("location", "")
+            if loc:
+                reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
+                if reason:
+                    rh["_redirect_blocked"] = reason
+        return r.status_code, r.text, rh
     except ImportError:
         pass
     except Exception as e:  # noqa: BLE001
         _rate_limit(host, 0)
-        # fall through to requests
+        if _non_idempotent:
+            return 0, "", {"_error": f"transport error (not retried — non-idempotent {method}): {e}"}
+        # fall through to requests for idempotent methods only
     try:
         import requests as rq
         kw = {"timeout": timeout, "headers": h, "verify": True}
@@ -151,7 +162,14 @@ def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
         r = rq.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
         _rate_limit(host, r.status_code)
-        return r.status_code, r.text, {k.lower(): v for k, v in r.headers.items()}
+        rh = {k.lower(): v for k, v in r.headers.items()}
+        if _SCOPE_GUARD and not _bypass_scope and r.status_code in (301, 302, 303, 307, 308):
+            loc = rh.get("location", "")
+            if loc:
+                reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
+                if reason:
+                    rh["_redirect_blocked"] = reason
+        return r.status_code, r.text, rh
     except ImportError:
         return 0, "", {"_error": "neither curl_cffi nor requests available"}
     except Exception as e:  # noqa: BLE001

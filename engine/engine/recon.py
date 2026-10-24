@@ -858,8 +858,19 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
                 continue
             for r in (reqs or []):
                 u = (r.get("url") or "").split("#")[0]
-                if (u and u not in seen and scope.in_scope_host(u) and is_concrete_target(u)
-                        and _browser_api_request(r)):
+                if not u or u in seen or not scope.in_scope_host(u):
+                    continue
+                rtype = r.get("type", "")
+                if rtype in ("form", "button") or _browser_api_request(r):
+                    seen.add(u)
+                    item = {"url": u, "method": r.get("method", "GET"), "source": "browser"}
+                    if rtype in ("form", "button"):
+                        item["source"] = rtype
+                        item["function"] = r.get("function", "")
+                    if r.get("inputs"):
+                        item["inputs"] = r["inputs"]
+                    out.append(item)
+                elif is_concrete_target(u) and _browser_api_request(r):
                     seen.add(u)
                     out.append({"url": u, "method": r.get("method", "GET"), "source": "browser"})
         log(f"browser-recon: {len(out)} in-scope API endpoint(s) from {len(seeds)} seed(s)"

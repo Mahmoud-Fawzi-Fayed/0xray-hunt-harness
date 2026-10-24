@@ -65,7 +65,7 @@ def _endpoints_from_profile(profile):
             "params": list(ep.get("params") or [])[:20],
             "auth_required": bool(ep.get("auth_required", True)),
             "source": "profile-agent",
-            "confidence": "observed",
+            "confidence": "documented",
         })
     for fl in (profile.get("flows") or []):
         if not isinstance(fl, dict) or not fl.get("url"):
@@ -75,7 +75,7 @@ def _endpoints_from_profile(profile):
             "function": str(fl.get("what") or "")[:200],
             "params": [], "auth_required": True,
             "source": "profile-flow",
-            "confidence": "observed",
+            "confidence": "documented",
         })
     for u in (profile.get("hidden_endpoints") or []):
         if isinstance(u, str) and u.startswith("http"):
@@ -198,13 +198,13 @@ def _endpoints_from_js(eng_dir, scope_hosts):
                 content = f.read(1_000_000)
         except OSError:
             continue
-        # Pattern 1: route string literals
+        # Pattern 1: route string literals — attach to first host only (the bundle origin)
         for match in _JS_ROUTE_RE.finditer(content):
             path = match.group(1)
             if path in seen or len(path) > 200:
                 continue
             seen.add(path)
-            for host in scope_hosts:
+            for host in scope_hosts[:1]:
                 eps.append({
                     "method": "GET", "url": f"https://{host}{path}",
                     "function": "JS-discovered route",
@@ -218,7 +218,7 @@ def _endpoints_from_js(eng_dir, scope_hosts):
             url_str = match.group(1)
             method = (match.group(2) or "GET").upper()
             if url_str.startswith("/"):
-                for host in scope_hosts:
+                for host in scope_hosts[:1]:
                     full_url = f"https://{host}{url_str}"
                     key = f"{method}:{full_url}"
                     if key not in seen:
@@ -418,6 +418,7 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
         "sources": list({ep.get("source", "unknown") for ep in merged}),
         "total_endpoints": len(merged),
         "observed": sum(1 for e in merged if e.get("confidence") == "observed"),
+        "documented": sum(1 for e in merged if e.get("confidence") == "documented"),
         "inferred": sum(1 for e in merged if e.get("confidence") == "inferred"),
         "features": features,
         "endpoints": merged,
@@ -455,7 +456,7 @@ def write_artifacts(slug, profile, eng_dir, base=DEFAULT_BASE, state=None):
         f.write(f"# Feature Map — {slug}\n\n")
         f.write(f"Generated: {fmap['generated_at']}  \n")
         f.write(f"Endpoints: {fmap['total_endpoints']} "
-                f"({fmap['observed']} observed, {fmap['inferred']} inferred)  \n")
+                f"({fmap['observed']} observed, {fmap.get('documented', 0)} documented, {fmap['inferred']} inferred)  \n")
         f.write(f"Sources: {', '.join(fmap['sources'])}  \n\n")
 
         if profile and profile.get("narrative"):
@@ -480,25 +481,29 @@ def write_artifacts(slug, profile, eng_dir, base=DEFAULT_BASE, state=None):
                         f"| {a.get('confidence','')} |\n")
             f.write("\n")
 
-        # coverage summary — observed means seen in traffic/profile, NOT security-tested
+        # coverage summary — confidence levels: observed (traffic), documented (profile/spec), inferred (JS)
         observed = set()
+        documented = set()
         inferred = set()
         for feat in fmap["features"]:
             for a in feat["actions"]:
                 key = f"{a.get('method')}:{a.get('url','')[:80]}"
-                if a.get("confidence") == "observed":
+                conf = a.get("confidence", "inferred")
+                if conf == "observed":
                     observed.add(key)
+                elif conf == "documented":
+                    documented.add(key)
                 else:
                     inferred.add(key)
 
-        # check actual tested count from state
         tested_count = 0
         if state:
             tested_count = len(state.get("tested") or {})
 
         f.write("## Coverage\n\n")
-        f.write(f"- **Observed in traffic/profile:** {len(observed)} endpoints\n")
-        f.write(f"- **Inferred from JS/docs:** {len(inferred)} endpoints\n")
+        f.write(f"- **Observed in traffic:** {len(observed)} endpoints\n")
+        f.write(f"- **Documented (profile/spec):** {len(documented)} endpoints\n")
+        f.write(f"- **Inferred from JS/analysis:** {len(inferred)} endpoints\n")
         f.write(f"- **Security-tested (from state):** {tested_count} operations\n")
         all_opps = set()
         for feat in fmap["features"]:
@@ -583,7 +588,7 @@ def _cmd_selftest(_a):
     fmap = build_feature_map("acme-test", base=base, eng_dir=tmpdir, profile=profile, state=state)
 
     assert fmap["total_endpoints"] >= 10, f"expected >=10 endpoints, got {fmap['total_endpoints']}"
-    assert fmap["observed"] >= 8, f"expected >=8 observed, got {fmap['observed']}"
+    assert fmap["observed"] + fmap.get("documented", 0) >= 8, f"expected >=8 observed+documented, got {fmap['observed']}+{fmap.get('documented',0)}"
     assert fmap["inferred"] >= 2, f"expected >=2 inferred, got {fmap['inferred']}"
     assert len(fmap["features"]) >= 4, f"expected >=4 features, got {len(fmap['features'])}"
 
@@ -629,6 +634,7 @@ def _cmd_selftest(_a):
     assert "| Method |" in md
     assert "## Coverage" in md
     assert "Observed in traffic" in md
+    assert "Documented" in md
     assert "Security-tested" in md
     assert "Test opportunities" in md
 

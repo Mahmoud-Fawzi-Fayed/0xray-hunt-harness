@@ -78,21 +78,29 @@ def _from_recon(target, base):
     return subs, endpoints, params
 
 
-def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeout=120, deadline_s=120):
+def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeout=120, deadline_s=120,
+            scope=None):
     """Build a surface observation. `deadline_s` is a wall-clock budget: the (potentially slow)
     live host/JS probing short-circuits once exceeded, so a monitor tick never hangs. Returns
-    whatever was gathered so far — partial is fine, the diff still works."""
+    whatever was gathered so far — partial is fine, the diff still works.
+    When `scope` is provided, only in-scope hosts are probed."""
     t0 = time.time()
     host = _host_of(target)
     apex = _apex(host)
     subs, endpoints, params = _from_recon(target, base)
-    subs.update({host, apex})
+    # Only add apex if it's in scope (or no scope enforcement)
+    subs.add(host)
+    if not scope or scope.in_scope_host(f"https://{apex}"):
+        subs.add(apex)
 
     if live and _have("subfinder"):
         for ln in _run(["subfinder", "-silent", "-d", apex], timeout=timeout).splitlines():
             ln = ln.strip().lower()
             if ln:
                 subs.add(ln)
+    # Filter all discovered subdomains through scope before any live probing
+    if scope:
+        subs = {s for s in subs if scope.in_scope_host(f"https://{s}")}
     subs = sorted(s for s in subs if s and "." in s)
 
     hosts = []
@@ -132,6 +140,8 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
                     break
                 ju = urljoin(url, m)
                 if ju in js or len(js) >= cap_js:
+                    continue
+                if scope and not scope.in_scope_host(ju):
                     continue
                 body = _run(["curl", "-sL", "-m", "12", ju], timeout=15)
                 if body:

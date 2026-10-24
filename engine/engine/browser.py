@@ -143,13 +143,17 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
         try:
             buttons = pg.evaluate("""() => Array.from(document.querySelectorAll(
                 'button[formaction], [role=button][data-url], a[href^="javascript"]'
-            )).map(b => ({
-                action: b.getAttribute('formaction') || b.getAttribute('data-url') || '',
-                text: (b.innerText||'').trim().slice(0,60)
-            })).filter(b => b.action).slice(0, 30)""") or []
+            )).map(b => {
+                var form = b.closest('form');
+                return {
+                    action: b.getAttribute('formaction') || b.getAttribute('data-url') || '',
+                    method: (b.getAttribute('formmethod') || (form && form.method) || 'GET').toUpperCase(),
+                    text: (b.innerText||'').trim().slice(0,60)
+                };
+            }).filter(b => b.action).slice(0, 30)""") or []
             for btn in buttons:
                 if btn.get("action"):
-                    reqs.append({"method": "POST", "url": btn["action"],
+                    reqs.append({"method": btn.get("method", "GET"), "url": btn["action"],
                                  "type": "button", "function": btn.get("text", "")})
         except Exception:
             pass

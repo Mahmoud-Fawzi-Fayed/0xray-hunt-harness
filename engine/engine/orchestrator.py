@@ -250,8 +250,11 @@ class Orchestrator:
             return True
         return False
 
-    def _write_index(self, drafted):
-        wd = os.environ.get("HUNT_WEB_DIR")
+    def _write_index(self, drafted, approved_only=True):
+        if approved_only:
+            drafted = [d for d in drafted if d.get("approved")]
+        # Write to private engagement dir, not public web dir
+        wd = self.eng.eng.dir
         if not wd or not drafted:
             return
         try:
