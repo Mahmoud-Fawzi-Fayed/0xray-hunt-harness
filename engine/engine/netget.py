@@ -32,6 +32,20 @@ _RL_MIN_DELAY = 1.0 / max(0.1, float(os.environ.get("HUNT_REQUESTS_PER_SECOND", 
 # Defense-in-depth scope guard — set by engine init via set_scope_guard()
 _SCOPE_GUARD = None  # Scope instance or None (disabled)
 
+# Connection pooling — reuse TCP connections across requests
+_RQ_SESSION = None
+_RQ_LOCK = threading.Lock()
+
+
+def _get_session():
+    global _RQ_SESSION
+    if _RQ_SESSION is None:
+        with _RQ_LOCK:
+            if _RQ_SESSION is None:
+                import requests as rq
+                _RQ_SESSION = rq.Session()
+    return _RQ_SESSION
+
 
 def set_scope_guard(scope):
     """Set the module-level scope guard. Called by engine at init."""
@@ -142,7 +156,8 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
     # Try curl_cffi first (TLS impersonation), fall back to requests
     try:
         from curl_cffi import requests as cr
-        kw = {"impersonate": imp, "timeout": timeout, "headers": h, "verify": True}
+        _verify = os.environ.get("HUNT_TLS_VERIFY", "1") != "0"
+        kw = {"impersonate": imp, "timeout": timeout, "headers": h, "verify": _verify}
         if chosen_proxy:
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
         r = cr.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
@@ -164,11 +179,12 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
             return 0, "", {"_error": f"transport error (not retried — non-idempotent {method}): {e}"}
         # fall through to requests for idempotent methods only
     try:
-        import requests as rq
-        kw = {"timeout": timeout, "headers": h, "verify": True}
+        sess = _get_session()
+        _verify = os.environ.get("HUNT_TLS_VERIFY", "1") != "0"
+        kw = {"timeout": timeout, "headers": h, "verify": _verify}
         if chosen_proxy:
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
-        r = rq.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
+        r = sess.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
         _rate_limit(host, r.status_code)
         rh = {k.lower(): v for k, v in r.headers.items()}
         if _SCOPE_GUARD and not _bypass_scope and r.status_code in (301, 302, 303, 307, 308):

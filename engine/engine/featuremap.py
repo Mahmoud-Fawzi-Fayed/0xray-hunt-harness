@@ -451,6 +451,10 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
     features = group_by_feature(merged)
     features = annotate_test_opportunities(features)
 
+    _SPEC_MARKERS = ("/swagger", "/openapi", "/api-docs", "/v2/api-docs", "/v3/api-docs")
+    api_spec_urls = sorted({ep.get("url") for ep in merged
+                            if any(m in (ep.get("url") or "").lower() for m in _SPEC_MARKERS)})
+
     return {
         "slug": slug,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -461,6 +465,7 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
         "observed": sum(1 for e in merged if e.get("confidence") == "observed"),
         "documented": sum(1 for e in merged if e.get("confidence") == "documented"),
         "inferred": sum(1 for e in merged if e.get("confidence") == "inferred"),
+        "api_spec_urls": api_spec_urls,
         "features": features,
         "endpoints": merged,
     }

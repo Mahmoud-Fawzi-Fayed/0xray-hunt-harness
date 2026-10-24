@@ -79,7 +79,11 @@ def fmt(r):
          f"surface={r['surface']}  tested={r['tested']}  security_tested={r.get('security_tested',0)}  candidates={r['candidates']}  confirmed={r['confirmed']}",
          "", "  class              tested/total   endpoints"]
     for c, v in r["coverage_by_class"].items():
-        L.append(f"  {c:18s} {v['tested']}/{v['total']:<11} {v['endpoints']}")
+        pct = round(100 * v["tested"] / v["total"]) if v["total"] else 0
+        bar_w = 20
+        filled = round(bar_w * pct / 100)
+        bar = "█" * filled + "░" * (bar_w - filled)
+        L.append(f"  {c:18s} {v['tested']}/{v['total']:<6} {bar} {pct:3d}%  {v['endpoints']}")
     if r["leads"]:
         L += ["", "INTERESTING LEADS (unproven — operator finish):"]
         for x in r["leads"][:30]:

@@ -2014,20 +2014,34 @@ class Engine:
         phase_timings = {}
         _eng_timeout = int(os.environ.get("HUNT_ENGAGEMENT_TIMEOUT", "3600") or 3600)
         _eng_start = time.time()
-        for ph in ALL_PHASES:
-            if ph in phases:
-                if time.time() - _eng_start > _eng_timeout:
-                    self.eng.log(f"engagement timeout ({_eng_timeout}s) — stopping before {ph}")
-                    failed_phases.extend(p for p in ALL_PHASES if p in phases and p not in failed_phases
-                                         and ALL_PHASES.index(p) >= ALL_PHASES.index(ph))
-                    break
-                _ph_start = time.time()
-                try:
-                    getattr(self, ph)()
-                except Exception as e:
-                    failed_phases.append(ph)
-                    self.eng.log(f"phase {ph} error (continuing with partial state): {type(e).__name__}: {e}")
-                phase_timings[ph] = round(time.time() - _ph_start, 1)
+        _stop_requested = False
+        import signal
+        def _handle_stop(signum, _frame):
+            nonlocal _stop_requested
+            _stop_requested = True
+            self.eng.log(f"received signal {signum} — will stop after current phase")
+        _prev_int = signal.signal(signal.SIGINT, _handle_stop)
+        _prev_term = signal.signal(signal.SIGTERM, _handle_stop)
+        try:
+            for ph in ALL_PHASES:
+                if ph in phases:
+                    if _stop_requested or time.time() - _eng_start > _eng_timeout:
+                        reason = "signal" if _stop_requested else f"timeout ({_eng_timeout}s)"
+                        self.eng.log(f"engagement {reason} — stopping before {ph}")
+                        failed_phases.extend(p for p in ALL_PHASES if p in phases and p not in failed_phases
+                                             and ALL_PHASES.index(p) >= ALL_PHASES.index(ph))
+                        break
+                    _ph_start = time.time()
+                    try:
+                        getattr(self, ph)()
+                    except Exception as e:
+                        failed_phases.append({"phase": ph, "error": f"{type(e).__name__}: {e}"})
+                        self.eng.log(f"phase {ph} error (continuing with partial state): {type(e).__name__}: {e}")
+                    phase_timings[ph] = round(time.time() - _ph_start, 1)
+                    self.eng.save()
+        finally:
+            signal.signal(signal.SIGINT, _prev_int)
+            signal.signal(signal.SIGTERM, _prev_term)
         if failed_phases:
             self.eng.set_phase("partial")
             self.eng.state["failed_phases"] = failed_phases
