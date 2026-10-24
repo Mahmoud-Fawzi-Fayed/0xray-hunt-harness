@@ -120,6 +120,19 @@ def _pick_proxy(proxy, proxy_list):
 
 _DEFAULT_TIMEOUT = int(os.environ.get("HUNT_REQUEST_TIMEOUT", "30") or 30)
 
+_MAX_REQUESTS = int(os.environ.get("HUNT_MAX_REQUESTS", "5000") or 5000)
+_request_count = 0
+
+class BudgetExhausted(Exception):
+    pass
+
+def request_count():
+    return _request_count
+
+def reset_request_count():
+    global _request_count
+    _request_count = 0
+
 
 def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, slug=None, allow_redirects=False,
         _bypass_scope=False):
@@ -131,6 +144,10 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         reason = _SCOPE_GUARD.reject_reason(url)
         if reason:
             return 0, "", {"_error": f"scope violation: {reason}"}
+    global _request_count
+    _request_count += 1
+    if _request_count > _MAX_REQUESTS and not _bypass_scope:
+        return 0, "", {"_error": f"request budget exhausted ({_MAX_REQUESTS})"}
     ua, imp, proxy, proxy_list = _cfg()
     h = dict(headers or {})
     if ua:

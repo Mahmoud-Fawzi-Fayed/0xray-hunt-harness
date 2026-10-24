@@ -67,18 +67,26 @@ class Scope:
         self.impersonate = impersonate or ""        # curl_cffi TLS profile (e.g. safari_ios) via netget
         self.path_restrictions = path_restrictions or {}  # {host: ["/allowed/path"]} from URL-scoped entries
         self.out_path_restrictions = out_path_restrictions or {}  # {host: ["/excluded/path"]} path-specific exclusions
+        self.policy = {}  # program-level policy: rate_limit, prohibited_actions, required_headers, auth_restrictions
 
     @classmethod
     def load(cls, path):
         import json
         d = json.load(open(path))
-        return cls(d.get("in_scope", []), d.get("out_of_scope", []),
-                   d.get("seeds", []), d.get("name", "engagement"),
-                   user_agent=d.get("user_agent", ""), endpoints=d.get("endpoints", []),
-                   roe_extra=d.get("roe_extra", ""), skip_param_mining=d.get("skip_param_mining", False),
-                   proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""),
-                   path_restrictions=d.get("path_restrictions", {}),
-                   out_path_restrictions=d.get("out_path_restrictions", {}))
+        s = cls(d.get("in_scope", []), d.get("out_of_scope", []),
+                d.get("seeds", []), d.get("name", "engagement"),
+                user_agent=d.get("user_agent", ""), endpoints=d.get("endpoints", []),
+                roe_extra=d.get("roe_extra", ""), skip_param_mining=d.get("skip_param_mining", False),
+                proxy=d.get("proxy", ""), impersonate=d.get("impersonate", ""),
+                path_restrictions=d.get("path_restrictions", {}),
+                out_path_restrictions=d.get("out_path_restrictions", {}))
+        s.policy = {
+            "rate_limit": d.get("rate_limit"),
+            "prohibited_actions": d.get("prohibited_actions", []),
+            "required_headers": d.get("required_headers", {}),
+            "auth_restrictions": d.get("auth_restrictions"),
+        }
+        return s
 
     def _path_prefixes_for(self, host):
         """Resolve path restrictions for a host, checking both exact and wildcard keys."""

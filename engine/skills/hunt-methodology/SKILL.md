@@ -1,3 +1,8 @@
+---
+name: hunt-methodology
+description: Analysis-driven endpoint pentest methodology — SEE (map endpoint behavior and trust boundaries), THINK (developer-psychology hypothesis ranking), TEST (one variable at a time, prove impact), VERIFY (unique markers, n>=10 timing, OOB for blind). Reference methodology for deep endpoint hunting. Use when you need structured guidance on a single endpoint.
+---
+
 # hunt-methodology — Analysis-Driven Endpoint Pentest
 
 Reference methodology for deep endpoint hunting. Read this when you need structured guidance — it is not mandatory for every endpoint.

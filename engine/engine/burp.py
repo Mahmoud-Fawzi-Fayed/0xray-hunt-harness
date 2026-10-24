@@ -184,113 +184,111 @@ def write_project_mcp_config(output_path=None):
 
 
 def _mcp_call(tool_name, arguments=None, timeout=15):
-    """Call an MCP tool on the Burp SSE server directly via JSON-RPC over HTTP.
-
-    The Burp MCP BApp exposes an SSE endpoint. Protocol:
-      1. GET /sse → server sends  event: endpoint  data: /message?sessionId=...
-      2. POST JSON-RPC to that endpoint
-      3. Server replies with event: message  data: {jsonrpc response}
-    """
-    import urllib.request
-    import urllib.error
-    import threading
+    """Call a Burp MCP tool over its legacy SSE transport."""
     import queue
+    import threading
+    import urllib.request
     import uuid
+    from urllib.parse import urljoin
 
-    base = BURP_MCP_URL.rstrip("/")
+    base = BURP_MCP_URL.rstrip("/") + "/"
     q = queue.Queue()
 
-    def _sse_reader(conn, q):
-        """Read SSE events from the connection, push parsed events to queue."""
-        buf = b""
+    def _sse_reader(conn):
+        event_type, data = "", []
         try:
-            while True:
-                chunk = conn.read(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n\n" in buf:
-                    raw, buf = buf.split(b"\n\n", 1)
-                    event_type, data = "", ""
-                    for line in raw.decode("utf-8", errors="replace").split("\n"):
-                        if line.startswith("event:"):
-                            event_type = line[6:].strip()
-                        elif line.startswith("data:"):
-                            data = line[5:].strip()
+            for raw in conn:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line:
                     if event_type or data:
-                        q.put((event_type, data))
+                        q.put((event_type, "\n".join(data)))
+                    event_type, data = "", []
+                elif line.startswith("event:"):
+                    event_type = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].strip())
         except Exception:
             pass
         finally:
             q.put(("_done", ""))
 
     try:
-        req = urllib.request.Request(base + "/sse", headers={"Accept": "text/event-stream"})
+        req = urllib.request.Request(base, headers={"Accept": "text/event-stream"})
         conn = urllib.request.urlopen(req, timeout=timeout)
     except Exception:
         return None
 
-    reader = threading.Thread(target=_sse_reader, args=(conn, q), daemon=True)
-    reader.start()
-
-    # Wait for endpoint event
-    endpoint_path = None
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            etype, edata = q.get(timeout=max(0.1, deadline - time.time()))
-        except queue.Empty:
-            break
-        if etype == "endpoint":
-            endpoint_path = edata
-            break
-        if etype == "_done":
-            break
-
-    if not endpoint_path:
-        conn.close()
-        return None
-
-    # POST JSON-RPC call
-    post_url = base + endpoint_path if endpoint_path.startswith("/") else endpoint_path
-    rpc = json.dumps({
-        "jsonrpc": "2.0", "id": str(uuid.uuid4()),
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments or {}},
-    }).encode()
+    threading.Thread(target=_sse_reader, args=(conn,), daemon=True).start()
     try:
-        post_req = urllib.request.Request(post_url, data=rpc,
-                                          headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(post_req, timeout=timeout)
-    except Exception:
-        conn.close()
-        return None
-
-    # Read response from SSE stream
-    while time.time() < deadline:
-        try:
-            etype, edata = q.get(timeout=max(0.1, deadline - time.time()))
-        except queue.Empty:
-            break
-        if etype == "message" and edata:
+        endpoint_path = None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
             try:
-                msg = json.loads(edata)
-                conn.close()
-                result = msg.get("result", {})
-                # MCP tool results have content[].text
-                content = result.get("content") or []
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        return json.loads(c["text"])
-                return result
-            except (json.JSONDecodeError, KeyError):
-                conn.close()
-                return None
-        if etype == "_done":
-            break
+                etype, edata = q.get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                break
+            if etype == "endpoint":
+                endpoint_path = edata
+                break
+            if etype == "_done":
+                break
+        if not endpoint_path:
+            return None
 
-    conn.close()
-    return None
+        post_url = urljoin(base, endpoint_path)
+
+        def _rpc(method, params=None):
+            request_id = str(uuid.uuid4())
+            payload = {"jsonrpc": "2.0", "id": request_id, "method": method}
+            if params is not None:
+                payload["params"] = params
+            post_req = urllib.request.Request(
+                post_url, data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"})
+            urllib.request.urlopen(post_req, timeout=timeout).close()
+            rpc_deadline = time.time() + timeout
+            while time.time() < rpc_deadline:
+                try:
+                    etype, edata = q.get(timeout=max(0.1, rpc_deadline - time.time()))
+                except queue.Empty:
+                    break
+                if etype == "message" and edata:
+                    msg = json.loads(edata)
+                    if msg.get("id") == request_id:
+                        return msg
+                if etype == "_done":
+                    break
+            return None
+
+        initialized = _rpc("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "0xray-hunt-harness", "version": "1.0"},
+        })
+        if not initialized or "error" in initialized:
+            return None
+        notification = urllib.request.Request(
+            post_url, data=json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode(),
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(notification, timeout=timeout).close()
+
+        msg = _rpc("tools/call", {"name": tool_name, "arguments": arguments or {}})
+        if not msg or "error" in msg:
+            return None
+        result = msg.get("result", {})
+        content = result.get("content") or []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                try:
+                    return json.loads(c["text"])
+                except json.JSONDecodeError:
+                    return c["text"]
+        return result
+    except (OSError, ValueError, KeyError, queue.Empty):
+        return None
+    finally:
+        conn.close()
 
 
 def query_proxy_history(timeout=15):
@@ -298,9 +296,11 @@ def query_proxy_history(timeout=15):
     if not is_burp_available():
         return []
     try:
-        data = _mcp_call("get_proxy_http_history", timeout=timeout)
+        data = _mcp_call("get_proxy_http_history", {"count": 100, "offset": 0}, timeout=timeout)
         if isinstance(data, list):
             return data
+        if isinstance(data, dict):
+            return [data]
         return []
     except Exception:
         return []

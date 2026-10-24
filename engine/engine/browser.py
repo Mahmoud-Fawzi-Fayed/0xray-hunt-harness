@@ -89,7 +89,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                 if key in seen:
                     return
                 seen.add(key)
-                reqs.append({"method": r.method, "url": r.url, "type": r.resource_type})
+                reqs.append({"method": r.method, "url": r.url, "source": r.resource_type})
             except Exception:  # noqa: BLE001
                 pass
         pg.on("request", on_req)
@@ -111,10 +111,58 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             return _xo.apply(this, arguments);
         };
         """)
+        _form_seen = set()
+
+        def _extract_page(page):
+            """Extract forms, buttons, and intercepted API calls from current page."""
+            try:
+                forms = page.evaluate("""() => Array.from(document.querySelectorAll('form')).map(f => ({
+                    action: f.action, method: (f.method||'GET').toUpperCase(),
+                    inputs: Array.from(f.querySelectorAll('input,select,textarea'))
+                        .map(i => i.name).filter(n => n).slice(0, 20)
+                })).filter(f => f.action).slice(0, 50)""") or []
+                for form in forms:
+                    fk = (form["method"], form["action"])
+                    if fk not in _form_seen:
+                        _form_seen.add(fk)
+                        reqs.append({"method": form["method"], "url": form["action"],
+                                     "source": "form", "inputs": form.get("inputs", [])})
+            except Exception:
+                pass
+            try:
+                buttons = page.evaluate("""() => Array.from(document.querySelectorAll(
+                    'button[formaction], input[type=submit][formaction], [role=button][data-url]'
+                )).map(b => {
+                    var form = b.closest('form');
+                    return {
+                        action: b.getAttribute('formaction') || b.getAttribute('data-url') || '',
+                        method: (b.getAttribute('formmethod') || (form && form.method) || 'GET').toUpperCase(),
+                        text: (b.innerText||b.value||'').trim().slice(0,60)
+                    };
+                }).filter(b => b.action).slice(0, 30)""") or []
+                for btn in buttons:
+                    bk = (btn.get("method", "GET"), btn.get("action", ""))
+                    if bk not in _form_seen and btn.get("action"):
+                        _form_seen.add(bk)
+                        reqs.append({"method": btn.get("method", "GET"), "url": btn["action"],
+                                     "source": "button", "function": btn.get("text", "")})
+            except Exception:
+                pass
+            try:
+                api_calls = page.evaluate("() => (window.__xray_api || []).slice(0, 200)") or []
+                for call in api_calls:
+                    u = call.get("url", "")
+                    if u and u.startswith("http"):
+                        reqs.append({"method": call.get("method", "GET"), "url": u,
+                                     "source": call.get("src", "fetch")})
+            except Exception:
+                pass
+
         try:
             pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
             pg.wait_for_timeout(int(wait * 1000))
-            if pages > 0:                                   # bounded, read-only deepening (hard budget)
+            _extract_page(pg)
+            if pages > 0:
                 import time as _t
                 host0 = urlparse(url).hostname or ""
 
@@ -125,13 +173,13 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                         return any(hn == s or hn.endswith("." + s) for s in scope_hosts)
                     return hn == host0
                 try:
-                    pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")   # trigger lazy XHR
+                    pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     pg.wait_for_timeout(1200)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 try:
                     hrefs = pg.eval_on_selector_all("a[href]", "els => els.map(e => e.href)") or []
-                except Exception:  # noqa: BLE001
+                except Exception:
                     hrefs = []
                 bad = ("logout", "signout", "sign-out", "/delete", "remove", "/pay", "purchase",
                        "checkout/complete", "unsubscribe", "cancel")
@@ -144,55 +192,18 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                             and not any(x in h.lower() for x in bad)):
                         nseen.add(base)
                         nav.append(h)
-                budget = _t.time() + 15                     # hard overall cap for the deepening pass
+                budget = _t.time() + 15
                 for h in nav[:pages]:
                     if _t.time() > budget:
                         break
                     try:
                         pg.goto(h, timeout=timeout, wait_until="domcontentloaded")
                         pg.wait_for_timeout(1500)
-                    except Exception:  # noqa: BLE001
+                        _extract_page(pg)
+                    except Exception:
                         pass
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             reqs.append({"_nav_error": str(e)[:160]})
-        # Extract forms, buttons, and intercepted API calls
-        try:
-            forms = pg.evaluate("""() => Array.from(document.querySelectorAll('form')).map(f => ({
-                action: f.action, method: (f.method||'GET').toUpperCase(),
-                inputs: Array.from(f.querySelectorAll('input,select,textarea'))
-                    .map(i => i.name).filter(n => n).slice(0, 20)
-            })).filter(f => f.action).slice(0, 50)""") or []
-            for form in forms:
-                reqs.append({"method": form["method"], "url": form["action"],
-                             "source": "form", "inputs": form.get("inputs", [])})
-        except Exception:
-            pass
-        try:
-            buttons = pg.evaluate("""() => Array.from(document.querySelectorAll(
-                'button[formaction], [role=button][data-url], a[href^="javascript"]'
-            )).map(b => {
-                var form = b.closest('form');
-                return {
-                    action: b.getAttribute('formaction') || b.getAttribute('data-url') || '',
-                    method: (b.getAttribute('formmethod') || (form && form.method) || 'GET').toUpperCase(),
-                    text: (b.innerText||'').trim().slice(0,60)
-                };
-            }).filter(b => b.action).slice(0, 30)""") or []
-            for btn in buttons:
-                if btn.get("action"):
-                    reqs.append({"method": btn.get("method", "GET"), "url": btn["action"],
-                                 "source": "button", "function": btn.get("text", "")})
-        except Exception:
-            pass
-        try:
-            api_calls = pg.evaluate("() => (window.__xray_api || []).slice(0, 200)") or []
-            for call in api_calls:
-                u = call.get("url", "")
-                if u and u.startswith("http"):
-                    reqs.append({"method": call.get("method", "GET"), "url": u,
-                                 "source": call.get("src", "fetch")})
-        except Exception:
-            pass
         b.close()
     if scope_hosts:
         def ok(x):

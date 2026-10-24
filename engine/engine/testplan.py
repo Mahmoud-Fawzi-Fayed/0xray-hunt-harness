@@ -261,7 +261,8 @@ def _render_markdown(cases, summary, slug, scope=None):
              f"{summary['coverage_pct']}% coverage)\n"]
 
     if scope:
-        lines.append(f"Scope: {', '.join((scope.get('in_scope') or [])[:5])}\n")
+        ins = getattr(scope, 'in_scope', None) or (scope.get('in_scope') if isinstance(scope, dict) else []) or []
+        lines.append(f"Scope: {', '.join(ins[:5])}\n")
 
     lines.append("## Priority Distribution\n")
     for pri in ("critical", "high", "medium", "low"):
