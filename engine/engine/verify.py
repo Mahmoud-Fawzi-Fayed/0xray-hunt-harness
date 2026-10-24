@@ -51,6 +51,66 @@ PER_CLASS = {
             [r"200 only|no file content"], r"root:.*:0:0|/etc/passwd|file contents|base64"),
     "csrf": ("a state-changing action performed cross-site with real impact (not logout/login/cart)",
              [r"logout|login|unauthenticated|cart"], r"email change|password|state change|account"),
+    "xxe": ("external entity parsed and data exfiltrated or SSRF proven (not just a DTD error)",
+            [r"error message only|dtd error|xml error"], r"file:///|SYSTEM|exfiltrat|/etc/passwd|oob|collaborator"),
+    "nosqli": ("extracted data or behaviour difference proving injection (not just an error)",
+               [r"error message only|stack trace only"], r"extracted|boolean|sleep|tojson|regex|noSQL|where|admin.*true"),
+    "crlf": ("injected header appears in the HTTP response (not just reflected in body)",
+             [r"reflected in body|html only"], r"set-cookie|location:|http/|\\r\\n|%0d%0a.*:"),
+    "deserialization": ("code execution or object instantiation proven (not just a gadget chain theory)",
+                        [r"theoretical|gadget.*only|might work"], r"executed|whoami|uid=|rce|object instantiat|class.*forName"),
+    "cache-poison": ("poisoned response served to a DIFFERENT user/session (not just your own cached response)",
+                     [r"own (session|cache)|same user|self-poison"], r"other user|victim|different session|cache key|x-cache.*hit"),
+    "file-upload": ("uploaded file executed or served dangerously (not just upload accepted)",
+                    [r"upload accepted|stored only|filename reflected"], r"executed|rce|xss|served as|content-type.*html|phpinfo"),
+    "race-condition": ("state inconsistency demonstrated with real impact (not just parallel 200s)",
+                       [r"parallel 200|concurrent requests only|no state change"], r"double|inconsisten|extra|duplicate|negative balance|coupon.*twice"),
+    "http-smuggling": ("desync proven: second request interpreted differently by front/back (not just a CL/TE header)",
+                       [r"header only|cl.te header|theory"], r"desync|smuggl|second request|poison|response queue"),
+    "prototype-pollution": ("polluted property reaches a security-sensitive sink (not just __proto__ set)",
+                            [r"__proto__.*set only|no sink|prototype.*modified"], r"rce|xss|bypass|admin|isAdmin|sink|constructor"),
+    "jwt": ("forged/modified token accepted by the server with privilege escalation (not just decoded)",
+            [r"decoded only|header (read|viewed)|payload (read|viewed)"], r"forged|accepted|alg.*none|key confusion|privilege|admin|role"),
+    "saml": ("authentication bypass or assertion forged (not just metadata exposed)",
+             [r"metadata only|certificate.*exposed"], r"bypass|forged|impersonat|assertion.*accepted|as another user"),
+    "ldap": ("LDAP injection proven with data extraction or auth bypass (not just an error)",
+             [r"error message only|ldap error"], r"extracted|bypass|bind.*success|wildcard|dn=|admin"),
+    "host-header": ("injected Host header changes server behaviour with security impact (not just reflected)",
+                    [r"reflected only|no impact"], r"password reset|redirect|cache.*poison|ssrf|link.*evil|host.*inject"),
+    "dom-xss": ("DOM-based XSS executing in victim's browser context (not just source/sink identified)",
+                [r"source.*identified|sink.*identified|potential"], r"executed|alert|document\.cookie|fired|dom.*xss.*proof"),
+    "pdf-ssrf": ("SSRF via PDF generation proven with internal data or OOB callback (not just PDF generated)",
+                 [r"pdf generated|no callback|no internal"], r"169\.254|metadata|internal|collaborator|oob|ssrf.*pdf"),
+    "auth-bypass": ("authentication bypass proven: accessed protected resource without valid credentials",
+                    [r"login page|redirect.*login|no access"], r"bypass|unauthenticat|without (auth|cred|login)|admin|protected.*access"),
+    "oauth": ("OAuth misconfiguration with real impact: token theft, account takeover, or scope escalation",
+              [r"best practice|recommendation|informational"], r"token.*steal|redirect_uri|takeover|scope.*escalat|state.*missing.*impact|code.*intercept"),
+    "2fa-bypass": ("2FA/MFA bypass proven: accessed account without completing second factor",
+                   [r"2fa enabled|mfa present|no bypass"], r"bypass|skip|without.*2fa|without.*mfa|direct access|rate.?limit.*otp"),
+    "business-logic": ("business logic flaw with real financial or security impact (not just unexpected behavior)",
+                       [r"no impact|cosmetic|ui bug|expected behavior"], r"negative|free|discount|bypass.*pay|privilege|unauth.*action|price.*manipul|coupon|credit"),
+    "graphql": ("GraphQL vulnerability with data access or mutation beyond authorization (not just introspection)",
+                [r"introspection only|schema.*exposed|no data"], r"unauthorized.*data|mutation|query.*other|batch|depth|alias.*bypass|dos|nested"),
+    "webhook": ("webhook vulnerability with real impact: SSRF, data exfiltration, or auth bypass via callback manipulation",
+                [r"webhook exists|endpoint.*found|no impact"], r"ssrf|exfiltrat|internal|callback.*manipul|secret.*leak|replay|forge"),
+    "session": ("session management flaw with account impact: fixation, non-invalidation, or hijack proven",
+                [r"session exists|cookie set|no impact"], r"fixation|not.*invalidat|hijack|concurrent|token.*reuse|logout.*fail.*impact"),
+    "source-leak": ("source code or sensitive configuration exposed with security-relevant content (not just stack traces)",
+                    [r"stack trace only|error page|version"], r"source code|\.git|\.env|credential|api.?key|password|secret|config.*exposed|backup"),
+    "payment-logic": ("payment/billing logic flaw with real financial impact (not just UI inconsistency)",
+                      [r"ui only|display|no financial"], r"negative|free|zero.*price|bypass.*pay|discount.*manipul|coupon.*reuse|refund.*abuse|race.*payment"),
+    "ato": ("account takeover proven end-to-end: attacker gains full access to victim's account",
+            [r"self|own account|no victim"], r"takeover|victim.*account|password.*reset.*hijack|session.*hijack|full.*access|login.*as"),
+    "websocket": ("WebSocket vulnerability with real impact: injection, auth bypass, or data leak via WS",
+                  [r"websocket exists|connection established|no impact"], r"inject|hijack|cross-site.*ws|unauthenticat|cswsh|origin.*bypass|sensitive.*data"),
+    "mcp": ("MCP tool/server vulnerability: prompt injection, tool poisoning, or unauthorized action via MCP",
+            [r"mcp exists|tool listed|no impact"], r"inject|poison|unauthorized|exfiltrat|tool.*call|rug.*pull|shadowing|cross-context"),
+    "llm-ai": ("LLM/AI vulnerability with real impact: prompt injection leading to data leak or unauthorized action",
+               [r"jailbreak only|filter bypass|no impact|chatbot"], r"inject|exfiltrat|data leak|unauthorized|system prompt|tool.*call|action.*taken"),
+    "cloud-misconfig": ("cloud misconfiguration with real data exposure or privilege escalation (not just open port/service)",
+                        [r"port open|service running|no data"], r"s3.*public|bucket.*list|credential|metadata|privilege|iam|role.*assum|data.*expos"),
+    "api-misconfig": ("API misconfiguration with real security impact: auth bypass, mass data access, or privilege escalation",
+                      [r"api exists|endpoint found|no impact"], r"unauthenticat|mass.*data|paginate.*all|rate.?limit.*bypass.*impact|method.*override|verb.*tamper"),
 }
 
 # never-submit, independent of class (always-rejected list)
@@ -66,6 +126,11 @@ ALWAYS_REJECT = [
     (r"graphql introspection", "GraphQL introspection enabled (non-qualifying)"),
     (r"pre-?account takeover|account creation via oauth", "pre-account-takeover via OAuth (non-qualifying)"),
     (r"tabnabbing|broken link|social media hijack", "tabnabbing / broken-link hijack"),
+    (r"version disclosure|server banner|powered[- ]by", "version/banner disclosure without exploit"),
+    (r"directory listing", "directory listing without sensitive data exposure"),
+    (r"autocomplete|password.*clear", "autocomplete/password in cleartext (browser-level)"),
+    (r"cookie without (secure|httponly) flag", "cookie flag missing without demonstrated exploit chain"),
+    (r"text injection|content injection|html injection", "text/HTML injection without XSS (no script execution)"),
 ]
 
 REQUIRED = ["vuln_class", "url", "title"]
@@ -118,6 +183,35 @@ def _fix_for(name, note, cls):
                    "traversal path is not enough.",
             "csrf": "Show a STATE-CHANGING action (email/password change) performed cross-site with the "
                     "victim's session — logout/login/cart CSRF is not accepted.",
+            "xxe": "Show data exfiltrated via XXE (file contents) or SSRF proven via OOB callback with "
+                   "response data — a DTD parsing error alone is not enough.",
+            "nosqli": "Extract real data or show a clear boolean/timing difference proving injection — "
+                      "an error message or stack trace alone is not enough.",
+            "crlf": "Show the injected header in the HTTP response headers (not body). Paste the raw "
+                    "response showing your injected Set-Cookie/Location header.",
+            "deserialization": "Show code execution (command output) or dangerous object instantiation — "
+                               "a theoretical gadget chain is not enough.",
+            "cache-poison": "Show a DIFFERENT user receiving your poisoned response — poisoning your own "
+                            "cache is not enough. Two sessions required.",
+            "file-upload": "Show the uploaded file executing (RCE) or being served with a dangerous "
+                           "content-type (XSS) — upload accepted alone is not enough.",
+            "race-condition": "Show the state inconsistency (double spend, extra coupon, negative balance) "
+                              "— parallel 200s alone are not enough.",
+            "http-smuggling": "Show the desync: front-end and back-end interpret the request boundary "
+                              "differently, and you can poison another user's request.",
+            "prototype-pollution": "Show the polluted property reaching a security sink (XSS, RCE, auth "
+                                   "bypass) — setting __proto__ alone is not enough.",
+            "jwt": "Show a forged/modified token accepted by the server with privilege escalation — "
+                   "decoding the JWT alone is not enough.",
+            "saml": "Show authentication bypass or assertion forgery accepted — metadata exposure alone "
+                    "is not enough.",
+            "ldap": "Show data extraction or auth bypass via LDAP injection — an error alone is not enough.",
+            "host-header": "Show security impact from injected Host header: password reset poisoning, "
+                           "cache poisoning, or SSRF — reflection alone is not enough.",
+            "dom-xss": "Show the DOM XSS executing in victim context — identifying source/sink potential "
+                       "alone is not enough.",
+            "pdf-ssrf": "Show internal data or OOB callback from PDF generation SSRF — the PDF being "
+                        "generated alone is not enough.",
         }
         return per_cls.get(cls, "Add the proof that demonstrates real impact for this class (see the note).")
     if name == "severity supported by evidence":

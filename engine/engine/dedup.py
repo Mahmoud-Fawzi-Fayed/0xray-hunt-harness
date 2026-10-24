@@ -105,6 +105,16 @@ CLASS_CANON = {
     "llm-ai": "llm-ai", "prompt-injection": "llm-ai", "ai": "llm-ai",
     "subdomain-takeover": "subdomain-takeover", "subdomain takeover": "subdomain-takeover",
     "privilege-escalation": "privilege-escalation", "privilege escalation": "privilege-escalation",
+    "crlf": "crlf", "crlf-injection": "crlf", "header injection": "crlf",
+    "header-injection": "crlf", "http-response-splitting": "crlf",
+    "jwt": "jwt", "json-web-token": "jwt", "jwt-attack": "jwt",
+    "cache-poison": "cache-poison", "cache poisoning": "cache-poison",
+    "web-cache-poisoning": "cache-poison", "cache-deception": "cache-poison",
+    "prototype-pollution": "prototype-pollution", "prototype pollution": "prototype-pollution",
+    "pdf-ssrf": "pdf-ssrf",
+    "webhook": "webhook", "webhook-abuse": "webhook",
+    "ldap": "ldap", "ldap-injection": "ldap", "ldap injection": "ldap",
+    "payment-logic": "business-logic", "payment logic": "business-logic",
 }
 
 # generic words that carry no discriminative signal in a vuln title
