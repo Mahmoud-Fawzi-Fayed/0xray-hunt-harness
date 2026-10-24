@@ -80,7 +80,7 @@ PHASE_TASK = {
     "explore": "explore",
     "hunt": "hunt",
     "validate": "verify",
-    "report": "report_draft",
+    "report": "report_format",
     "coverage": "coverage",
     "dedup": "dedup",
     "profile": "profile",

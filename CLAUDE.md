@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
 Engine: `~/0xray-hunt-harness/engine/engine/`. Config/secrets: `~/0xray-hunt-harness/harness/.env`.
-Recon tools: `~/go/bin/` (add to PATH). Skills: `~/0xray-hunt-harness/engine/skills/` (90 skills). Modules: 41.
+Recon tools: `~/go/bin/` (auto-added to PATH by engine.py at startup). Skills: `~/0xray-hunt-harness/engine/skills/` (90 skills, 62 hunt-*). Modules: 44.
 Findings publish to `https://finding.redtracefai.com` + email `x00xrayx00x@gmail.com`. STOP at draft.
 
 ## Model routing
@@ -47,6 +47,6 @@ When Burp Pro is running with the MCP BApp extension (port 9876), agents automat
 ## Testing
 
 ```bash
-python3 ~/0xray-hunt-harness/scripts/selfcheck.py    # crash/loop/hostile-input gauntlet
-python3 ~/0xray-hunt-harness/scripts/e2e.py           # end-to-end pipeline trace
+python3 ~/0xray-hunt-harness/engine/scripts/selfcheck.py    # crash/loop/hostile-input gauntlet
+python3 ~/0xray-hunt-harness/engine/scripts/e2e.py           # end-to-end pipeline trace
 ```

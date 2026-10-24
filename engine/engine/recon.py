@@ -22,6 +22,18 @@ import re
 from shutil import which
 from urllib.parse import urljoin, urlparse
 
+
+def _tool_env():
+    """Return env dict with ~/go/bin in PATH for Go recon tools."""
+    env = os.environ.copy()
+    gobin = os.path.expanduser("~/go/bin")
+    if gobin not in env.get("PATH", ""):
+        env["PATH"] = gobin + ":" + env.get("PATH", "")
+    return env
+
+
+_TOOL_ENV = _tool_env()
+
 # Default browser UA; a per-target override comes from HUNT_USER_AGENT (set by the engine from the
 # scope's user_agent), so recon traffic carries a program's required SOC tag.
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -419,7 +431,7 @@ def _gau_urls(scope, log):
             log(f"params: gau budget exhausted after {i-1}/{len(apexes)} apex(es) — continuing with what we have")
             break
         try:
-            out = subprocess.run(["gau", apex], capture_output=True, text=True, timeout=90).stdout
+            out = subprocess.run(["gau", apex], capture_output=True, text=True, timeout=90, env=_TOOL_ENV).stdout
         except Exception:
             out = ""
         for u in out.splitlines():
@@ -457,7 +469,7 @@ def _katana_urls(scope, log, depth=2, timeout=45, max_seeds=30, budget_s=480):
         try:
             out = subprocess.run(["katana", "-u", seed, "-silent", "-jc", "-d", str(depth),
                                   "-kf", "all", "-c", "10", "-timeout", "10", "-rl", "100"],
-                                 capture_output=True, text=True, timeout=timeout).stdout
+                                 capture_output=True, text=True, timeout=timeout, env=_TOOL_ENV).stdout
         except Exception:
             out = ""
         for u in out.splitlines():

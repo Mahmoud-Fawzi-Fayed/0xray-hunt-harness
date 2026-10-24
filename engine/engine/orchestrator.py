@@ -53,7 +53,7 @@ def _draft_md(f, verdict):
     lines = [
         f"# {_title(f)}", "",
         f"**Severity:** {sev}  ·  **CVSS (starting point):** {SEV_CVSS.get(sev, '5.0')}",
-        f"**Dedup verdict:** {verdict['verdict']} (score {verdict['score']}, corpus {verdict['corpus_size']})",
+        f"**Dedup verdict:** {verdict['verdict']} (score {verdict.get('score', 0)}, corpus {verdict.get('corpus_size', 0)})",
     ]
     if verdict["verdict"] == "UNKNOWN":
         lines.append("> ⚠ Dedup NOT performed — the corpus for this program is EMPTY. Refresh it (own reports "
@@ -371,7 +371,7 @@ class Orchestrator:
                             pass
             except Exception as e:  # noqa: BLE001
                 self.eng.eng.log(f"auth: provisioning skipped ({type(e).__name__}: {e})")
-        phases = ["recon", "rank", "map"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
+        phases = ["recon", "explore", "rank", "map", "plan"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
         engine_result = self.eng.run(phases) or {}
         failed = engine_result.get("failed_phases") or []
         if failed:

@@ -294,7 +294,7 @@ def _run_selftest(mod, arg=True):
 for _m in ("dedup", "novelty", "jsdiff", "yieldrank", "orchestrator", "notify", "scopefetch", "targets",
            "guardrails", "websearch", "identity", "sms", "learn", "authsession",
            "authn", "authz", "coverage", "apkmap", "scopeparse", "verify", "disposition", "sessions",
-           "fixchat", "testplan", "modelroute", "netget"):
+           "fixchat", "testplan", "modelroute", "netget", "report"):
     case(f"selftest: {_m}", lambda m=_m: _run_selftest(m, True))
 for _m in ("agent", "state"):
     case(f"selftest: {_m}", lambda m=_m: _run_selftest(m, False))

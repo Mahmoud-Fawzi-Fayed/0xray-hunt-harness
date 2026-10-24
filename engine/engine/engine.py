@@ -2094,10 +2094,19 @@ class Engine:
         c = self.eng.state["confirmed"]
         try:
             import dedup as D
-            D.annotate(self.scope.name, c, base=self.base)   # tag each finding with dup-risk + nearest match
+            D.annotate(self.scope.name, c, base=self.base)
         except Exception as e:
             self.eng.log(f"report: dedup annotate skipped ({e})")
         s = self.eng.summary()
+        try:
+            import report as RPT
+            paths = RPT.write_report(c, self.eng.dir, scope_name=self.scope.name,
+                                     in_scope=self.scope.in_scope, summary=s)
+            self.eng.log(f"report: wrote {len(c)} confirmed finding(s) -> {paths['markdown']} + {paths['json']}")
+            return paths["markdown"]
+        except Exception as e:
+            self.eng.log(f"report: report.py failed ({e}), falling back to inline markdown")
+        # Fallback: inline markdown (kept for resilience)
         lines = [f"# Engagement report — {self.scope.name}", "",
                  f"In scope: `{'`, `'.join(self.scope.in_scope)}`  ",
                  f"Surface mapped: {s['surface']} · tested: {s['tested']} · "
@@ -2112,7 +2121,7 @@ class Engine:
             block = [f"## {i}. {f.get('vuln_class','?').upper()} — {f.get('severity','?')}",
                      f"- **URL:** `{f['url']}`" + (f" (param `{f['param']}`)" if f.get("param") else "")]
             rp = f.get("reproduction") or {}
-            if rp.get("status"):                        # REAL-vs-not: how we know it's a real bug
+            if rp.get("status"):
                 label = {"reproduced": "✅ independently reproduced",
                          "inconclusive": "⚠ NOT independently reproduced — verify manually before submit"
                          }.get(rp["status"], rp["status"])
