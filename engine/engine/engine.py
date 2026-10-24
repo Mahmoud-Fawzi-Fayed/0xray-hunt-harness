@@ -656,18 +656,40 @@ class Engine:
             host = str((sess or {}).get("host") or "")
         except Exception:  # noqa: BLE001
             host = ""
+        e = ENGINE_DIR
+        surface_urls = [s.get("url", "") for s in (self.eng.state.get("surface") or [])
+                        if s.get("url") and self.scope.in_scope_host(s["url"])][:20]
+        surface_hint = "\n".join(f"  {u}" for u in surface_urls[:15]) if surface_urls else "(none discovered yet)"
         task = (
-            f"You are profiling program {self.scope.name} so the next hunt attacks the product, "
-            "not a vulnerability catalog. Do not name SQLi/XSS/IDOR unless you saw that sink.\n"
+            f"You are doing DEEP RECON on program {self.scope.name}. Your job: understand EVERYTHING "
+            "this app does — every feature, every API, every user role, every data flow — so the "
+            "next phase can attack intelligently, not blindly.\n\n"
             f"Session host: {host or '?'}. Seeds: {', '.join(seeds) or '(none)'}.\n"
-            f"Fetch with `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A` "
-            "and read what the logged-in app actually is.\n"
-            "Return ONLY a fenced json object: "
-            '{"narrative":"<one sentence: this product lets who do what>",'
-            '"roles":["..."],"crown_jewels":["the data/actions that pay if stolen"],'
+            f"Known surface so far:\n{surface_hint}\n\n"
+            "PHASE 1 — DISCOVER (use all of these):\n"
+            f"  `python3 {e}/netget.py GET \"<url>\" --as A` — fetch any page/API as logged-in user\n"
+            f"  `python3 {e}/browser.py capture --url <seed> --slug {self.scope.name} --as A "
+            f"--scope {host or '<host>'}` — capture SPA XHR/fetch/GraphQL calls\n"
+            f"  `python3 {e}/recon.py graphql --scope <scope-file>` — GraphQL introspection\n"
+            "  Read robots.txt, sitemap.xml, .well-known/*, /api/docs, /swagger*, /openapi*\n"
+            "  Check for: /admin, /dashboard, /settings, /internal, /debug, /graphql, /api/v*/\n"
+            "  Read JS bundles for API routes: grep for '/api/', 'fetch(', 'axios.', endpoint patterns\n\n"
+            "PHASE 2 — MAP (build a complete picture):\n"
+            "  For each feature/endpoint found, note: what it does, what data it touches, "
+            "what role can access it, what parameters it takes.\n\n"
+            "PHASE 3 — RETURN a fenced ```json``` object:\n"
+            '{"narrative":"<2-3 sentences: what this product is and who uses it>",'
+            '"tech_stack":["detected technologies"],'
+            '"roles":["every user role found (admin, user, guest, api-consumer, ...)"],'
+            '"auth_mechanism":"cookie|jwt|oauth|apikey|saml|...",'
+            '"crown_jewels":["highest-value data/actions — PII, payments, admin, exports"],'
+            '"api_surface":[{"method":"GET|POST|...","url":"https://...","function":"what it does",'
+            '"params":["param names"],"auth_required":true}],'
             '"flows":[{"what":"<user flow>","url":"https://in-scope/...","why":"<why this flow is dangerous>"}],'
-            '"deprioritized":["marketing/static things to skip"]}. '
-            "URLs must be in-scope and real. No class-agent names."
+            '"hidden_endpoints":["admin/debug/internal URLs found"],'
+            '"deprioritized":["static/marketing/CDN things to skip"]}\n'
+            "List EVERY endpoint you find in api_surface — the more complete, the better the hunt. "
+            "URLs must be in-scope and real. Do not guess endpoints you didn't verify exist."
         )
         r = A.run_agent(task, context=self.scope.name, max_turns=20,
                         timeout=int(os.environ.get("HUNT_PROFILE_TIMEOUT", "400")))
@@ -677,18 +699,39 @@ class Engine:
                          + (f" ERR={r.get('error')}" if r.get("error") else ""))
             return
         BR.set_profile(self.scope.name, f, self.base)
-        n = len(f.get("flows") or [])
-        self.eng.log(f"profile: {n} flow(s) — {(f.get('narrative') or '')[:140]}")
+        n_flows = len(f.get("flows") or [])
+        n_api = len(f.get("api_surface") or [])
+        n_hidden = len(f.get("hidden_endpoints") or [])
+        self.eng.log(f"profile: {n_flows} flow(s), {n_api} API endpoint(s), {n_hidden} hidden — "
+                     f"{(f.get('narrative') or '')[:140]}")
         items = []
-        for fl in (f.get("flows") or [])[:8]:
+        for fl in (f.get("flows") or [])[:12]:
             if not isinstance(fl, dict):
                 continue
             u = fl.get("url") or fl.get("endpoint") or ""
             if isinstance(u, str) and self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
-                items.append({"url": u, "vuln_class": "deep", "source": "profile", "priority": 110})
+                items.append({"url": u, "vuln_class": "deep", "source": "profile-flow", "priority": 110})
+        for ep in (f.get("api_surface") or [])[:30]:
+            if not isinstance(ep, dict):
+                continue
+            u = ep.get("url") or ""
+            if isinstance(u, str) and self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
+                items.append({"url": u, "method": ep.get("method", "GET"),
+                              "param": ",".join(ep.get("params") or [])[:200],
+                              "vuln_class": "deep", "source": "profile-api", "priority": 105,
+                              "note": ep.get("function", "")[:200]})
+        for u in (f.get("hidden_endpoints") or [])[:10]:
+            if isinstance(u, str) and self.scope.in_scope_host(u) and not _Q_STATIC.search(u):
+                items.append({"url": u, "vuln_class": "deep", "source": "profile-hidden", "priority": 115})
         if items:
             added = self.eng.add_surface(_deepen(items))
-            self.eng.log(f"profile: queued {added} flow url(s)")
+            self.eng.log(f"profile: queued {added} endpoint(s) from flows+api+hidden")
+        # write feature map artifacts
+        try:
+            import featuremap as FM
+            FM.write_artifacts(self.scope.name, f, self.eng.dir, self.base)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _jsdiff_surface(self):
         """Turn novelty's new/changed JS bundles into hunt worklist items (SOP: attack the delta)."""

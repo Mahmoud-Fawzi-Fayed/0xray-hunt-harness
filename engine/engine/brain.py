@@ -108,13 +108,26 @@ def set_profile(slug, profile, base=DEFAULT_BASE):
     if not isinstance(profile, dict):
         return brain
     keep = {
-        "narrative": str(profile.get("narrative") or profile.get("app_narrative") or "")[:600],
+        "narrative": str(profile.get("narrative") or profile.get("app_narrative") or "")[:800],
+        "tech_stack": list(profile.get("tech_stack") or [])[:20],
         "roles": list(profile.get("roles") or profile.get("user_roles") or [])[:12],
+        "auth_mechanism": str(profile.get("auth_mechanism") or "")[:60],
         "crown_jewels": list(profile.get("crown_jewels") or [])[:12],
+        "api_surface": [],
         "flows": [],
+        "hidden_endpoints": list(profile.get("hidden_endpoints") or [])[:20],
         "deprioritized": list(profile.get("deprioritized") or [])[:12],
         "ts": time.time(),
     }
+    for ep in (profile.get("api_surface") or [])[:50]:
+        if isinstance(ep, dict) and ep.get("url"):
+            keep["api_surface"].append({
+                "method": str(ep.get("method") or "GET")[:10],
+                "url": str(ep.get("url") or "")[:300],
+                "function": str(ep.get("function") or "")[:200],
+                "params": list(ep.get("params") or [])[:20],
+                "auth_required": bool(ep.get("auth_required", True)),
+            })
     for f in (profile.get("flows") or profile.get("high_value_flows") or [])[:12]:
         if isinstance(f, str) and f.strip():
             keep["flows"].append({"what": f.strip()[:200], "url": "", "why": ""})
