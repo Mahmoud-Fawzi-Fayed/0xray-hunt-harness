@@ -254,5 +254,41 @@ def _main(argv):
     return 0 if code else 1
 
 
+def _selftest():
+    """Offline self-test: scope guard, rate-limit state, budget tracking, header merging."""
+    import scope as S
+
+    # scope guard blocks out-of-scope
+    sg = S.Scope(["example.com"], ["admin.example.com"])
+    set_scope_guard(sg)
+    code, _, h = get("https://evil.com/test", _bypass_scope=False)
+    assert code == 0 and "scope violation" in h.get("_error", ""), f"expected scope block: {code} {h}"
+    code2, _, h2 = get("https://admin.example.com/x", _bypass_scope=False)
+    assert code2 == 0 and "scope violation" in h2.get("_error", ""), f"expected out-of-scope block: {code2} {h2}"
+    set_scope_guard(None)
+
+    # budget tracking
+    global _request_count, _MAX_REQUESTS
+    saved_count, saved_max = _request_count, _MAX_REQUESTS
+    _request_count = 0
+    _MAX_REQUESTS = 2
+    assert request_count() == 0
+    get("https://httpbin.org/status/200", timeout=5, _bypass_scope=True)
+    assert request_count() >= 1
+    _request_count = _MAX_REQUESTS + 1
+    code3, _, h3 = get("https://httpbin.org/status/200", timeout=5, _bypass_scope=False)
+    assert code3 == 0 and "budget" in h3.get("_error", ""), f"expected budget block: {code3} {h3}"
+    _request_count, _MAX_REQUESTS = saved_count, saved_max
+
+    # rate limiter state structure
+    assert isinstance(_RL_STATE, dict)
+    assert _RL_MIN_DELAY > 0
+
+    print("netget.py self-test: PASS")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
+        sys.exit(_selftest())
     sys.exit(_main(sys.argv[1:]))

@@ -29,6 +29,9 @@ _SEARCH_PARAMS = re.compile(r"(search|query|q|filter|find|keyword|term|s|name|ti
 _AUTH_PATHS = re.compile(r"/(login|signin|signup|register|auth|oauth|token|password|reset|verify|confirm|session|sso)", re.I)
 _ADMIN_PATHS = re.compile(r"/(admin|manage|dashboard|internal|staff|moderator|settings/admin)", re.I)
 _SENSITIVE_PATHS = re.compile(r"/(payment|billing|invoice|order|checkout|subscribe|wallet|transfer|withdraw)", re.I)
+_STATE_CHANGE_PATHS = re.compile(r"/(buy|purchase|checkout|transfer|apply|redeem|coupon|vote|follow|like|approve|cancel)", re.I)
+_TEMPLATE_PARAMS = re.compile(r"(template|name|title|subject|message|body|comment|content|email|greeting)", re.I)
+_WEBSOCKET_PATHS = re.compile(r"/(ws|wss|socket|realtime|stream|events|notifications|chat|live)", re.I)
 
 VULN_RULES = [
     {
@@ -120,6 +123,73 @@ VULN_RULES = [
                  and ep.get("method") in ("POST", "PUT", "PATCH", "DELETE"),
         "test": "Call admin endpoint with regular user credentials; try modifying own role/permissions",
         "priority_boost": 2,
+    },
+    {
+        "id": "race_condition",
+        "name": "Race Condition",
+        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH", "DELETE")
+                 and _STATE_CHANGE_PATHS.search(ep.get("url", "")),
+        "test": "Send concurrent identical requests (H2 last-byte sync) and verify state changes applied n>=2 times",
+        "priority_boost": 2,
+    },
+    {
+        "id": "csrf",
+        "name": "Cross-Site Request Forgery",
+        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH", "DELETE")
+                 and ep.get("auth_required"),
+        "test": "Verify anti-CSRF token presence; craft cross-origin form/fetch and test state-changing action",
+        "priority_boost": 1,
+    },
+    {
+        "id": "ssti",
+        "name": "Server-Side Template Injection",
+        "match": lambda ep: any(_TEMPLATE_PARAMS.search(p) for p in _params(ep)),
+        "test": "Inject template syntax ({{7*7}}, ${7*7}, #{7*7}) and verify server-side evaluation in response",
+        "priority_boost": 2,
+    },
+    {
+        "id": "cors",
+        "name": "CORS Misconfiguration",
+        "match": lambda ep: ep.get("auth_required") and ep.get("method") == "GET",
+        "test": "Send request with Origin: https://evil.com and check if reflected with Allow-Credentials: true",
+        "priority_boost": 1,
+    },
+    {
+        "id": "xxe",
+        "name": "XML External Entity",
+        "match": lambda ep: ep.get("method") in ("POST", "PUT")
+                 and any(re.search(r"xml|soap|svg|feed|import|export", p, re.I) for p in _params(ep)),
+        "test": "Submit XML with external entity declaration pointing to internal resource or OOB callback",
+        "priority_boost": 2,
+    },
+    {
+        "id": "http_smuggling",
+        "name": "HTTP Request Smuggling",
+        "match": lambda ep: ep.get("method") in ("POST", "PUT"),
+        "test": "Test CL.TE and TE.CL desync with differential Content-Length/Transfer-Encoding headers",
+        "priority_boost": 2,
+    },
+    {
+        "id": "prototype_pollution",
+        "name": "Prototype Pollution",
+        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH")
+                 and len(_params(ep)) >= 1,
+        "test": "Inject __proto__, constructor.prototype in JSON body and verify property pollution in response",
+        "priority_boost": 1,
+    },
+    {
+        "id": "cache_poisoning",
+        "name": "Web Cache Poisoning",
+        "match": lambda ep: ep.get("method") == "GET",
+        "test": "Add unkeyed headers (X-Forwarded-Host, X-Original-URL) and check if reflected in cached response",
+        "priority_boost": 1,
+    },
+    {
+        "id": "websocket_hijack",
+        "name": "Cross-Site WebSocket Hijacking",
+        "match": lambda ep: _WEBSOCKET_PATHS.search(ep.get("url", "")),
+        "test": "Connect to WebSocket from cross-origin page and verify auth is enforced on upgrade request",
+        "priority_boost": 1,
     },
 ]
 

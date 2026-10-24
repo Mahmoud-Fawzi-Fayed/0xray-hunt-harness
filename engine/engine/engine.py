@@ -24,6 +24,12 @@ import time
 
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE_DIR)
+
+# Ensure ~/go/bin is in PATH so recon tools (subfinder, httpx, gau, katana, etc.) are found
+_gobin = os.path.expanduser("~/go/bin")
+if os.path.isdir(_gobin) and _gobin not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _gobin + os.pathsep + os.environ.get("PATH", "")
+
 from scope import Scope            # noqa: E402
 from state import Engagement       # noqa: E402
 import agent as A                  # noqa: E402
@@ -1895,9 +1901,12 @@ class Engine:
         real_todo = [it for it in self.eng.worklist()
                      if not _skip_static_url(it.get("url") or "")
                      and not _REVIEW_JUNK.search(it.get("url") or "")]
-        if len(real_todo) > 20:
-            self.eng.log(f"validate: {len(real_todo)} real url(s) still untested — staying on hunt")
+        has_candidates = bool(self.eng.state.get("candidates"))
+        if len(real_todo) > 20 and not has_candidates:
+            self.eng.log(f"validate: {len(real_todo)} real url(s) still untested and no candidates — staying on hunt")
             return
+        if len(real_todo) > 20:
+            self.eng.log(f"validate: {len(real_todo)} url(s) still untested but {len(self.eng.state['candidates'])} candidate(s) pending — validating candidates")
         self.eng.set_phase("validate")
         self._apply_review_directives()
         import disposition as D

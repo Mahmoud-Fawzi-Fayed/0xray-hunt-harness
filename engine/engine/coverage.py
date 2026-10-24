@@ -152,6 +152,17 @@ def report(slug, base=DEFAULT_BASE):
 
     unique_tested = sum(v["tested"] for v in by_class.values())
 
+    # Class-level blind spot detection: vuln classes with hunt skills but zero test coverage
+    _EXPECTED_CLASSES = {
+        "idor", "xss", "sqli", "ssrf", "csrf", "cors", "open-redirect", "ssti",
+        "xxe", "lfi", "rce", "race-condition", "http-smuggling", "auth-bypass",
+        "business-logic", "file-upload", "prototype-pollution", "cache-poisoning",
+        "deserialization", "jwt", "oauth", "mass-assignment", "privilege-escalation",
+    }
+    tested_classes = {c for c in by_class if by_class[c]["tested"] > 0}
+    observed_classes = set(by_class.keys())
+    blind_spots = sorted(_EXPECTED_CLASSES - tested_classes)
+
     return {"program": slug, "phase": d.get("phase"),
             "surface": len(surface), "tested": unique_tested,
             "security_tested": len(tested_checks),
@@ -159,7 +170,8 @@ def report(slug, base=DEFAULT_BASE):
             "coverage_by_class": matrix,
             "coverage_by_role": role_coverage,
             "operations": operations[:50],
-            "leads": leads}
+            "leads": leads,
+            "blind_spots": blind_spots}
 
 
 def fmt(r):
@@ -194,6 +206,12 @@ def fmt(r):
                 role_str = f" ({','.join(roles)})" if roles and roles != ["default"] else ""
                 parts.append(f"{cls}:{status}{check_str}{role_str}")
             L.append(f"  {op['method']:6s} {op['url'][:60]:60s} {' | '.join(parts)}")
+
+    if r.get("blind_spots"):
+        L += ["", "  ## BLIND SPOTS (vuln classes never tested)"]
+        L.append(f"  ⚠ {len(r['blind_spots'])} class(es) with hunt skills but zero coverage:")
+        for bs in r["blind_spots"]:
+            L.append(f"    - {bs}")
 
     if r["leads"]:
         L += ["", "INTERESTING LEADS (unproven — operator finish):"]
