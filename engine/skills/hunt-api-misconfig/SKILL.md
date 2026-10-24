@@ -36,25 +36,11 @@ Content-Type: application/json-patch+json
 
 XML/form on a JSON DTO (`Content-Type: application/xml`) is the same binder. GraphQL input objects are the same bug (`hunt-graphql`). Impact is the **privileged action** that now works, not the field sitting in JSON.
 
-## JWT (no secret brute-force)
+## JWT
 
-Decode the token. Attacks below forge a token when the **verifier is confused**. They do not recover a strong HMAC secret. After the three known defaults below, a high-entropy HMAC is a stop — hunt `kid`/`jku` or a leaked key in a bundle (`hunt-source-leak`).
+When you see a JWT (`Authorization: Bearer eyJ…` or a JWT cookie), decode the header and load `hunt-jwt` for the full attack methodology (alg confusion, kid/jku/x5u injection, key confusion, psychic signatures). This skill covers when to suspect JWT flaws in an API misconfig context; `hunt-jwt` covers the depth.
 
-| Attack | Token shape | Accept if |
-|---|---|---|
-| `alg: none` | header `{"alg":"none","typ":"JWT"}`, payload with your `sub`/`role`. Try `none` / `None` / `NONE` / `nOnE`. Empty third segment (`header.payload.`) **and** two-segment form with the last dot omitted — libraries disagree | API returns B's resource for B's `sub` |
-| RS256→HS256 | Server verifies RS256. You HMAC-sign with the **public** PEM bytes as the HS256 secret | Same, and only if the library treats the PEM as the HMAC key |
-| Embedded JWK | header `jwk` is your RSA public key, `alg` RS256, you sign with the matching private key | Server trusts the in-token key |
-| `jku` / `x5u` | header URL points at a JWKS you host; the token's `kid` matches that set | Server fetches your URL (OOB) **and** accepts the token |
-| `x5c` | header carries your cert chain | Accepted without pinning |
-| `kid` file / empty key | `kid` is `../../../../dev/null` or a path the process can read, signed with the bytes that file returns (empty for `/dev/null`) | Accepted. This is a path read, not a wordlist |
-| `kid` SQL/command injection | only if `kid` is concatenated and an error or OOB shows it | One proof request, not a dump |
-
-`jku` to an internal URL is SSRF (`hunt-ssrf`) even when the token is rejected. Claim what happened. If `jku`/`x5u` is allowlisted, one probe each — not a list: host suffix (`https://trusted.example.attacker/jwks`), userinfo (`https://trusted.example@attacker/jwks`), and one open redirect on the trusted host. OOB plus a rejected token is SSRF. An accepted token is confusion.
-
-High-entropy HMAC: do not crack it. Try **once each** the empty key, `secret`, and the jwt.io placeholder `your-256-bit-secret`, then stop. If `alg` is `ES256` (Java stacks, or stack unknown), one CVE-2022-21449 attempt: signature segment is base64url of 64 zero bytes (`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`). A `401` is not the bug.
-
-Validation: one request as the victim `sub` that returns data your real session cannot, or a state change. A token that decodes locally and gets `401` is not confusion. Do not brute-force or crack HMAC secrets.
+Quick check: `alg:none` variants + 3 known HMAC defaults (`""`, `secret`, `your-256-bit-secret`). If those fail and HMAC is high-entropy, pivot to `kid`/`jku` or key leak via `hunt-source-leak`. `jku` to an internal URL is SSRF even when the token is rejected.
 
 ## Prototype pollution
 

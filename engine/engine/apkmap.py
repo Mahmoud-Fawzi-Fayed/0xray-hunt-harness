@@ -34,10 +34,10 @@ SECRET_RE = [
 
 def _decompile(apk, outdir):
     if which("jadx"):
-        subprocess.run(["jadx", "-d", outdir, "--no-res", apk], capture_output=True, text=True, timeout=900)
+        subprocess.run(["jadx", "-d", outdir, "--no-res", apk], capture_output=True, text=True, timeout=300)
         return os.path.join(outdir, "sources")
     if which("apktool"):
-        subprocess.run(["apktool", "d", "-f", "-o", outdir, apk], capture_output=True, text=True, timeout=900)
+        subprocess.run(["apktool", "d", "-f", "-o", outdir, apk], capture_output=True, text=True, timeout=300)
         return outdir
     raise RuntimeError("need jadx or apktool on PATH")
 

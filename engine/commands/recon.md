@@ -29,6 +29,18 @@ Or with specific focus:
 /recon target.com --fast     (skip historical URLs)
 ```
 
+## Context discipline
+
+After each step, write raw output to `recon/<target>/<step>.txt`. Do NOT paste raw output
+into the conversation. Instead, bring only a structured summary:
+
+- **Subdomain enum:** "Found N subdomains. Notable: [api.*, admin.*, staging.*, dev.*]"
+- **Live hosts:** "N live hosts. API: [...]. Auth: [...]. Admin: [...]"
+- **URL crawl:** "N URLs. gf-classified: N xss, N idor, N ssrf, N redirect, N sqli candidates"
+- **Nuclei:** "N findings. [severity breakdown]. Critical/High: [list with CVE IDs]"
+
+This prevents recon from consuming 50%+ of the context window on large targets.
+
 ## Steps
 
 ### Step 1: Subdomain Enumeration

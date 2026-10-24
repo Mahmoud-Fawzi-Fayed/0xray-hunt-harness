@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 ~/0xray-hunt-harness/engine/engine/*)",
+      "Bash(python3 ~/0xray-hunt-harness/scripts/*)",
+      "Bash(curl *)",
+      "mcp__contextpilot__contextpilot_search",
+      "mcp__contextpilot__contextpilot_fetch",
+      "mcp__contextpilot__contextpilot_research",
+      "mcp__contextpilot__contextpilot_expand",
+      "mcp__contextpilot__contextpilot_research_state"
+    ]
+  }
+}

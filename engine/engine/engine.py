@@ -670,7 +670,7 @@ class Engine:
             "URLs must be in-scope and real. No class-agent names."
         )
         r = A.run_agent(task, context=self.scope.name, max_turns=20,
-                        timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")))
+                        timeout=int(os.environ.get("HUNT_PROFILE_TIMEOUT", "400")))
         f = A.extract_json(r.get("result") or "") or {}
         if not isinstance(f, dict) or not (f.get("narrative") or f.get("flows")):
             self.eng.log("profile: no narrative from the session — continuing without one"
@@ -792,7 +792,7 @@ class Engine:
                 "At most 10 URLs, in-scope hosts only, no static images or marketing pages."
             )
             r = A.run_agent(task, context=self.scope.name, max_turns=25,
-                            timeout=int(os.environ.get("HUNT_MINE_TIMEOUT", "700")))
+                            timeout=int(os.environ.get("HUNT_HYPO_TIMEOUT", "400")))
             self.eng.state["hypo_ts"] = time.time()
             self.eng.save()
             err = r.get("error") or ""
@@ -1042,7 +1042,7 @@ class Engine:
             tl = (t or "").lower()
             if not tl or tl in INFRA_TECH or SM.tech_skills([tl]):
                 continue
-            if learned_now >= 3:                     # bound per-run latency
+            if learned_now >= 5:                     # bound per-run latency
                 _lrn("record_gap", "tech", tl, f"{self.scope.name}: detected {tl}, no skill (deferred)", self.base)
                 continue
             r = _lrn("autolearn", "tech", t, context=f"{self.scope.name}: detected {t}, no existing skill",
@@ -1092,10 +1092,76 @@ class Engine:
                     self.eng.log(f"  worker error on {it.get('url')}: {e}")
                     yield it, {}
 
+    def _burp_preamble(self, engine_dir):
+        try:
+            from burp import agent_burp_preamble
+            text = agent_burp_preamble()
+            if text:
+                return text
+        except Exception:
+            pass
+        return ""
+
+    def _session_preamble(self):
+        """Build the session-static preamble once. Cached on self._preamble for reuse across endpoints."""
+        if hasattr(self, "_preamble") and self._preamble:
+            return self._preamble
+        e = ENGINE_DIR
+        p = self.scope.name
+        parts = [self._roe()]
+        parts.append(
+            "HUNT METHOD: Fetch the endpoint as the session. Read what it does, every input, object id, "
+            "host, and role the response implies. From those bytes, invent a test the developer should have "
+            "refused — do NOT start from a vulnerability catalog. Run it. If negative, try a second different "
+            "test. Prove impact with in-scope, read-only actions only.\n")
+        parts.append(
+            "AUTHZ GATE (hard): when identities A and B are both live, do NOT return vulnerable:false "
+            "until you have executed both: "
+            f"`python3 {e}/authz.py diff --slug {p} --url \"<URL>\"` and "
+            f"`python3 {e}/netget.py GET \"<URL>\" --as B`. "
+            "analysis must contain `authz:` plus both HTTP statuses and whether B saw A's marker.\n")
+        parts.append(
+            "PROOF STANDARD: claim a vuln ONLY with demonstrated, exploitable impact (not reflection, "
+            "error, or permissive header). IDOR/BOLA: vulnerable:true ONLY with A-vs-B body-diff showing "
+            "B received A's unique marker on an attacker-enumerated id. Do NOT nominate: public CDN/UUID "
+            "static files, unauthenticated WordPress field-title leaks. "
+            "HOLD_RTFS/HOLD_INFORMATIVE still apply.\n")
+        parts.append(
+            f"OOB TESTING: `python3 {e}/oob.py payload --tag <tag>` → inject → "
+            f"`python3 {e}/oob.py poll --tag <tag> --timeout 30`.\n")
+        parts.append(self._burp_preamble(e))
+        parts.append(self._capabilities_note())
+        parts.append(
+            "OUTPUT: End with a fenced ```json``` object: "
+            '{"vulnerable":true|false,"vuln_class":"<class>","severity":"low|medium|high|critical",'
+            '"analysis":"<what endpoint does>","classes_considered":["<tested>"],'
+            '"hypotheses":["<next tests>"],"signals_missed":["<seen not proved>"],'
+            '"evidence":"<proof>","request":"<winning request>",'
+            '"hosts_contacted":["<hosts>"],"attacker_holds":"nothing|own_session|'
+            'link_issued_by_product|foreign_id_shown","id_source":"not_required|enumerated|product_link|'
+            'archive|in_scope_oracle|own_only|asserted_leak",'
+            '"discovered":["<new endpoints/params/secrets>"],'
+            '"proof_note":"<empty or why limited>"}')
+        self._preamble = "\n".join(p for p in parts if p)
+        return self._preamble
+
     # ---------------- hunt ----------------
     def hunt(self):
         self.eng.set_phase("hunt")
         self._honor_heals()
+        # start OOB callback server for blind vuln testing (best-effort)
+        self._oob = None
+        try:
+            from oob import OOBServer
+            existing = OOBServer.load()
+            if existing:
+                self._oob = existing
+                self.eng.log(f"hunt: OOB server reused — {existing.domain}")
+            else:
+                self._oob = OOBServer.start()
+                self.eng.log(f"hunt: OOB server started — {self._oob.domain}")
+        except Exception as exc:  # noqa: BLE001
+            self.eng.log(f"hunt: OOB server unavailable ({exc}), blind testing degraded")
         # load an authenticated session (if HUNT_AUTH=1 + one was provisioned) to reach behind-login surface
         self._auth_session = None
         self._auth_dead = False
@@ -1282,67 +1348,19 @@ class Engine:
             sp = os.path.join(SM.SKILLS_DIR, n, "SKILL.md")
             if os.path.isfile(sp):
                 hinted_paths.append(sp)
-        hypo = os.path.join(SM.SKILLS_DIR, "hunt-hypothesis", "SKILL.md")
-        if os.path.isfile(hypo) and hypo not in hinted_paths:
-            hinted_paths.insert(0, hypo)
         skill_hint = ("Read these ONLY if they match what the live response is: "
                       + ", ".join(f"`{x}`" for x in hinted_paths[:6])
                       + f". Any other hunt-* in {SM.SKILLS_DIR} may be Read. "
-                      "They are references, not a menu. Invent the test from the bytes on the wire.")
-        task = (self._roe() + "\n"
-                f"PENTEST THIS ONE ENDPOINT. Think from the live response. Do NOT walk a vulnerability catalog.\n"
+                      "They are references, not a menu.")
+        task = (self._session_preamble() + "\n"
+                f"PENTEST THIS ONE ENDPOINT.\n"
                 + lead + memory +
                 f"URL: {url}   method: {it.get('method','GET')}   known param(s): {it.get('param','')}   "
-                f"tech: {', '.join(tech) or 'unknown'}\n\n"
-                "If an AUTHENTICATED SESSION block is attached below, send its Cookie and headers on EVERY "
-                "request. A 401 from a request that omitted them is not a result. Do not return "
-                "vulnerable:false just because the logged-out call was rejected. Use the session, list the "
-                "objects it can see, then test those.\n"
-                "AUTHZ GATE (hard): when identities A and B are both live, do NOT return vulnerable:false "
-                "on this endpoint until you have actually executed both read-only commands (running them, "
-                "not describing them): "
-                f"`python3 {e}/authz.py diff --slug {p} --url \"<this URL or an A-owned object URL>\"` and "
-                f"`python3 {e}/netget.py GET \"<that same URL>\" --as B`. "
-                "analysis must contain a line that starts with `authz:` plus both HTTP statuses and whether "
-                "B's body contained a marker that belongs only to A. vulnerable:true only with that marker — "
-                "a similarity score is not a finding. The harness refuses hunt:nothing and leaves the "
-                "endpoint untested if those two commands did not run. No brute force, no id guessing past "
-                "ids account A already returned, in-scope GET only.\n"
-                "STEP 1 — SEE: fetch this URL (and linked JS / maps) as the session. Write what the product "
-                "is doing, every input, every object id, every other host or role the response implies.\n"
-                "STEP 2 — INVENT: from those bytes, name one trust boundary and one test that would be "
-                "false if the developer had been careful. Do not start from SQLi/XSS/IDOR because those "
-                "words exist in a list. If a previous look is in HUNT MEMORY, do something else.\n"
-                "STEP 3 — RUN that test with curl / netget. Then a second different test if the first is "
-                "negative. "
+                f"tech: {', '.join(tech) or 'unknown'}\n"
+                "Use the session's Cookie/headers on EVERY request. "
                 + skill_hint + "\n"
-                f"  authed fetch: `python3 {e}/netget.py GET \"<url>\" --as A`. Before any negative on an "
-                f"authed endpoint also run `python3 {e}/netget.py GET \"<A-object-url>\" --as B` and "
-                f"`python3 {e}/authz.py diff --slug {p} --url \"<A-object-url>\"`.  "
-                f"Unknown stack? `python3 {e}/learn.py auto --kind tech --name \"<thing>\" --context \"<why>\"` "
-                "then Read the drafted skill.\n"
-                "STEP 4 — PROVE: claim a vuln ONLY with demonstrated, exploitable impact (never reflection, an "
-                "error, or a permissive header) using in-scope, read-only actions. "
-                "IDOR/BOLA: vulnerable:true ONLY with an A-vs-B body-diff showing B received A's unique "
-                "marker on an attacker-enumerated or product-issued (in-scope list/oracle) id — not a "
-                "holder-only capability URL. Do NOT nominate as candidates: public CDN/UUID marketing/"
-                "static files (PNG/JPG/WebP/SVG, UUID v7 unguessable, DELETE 401) or unauthenticated "
-                "WordPress field-title leaks (/wp-json titles/schema without field values/secrets). "
-                "Disposition HOLD_RTFS/HOLD_INFORMATIVE still apply — do not weaken those gates.\n"
-                "End with a fenced ```json``` object: "
-                '{"vulnerable":true|false,"vuln_class":"<class you PROVED or invented>",'
-                '"severity":"low|medium|high|critical",'
-                '"analysis":"<what the source/responses told you this endpoint is + does>",'
-                '"classes_considered":["<what you actually tested, including invented names>"],'
-                '"hypotheses":["<next tests this target still deserves>"],'
-                '"signals_missed":["<things you saw and did not prove>"],'
-                '"evidence":"<what proves it>","request":"<the winning request>",'
-                '"hosts_contacted":["every host you hit"],"attacker_holds":"nothing|own_session|'
-                'link_issued_by_product|foreign_id_shown","id_source":"not_required|enumerated|product_link|'
-                'archive|in_scope_oracle|own_only|asserted_leak",'
-                '"discovered":["<new in-scope endpoints/params/secrets you saw in the source>"],'
-                '"proof_note":"<empty, or why proof was limited>"}'
-                + self._capabilities_note())
+                f"  authed fetch: `python3 {e}/netget.py GET \"<url>\" --as A` (second: `--as B`).  "
+                f"No playbook? `python3 {e}/learn.py auto --kind <tech|vuln|bypass|program> --name \"<thing>\" --context \"<why>\"` — drafts a skill for the next hunt.\n")
         task += self._prior_note(it)
         sess = getattr(self, "_auth_session", None)
         if sess:
@@ -1352,8 +1370,8 @@ class Engine:
         # Give the AI real room to THINK + work an endpoint end-to-end (analyse source -> reason -> exploit ->
         # chain): a generous time budget and plenty of turns, both env-tunable. Not capped to the quick per-class
         # budget — a deep pentest legitimately takes many minutes.
-        dt = timeout or int(os.environ.get("HUNT_DEEP_TIMEOUT", "1200"))
-        mt = int(os.environ.get("HUNT_DEEP_TURNS", "80"))
+        dt = timeout or int(os.environ.get("HUNT_DEEP_TIMEOUT", "600"))
+        mt = int(os.environ.get("HUNT_DEEP_TURNS", "40"))
         self.eng.log(f"hunt: deep-pentest {url} (analysis-driven) model={model or 'pool'} budget={dt}s/{mt}turns")
         r = A.run_agent(task, context=self.scope.name, max_turns=mt, timeout=dt, model=model)
         if r.get("error"):
@@ -1380,8 +1398,8 @@ class Engine:
             f"    `python3 {e}/identity.py new  --program {p}`   then read the verify mail: "
             f"`python3 {e}/identity.py poll --program {p} --email <addr>`\n"
             f"  (phone-gated signups: SMS is {sms_state}.)\n"
-            f"- Unknown stack/class with no skill? Teach the harness, then read what it drafted: "
-            f"`python3 {e}/learn.py auto --kind tech --name \"<thing>\" --context \"<why>\"`.\n"
+            f"- No playbook for a stack/vuln/bypass? Teach the harness: "
+            f"`python3 {e}/learn.py auto --kind <tech|vuln|bypass|program> --name \"<thing>\" --context \"<why>\"` — reads it after drafting.\n"
             f"- Headless-browser capture (find the REAL API behind a SPA — biggest discovery win): "
             f"`python3 {e}/browser.py capture --url <seed> --slug {p} [--as A] --scope <in-scope-host>` -> "
             f"XHR/fetch/GraphQL endpoints, then test those.\n"
@@ -1435,21 +1453,15 @@ class Engine:
                         return {"vulnerable": False, "skipped": f"host walled (HTTP {_st})"}
             except Exception:  # noqa: BLE001
                 pass
-        if cls == "deep":                          # analysis-driven per-endpoint pentest (think, then exploit)
-            return self._hunt_deep(it, model, timeout)
-        # DETERMINISTIC 2-account IDOR/BOLA — the #1 missing paying class. 2025 IDOR attempts produced 0
-        # candidates because the LLM alone rarely runs the cross-account diff. When TWO identities exist and
-        # the URL bears an object id, run authz.diff ourselves: if B reaches A's id-bearing object (2xx,
-        # >=90% identical), that's a real BOLA/IDOR candidate the validate phase then confirms.
-        if cls in ("idor", "bola") and str(it.get("url", "")).startswith("http"):
+        # DETERMINISTIC 2-account IDOR/BOLA shortcut — runs before the LLM call.
+        # If B can read A's object, that's a confirmed IDOR without burning an agent.
+        if str(it.get("url", "")).startswith("http"):
             try:
                 import authn as _AN
                 import authz as _AZ
                 ids = _AN.identities(self.scope.name, self.base)
                 if "A" in ids and "B" in ids:
                     d = _AZ.diff_one("GET", it["url"], None, self.scope.name)
-                    # direct diff catches an already-id-bearing url; else the ID-ORACLE harvests A's object
-                    # ids from this (list/self) endpoint and tries to read A's objects AS B.
                     s = d if d.get("bola_suspect") else (_AZ.id_oracle(it["url"], self.scope.name) or [None])[0]
                     if s and s.get("bola_suspect"):
                         return {"vulnerable": True, "severity": "high", "vuln_class": "idor",
@@ -1462,76 +1474,7 @@ class Engine:
                                 "_model": "authz-idor", "_skills": ["hunt-idor"]}
             except Exception:  # noqa: BLE001
                 pass
-        import skill_map as SM
-        tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
-        paths = SM.skill_paths(it.get("vuln_class", ""), tech)
-        names = [os.path.basename(os.path.dirname(p)) for p in paths]
-        probe = SM.probe_for(it.get("vuln_class", ""), it["url"], it.get("param"))
-        task = (self._roe() + "\n"
-                f"TASK: Test {it['url']} (parameter `{it.get('param','')}`) for {it.get('vuln_class')}, strictly "
-                f"within the rules of engagement above.\n"
-                f"FIRST, read and FOLLOW these skill files — they hold the exact methodology, payloads, and "
-                f"discipline/validation gates for this class. `cat` each one before you test:\n  "
-                + "\n  ".join(paths) + "\n"
-                f"curl-FIRST: use curl for your requests. Starter probe: {probe} . "
-                f"Only claim a vulnerability if you can DEMONSTRATE real, exploitable impact (not mere reflection, "
-                f"an error, or a permissive header) using ONLY in-scope, read-only actions. "
-                f"End with a fenced ```json``` object: "
-                f'{{"vulnerable":true|false,"severity":"low|medium|high|critical","evidence":"<what proves it>",'
-                f'"request":"<the winning request>","hosts_contacted":["every host you sent a request to"],'
-                f'"attacker_holds":"nothing|own_session|link_issued_by_product|foreign_id_shown",'
-                f'"id_source":"not_required|enumerated|product_link|archive|in_scope_oracle|own_only|asserted_leak",'
-                f'"discovered":["<any NEW in-scope endpoint/URL you saw while testing — from JS, redirects, '
-                f'API responses or links; helps the next round go deeper>"],'
-                f'"proof_note":"<empty, or why proof was limited by scope/read-only>"}}.'
-                + self._capabilities_note())
-        task += self._prior_note(it)
-        sess = getattr(self, "_auth_session", None)             # inject the logged-in session if it fits this host
-        if sess:
-            _AS = _authmod()
-            if _AS:
-                task += _AS.auth_block(sess, it["url"])
-        if cls in ("idor", "bola"):                             # two accounts present -> demand the cross-account proof
-            try:
-                import authn as _AN2
-                if "B" in _AN2.identities(self.scope.name, self.base):
-                    e, sl = ENGINE_DIR, _AN2._slug(self.scope.name)
-                    task += (f"\nTWO ACCOUNTS AVAILABLE (A and B) — do NOT conclude from one session. Prove cross-account "
-                             f"access:\n  1) As A, GET the endpoint and note an object id it returns: "
-                             f"`python3 {e}/netget.py GET \"{it['url']}\" --as A`.\n"
-                             f"  2) As B, request A's object id: `python3 {e}/netget.py GET \"<A-object-url>\" --as B`. "
-                             "If B receives A's data, that is IDOR/BOLA.\n"
-                             f"  3) Confirm deterministically: `python3 {e}/authz.py diff --slug {sl} "
-                             "--url \"<A-object-url>\"` (bola_suspect=true -> report). vulnerable:true ONLY if B read A's data.\n")
-            except Exception:  # noqa: BLE001
-                pass
-        try:                                                    # LEARN from the operator's past dispositions
-            import findings as _FS
-            les = _FS.lessons_for(self.base, self.scope.name, it.get("vuln_class"))
-            if les["invalid"] or les["valid"]:
-                tl = "\nOPERATOR DISPOSITION LESSONS — learn from how past findings here were judged:\n"
-                for l in les["invalid"][:4]:
-                    tl += (f"  - AVOID: a '{l['vuln_class']}' finding was marked {l['status']} — "
-                           f"{l['reason'] or 'not a valid/impactful bug'}. Do NOT submit this again unless you "
-                           "now have the exact missing proof/impact.\n")
-                for l in les["valid"][:3]:
-                    tl += (f"  - WORKS: a '{l['vuln_class']}' finding was {l['status']} — "
-                           f"{l['reason'] or 'accepted as a real bug'}. Prioritise this kind of proven impact.\n")
-                task += tl
-        except Exception:  # noqa: BLE001
-            pass
-        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns,
-                        timeout=timeout or self.timeout, model=model)   # model/timeout override => failover path
-        self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} model={r.get('model', '?')} "
-                     f"skills=[{','.join(names)}]" + (f" ERR={r['error']}" if r.get("error") else ""))
-        if r.get("error"):
-            # learn from the failure: a model/class that keeps erroring is visible in the journal + panel
-            _lrn("record_outcome", self.scope.name, it.get("vuln_class"), "error", r["error"], base=self.base)
-            return {"vulnerable": False, "error": r["error"], "rate_limited": r["error"] == "rate-limited"}
-        f = A.extract_json(r["result"]) or {"vulnerable": False}
-        if isinstance(f, dict):
-            f["_model"], f["_skills"] = r.get("model"), names
-        return f
+        return self._hunt_deep(it, model, timeout)
 
     def _feedback_surface(self, f):
         """Hunt->recon feedback: in-scope endpoints the agent discovered WHILE testing get added back to the
@@ -1582,8 +1525,10 @@ class Engine:
             if c.get("url") and k not in seen:
                 seen.add(k)
                 prims.append(c)
-        if not prims:
-            return                                   # nothing chainable -> no agent call, no cost
+        if len(prims) < 2:
+            return                                   # single primitive can't chain -> no agent call
+        if not any(p.get("severity", "").lower() in ("medium", "high", "critical") for p in prims):
+            return                                   # all low-severity -> unlikely to compose into high-impact
         self.eng.set_phase("chain")
         classes = ", ".join(sorted({p.get("vuln_class") for p in prims}))
         plist = "\n".join(f"  - {p.get('vuln_class')} @ {p.get('url')} | {str(p.get('evidence', ''))[:150]}"
@@ -1607,7 +1552,8 @@ class Engine:
             _AS = _authmod()
             if _AS:
                 task += _AS.auth_block(sess, prims[0].get("url", ""))
-        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns, timeout=self.timeout)
+        r = A.run_agent(task, context=self.scope.name, max_turns=self.max_turns,
+                        timeout=int(os.environ.get("HUNT_CHAIN_TIMEOUT", "300")))
         if r.get("error"):
             self.eng.log(f"chain: agent error ({r['error']}) — will retry next round")
             return
@@ -1765,11 +1711,24 @@ class Engine:
                 self._close_candidate(c, "own-session oauth — token belongs to the registering account")
                 continue
             pending.append(c)
-        self.eng.log(f"validate: {len(pending)} new candidate(s) to verify "
-                     f"({len(rejected)} already closed), {self.parallel} at a time")
-        for c, v in self._run_parallel(self._validate_agent, pending):
+        survivors = []
+        for c in pending:
             cls, url = c.get("vuln_class"), c.get("url")
-            repro = self._reproduce(c, v)              # INDEPENDENT, deterministic real-vs-not separator
+            pre = self._reproduce(c, None)
+            if pre["status"] == "disproved":
+                c["reproduction"] = pre
+                self.eng.mark_rejected(c, f"disproved via {pre['method']}")
+                _lrn("record_outcome", self.scope.name, cls, "false-positive",
+                     f"disproved by {pre['method']}: {pre['signal']}", base=self.base)
+                self.eng.log(f"validate: ✗ PRE-CHECK disproved {cls} @ {url} — {pre['signal']} (LLM skipped)")
+            else:
+                survivors.append(c)
+        self.eng.log(f"validate: {len(survivors)} candidate(s) to verify "
+                     f"({len(pending) - len(survivors)} pre-disproved, {len(rejected)} already closed), "
+                     f"{self.parallel} at a time")
+        for c, v in self._run_parallel(self._validate_agent, survivors):
+            cls, url = c.get("vuln_class"), c.get("url")
+            repro = self._reproduce(c, v)
             c["reproduction"] = repro
             llm_real = bool(v and v.get("real"))
             # 1) deterministic DISPROOF overrides an LLM 'real' -> NOT a real bug (kills false positives)
@@ -1809,6 +1768,15 @@ class Engine:
                  "confirmed" if reproduced else "confirmed-unreproduced", repro["signal"], base=self.base)
             self.eng.log(f"validate: {tag} [{repro['method']}] {cls} @ {url} ({v.get('severity','')})"
                          + (f" ⚠ scope-flagged: {', '.join(c['scope_warning'])}" if c.get('scope_warning') else ''))
+        # post-validate: evolve learned skills with accumulated outcomes
+        try:
+            evolved = _lrn("evolve_all", base=self.base)
+            if evolved:
+                for slug, info in (evolved or {}).items():
+                    self.eng.log(f"learn: evolved skill '{slug}' — {info.get('confirmed',0)} confirmed, "
+                                 f"{info.get('fp',0)} FP, {info.get('dup',0)} dup")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _disposition(self, c, v):
         """Score the candidate the way a program triager scores RTFS / Informative. Never raises."""
@@ -1883,7 +1851,7 @@ class Engine:
         if front:
             paths = front + [p for p in paths if p not in front]
         task = (self._roe() + "\n"
-                f"Adversarially verify a claimed finding (be skeptical — default to false positive if unproven). "
+                f"VALIDATE: Adversarially verify a claimed finding (be skeptical — default to false positive). "
                 f"Claim: {c['vuln_class']} at {c['url']} (param `{c.get('param','')}`). "
                 f"Reported evidence: {c.get('evidence','')[:400]}.\n"
                 f"FIRST read and FOLLOW these gates/methodology (`cat` each):\n  " + "\n  ".join(paths) + "\n"

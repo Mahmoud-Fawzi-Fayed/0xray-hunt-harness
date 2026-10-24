@@ -56,8 +56,8 @@ hostnames + detected tech), load that skill. examples of tokens matching
 live bytes: `nextjs` vs `__NEXT_DATA__` / `/_next/`, `okta` vs an Okta
 login host, `laravel` vs `laravel_session`.
 
-always load `hunt-hypothesis` when it exists. it tells the agent to invent
-the test from the bytes, not from a class list.
+`hunt-hypothesis` is loaded automatically only when no class skill matches.
+when a class skill is loaded, the hypothesis mindset is embedded in the agent preamble.
 
 **load budget: cap at 8 matched skills** plus always-on mindset skills.
 if more than 8 match, keep the ones whose tokens hit identity/SSO, VPN,
@@ -82,7 +82,6 @@ always-on (load first):
 redteam-mindset
 mid-engagement-ir-detection
 dedup-novelty
-hunt-hypothesis
 ```
 
 platform + class (load second): only the fingerprint-matched skills from
@@ -100,7 +99,6 @@ bb-methodology
 security-arsenal
 triage-validation
 dedup-novelty
-hunt-hypothesis
 ```
 
 plus fingerprint-matched hunt-* skills only. do **not** load the full OWASP
@@ -143,7 +141,6 @@ loaded for {red team|wapt}: {N} skills
   mindset:    {always-on list}
   matched:    {fingerprint-matched skills (<=8), or "none detected"}
   deferred:   {matched past the 8-cap, or omit if none}
-  hypothesis: hunt-hypothesis
 ```
 
 do not print inj/auth/api class buckets. those are a hunt menu.
@@ -161,7 +158,7 @@ never echo back, log, or persist:
 
 ## Related Skills & Chains
 
-- **`hunt-hypothesis`** — always. invent the test from live bytes.
+- **`hunt-hypothesis`** — fallback when no class skill matches.
 - **`bb-methodology`** / **`redteam-mindset`** — mode confirmation and
   operator discipline.
 - any `hunt-*` on disk whose name matches the fingerprint.

@@ -175,6 +175,31 @@ dig CNAME sub.target.com
 
 ---
 
+## Cloud Provider Quick-Claim Reference
+
+| Provider | CNAME pattern | Fingerprint (HTTP response) | Claim procedure |
+|---|---|---|---|
+| **AWS S3** | `*.s3.amazonaws.com`, `*.s3-website-*.amazonaws.com` | `NoSuchBucket` / `The specified bucket does not exist` | `aws s3api create-bucket --bucket <name> --region <region>` |
+| **AWS EB** | `*.elasticbeanstalk.com` | `404 Not Found` with no EB app | Create EB environment with matching CNAME prefix |
+| **AWS CloudFront** | `*.cloudfront.net` | `Bad Request` / CloudFront error | **Usually NOT claimable** — requires matching TLS cert + DNS TXT |
+| **Azure App Service** | `*.azurewebsites.net` | `404 Web Site not found` | Create App Service with matching name (first-come) |
+| **Azure VM** | `*.cloudapp.azure.com` | NXDOMAIN or connection refused | Deploy VM in same region, request released hostname |
+| **Azure TM** | `*.trafficmanager.net` | `The specified Traffic Manager profile does not exist` | Create TM profile with matching name |
+| **GCP Storage** | `*.storage.googleapis.com` | `NoSuchBucket` | `gsutil mb gs://<bucket-name>` |
+| **GCP App Engine** | `*.appspot.com` | `Error: Not Found` | Deploy app with matching project ID (if available) |
+| **Vercel** | `cname.vercel-dns.com` | `DEPLOYMENT_NOT_FOUND` | Create project → Settings → Domains → add hostname |
+| **Netlify** | `*.netlify.app` | `Not Found` (Netlify 404) | Create site with matching subdomain |
+| **Heroku** | `*.herokudns.com`, `*.herokuapp.com` | `No such app` | `heroku create <name>` |
+
+**Quick validation script:**
+```bash
+SUB="$1"; CNAME=$(dig +short CNAME "$SUB" | head -1)
+[ -z "$CNAME" ] && echo "No CNAME" && exit 1
+echo "CNAME: $CNAME"
+A=$(dig +short A "$CNAME"); [ -z "$A" ] && echo "TARGET NXDOMAIN — potential takeover"
+curl -sk "https://$SUB" 2>/dev/null | grep -iE 'NoSuchBucket|no such app|not found|unknown domain|does not exist' && echo "FINGERPRINT MATCH"
+```
+
 ## Bypass Techniques
 
 **Defense: Manual fingerprint review before publishing**

@@ -43,6 +43,19 @@ Use `--quick` for faster, lower-cost scans (skips deep fuzzing and extended nucl
 /hunt target.com --vuln-class idor   # single bug class — lowest token use
 ```
 
+## Token Discipline (automatic)
+
+After each phase, check context usage via `contextpilot_budget()`.
+If `contextWindowUsedPercent` exceeds the cumulative cap, run `/compact` before the next phase.
+
+| Phase | Cumulative Cap |
+|-------|---------------|
+| SCOPE + SYNC | 10% |
+| RECON | 25% |
+| HUNT | 65% |
+| VALIDATE | 80% |
+| DRAFT | 95% |
+
 For long hunts, run `/compact` (Claude Code built-in) periodically to compress context
 without losing findings.
 

@@ -117,6 +117,124 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
     return reqs
 
 
+def screenshot(url, output_path, slug=None, ident=None, wait=4, timeout=15000):
+    """Take a full-page screenshot for evidence collection."""
+    from playwright.sync_api import sync_playwright
+    import authn
+    ua = os.environ.get("HUNT_USER_AGENT")
+    sess_headers = {}
+    if ident:
+        af = os.environ.get("HUNT_AUTH_FILE")
+        sess_headers = authn.headers_for(ident, slug_or_path=(af or slug))
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True)
+        ctx = b.new_context(user_agent=ua or None,
+                            extra_http_headers={k: v for k, v in sess_headers.items() if k.lower() != "cookie"})
+        if sess_headers.get("Cookie"):
+            host = urlparse(url).hostname
+            cookies = []
+            for pair in sess_headers["Cookie"].split(";"):
+                if "=" in pair:
+                    n, v = pair.strip().split("=", 1)
+                    cookies.append({"name": n, "value": v, "domain": host, "path": "/"})
+            try:
+                ctx.add_cookies(cookies)
+            except Exception:
+                pass
+        page = ctx.new_page()
+        try:
+            page.goto(url, timeout=timeout, wait_until="networkidle")
+        except Exception:
+            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+        page.wait_for_timeout(wait * 1000)
+        page.screenshot(path=output_path, full_page=True)
+        b.close()
+    return output_path
+
+
+def dom_xss_probe(url, params=None, timeout=10000):
+    """Probe URL for DOM-based XSS by injecting canary into URL params and hash.
+    Returns list of findings [{param, sink, evidence}]."""
+    from playwright.sync_api import sync_playwright
+    canary = "xRay0xDOM"
+    findings = []
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True)
+        ctx = b.new_context()
+        page = ctx.new_page()
+        alerts = []
+        page.on("dialog", lambda d: (alerts.append(d.message), d.dismiss()))
+        # Test hash-based injection
+        for payload in [f"#{canary}", f"#<img/src=x onerror=alert('{canary}')>"]:
+            test_url = url + payload
+            try:
+                page.goto(test_url, timeout=timeout, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                if alerts:
+                    findings.append({"param": "hash", "sink": "alert", "evidence": alerts[-1], "url": test_url})
+                    alerts.clear()
+                html = page.content()
+                if canary in html:
+                    findings.append({"param": "hash", "sink": "innerHTML", "evidence": f"canary reflected in DOM", "url": test_url})
+            except Exception:
+                pass
+        # Test query param injection
+        for param in (params or ["q", "search", "query", "name", "redirect", "url", "next", "callback"]):
+            test_url = f"{url}{'&' if '?' in url else '?'}{param}={canary}"
+            try:
+                page.goto(test_url, timeout=timeout, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                if alerts:
+                    findings.append({"param": param, "sink": "alert", "evidence": alerts[-1], "url": test_url})
+                    alerts.clear()
+            except Exception:
+                pass
+        b.close()
+    return findings
+
+
+def csrf_check(url, slug=None, ident=None, timeout=10000):
+    """Check if a page has CSRF protection on its forms.
+    Returns list of unprotected forms [{action, method, has_token}]."""
+    from playwright.sync_api import sync_playwright
+    import authn
+    sess_headers = {}
+    if ident:
+        af = os.environ.get("HUNT_AUTH_FILE")
+        sess_headers = authn.headers_for(ident, slug_or_path=(af or slug))
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True)
+        ctx = b.new_context(extra_http_headers={k: v for k, v in sess_headers.items() if k.lower() != "cookie"})
+        if sess_headers.get("Cookie"):
+            host = urlparse(url).hostname
+            cookies = []
+            for pair in sess_headers["Cookie"].split(";"):
+                if "=" in pair:
+                    n, v = pair.strip().split("=", 1)
+                    cookies.append({"name": n, "value": v, "domain": host, "path": "/"})
+            try:
+                ctx.add_cookies(cookies)
+            except Exception:
+                pass
+        page = ctx.new_page()
+        try:
+            page.goto(url, timeout=timeout, wait_until="networkidle")
+        except Exception:
+            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+        forms = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('form')).map(f => ({
+                action: f.action,
+                method: (f.method || 'GET').toUpperCase(),
+                has_token: !!(f.querySelector('input[name*="csrf"]') ||
+                             f.querySelector('input[name*="token"]') ||
+                             f.querySelector('input[name*="_token"]') ||
+                             f.querySelector('input[name*="authenticity"]'))
+            }));
+        }""")
+        b.close()
+    return [f for f in forms if f["method"] == "POST" and not f["has_token"]]
+
+
 def _main(argv=None):
     ap = argparse.ArgumentParser(description="headless-browser API-surface capture")
     sub = ap.add_subparsers(dest="cmd", required=True)

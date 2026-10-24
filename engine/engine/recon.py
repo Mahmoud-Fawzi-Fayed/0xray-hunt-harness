@@ -872,10 +872,46 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
         os.close(fd)
 
 
+def toolcheck():
+    """Print which recon tools are available and which are missing."""
+    tools = {
+        "subfinder": "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+        "httpx": "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+        "dnsx": "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
+        "katana": "go install github.com/projectdiscovery/katana/cmd/katana@latest",
+        "nuclei": "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+        "waybackurls": "go install github.com/tomnomnom/waybackurls@latest",
+        "gau": "go install github.com/lc/gau/v2/cmd/gau@latest",
+        "gf": "go install github.com/tomnomnom/gf@latest",
+        "interactsh-client": "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
+        "curl": "apt install curl",
+        "jq": "apt install jq",
+    }
+    gobin = os.path.expanduser("~/go/bin")
+    ok, missing = [], []
+    for name, install in tools.items():
+        found = which(name) or (os.path.isfile(os.path.join(gobin, name)) and os.path.join(gobin, name))
+        if found:
+            ok.append(f"  [OK] {name:22s} {found}")
+        else:
+            missing.append(f"  [--] {name:22s} install: {install}")
+    print("Recon tool check:")
+    for line in ok:
+        print(line)
+    for line in missing:
+        print(line)
+    print(f"\n{len(ok)} available, {len(missing)} missing")
+    if missing:
+        print(f"\nHint: export PATH=$PATH:{gobin}")
+    return len(missing) == 0
+
+
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, __file__.rsplit("/", 1)[0])
     from scope import Scope
+    if len(sys.argv) > 1 and sys.argv[1] == "check":
+        sys.exit(0 if toolcheck() else 1)
     if len(sys.argv) > 1:                      # live test: python3 recon.py https://target/  host
         seeds = [sys.argv[1]]
         host = sys.argv[2] if len(sys.argv) > 2 else urlparse(sys.argv[1]).hostname

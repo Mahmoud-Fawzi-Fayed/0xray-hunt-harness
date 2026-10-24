@@ -185,7 +185,7 @@ def _activity_event(line, program):
     if m:
         ts, url, model = m.groups()
         return {"ts": ts, "program": program, "phase": "hunt", "class": "deep", "url": url,
-                "model": model, "skills": ["hunt-hypothesis"]}
+                "model": model, "skills": []}
     m = _HUNT_TIMEOUT.search(line)
     if m:
         ts, cls, url, model = m.groups()

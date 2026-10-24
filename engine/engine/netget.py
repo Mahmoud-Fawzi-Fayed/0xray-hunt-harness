@@ -19,18 +19,79 @@ CLI — what the hunt agent uses INSTEAD of curl for a gated target:
 import json
 import os
 import sys
+import time
+import threading
+
+# --- Adaptive rate limiter (per-host) ---
+_RL_LOCK = threading.Lock()
+_RL_STATE = {}  # host -> {"backoff": float, "consecutive_blocks": int, "last_req": float}
+_RL_MAX_BACKOFF = 30.0
+_RL_BLOCK_PAUSE = 300  # 5 min pause after 5 consecutive 403s
+
+
+def _rate_limit(host, status):
+    """Update per-host rate state after a response."""
+    with _RL_LOCK:
+        st = _RL_STATE.setdefault(host, {"backoff": 0.0, "consecutive_blocks": 0, "last_req": 0})
+        if status == 429:
+            st["backoff"] = min(st["backoff"] * 2 or 1.0, _RL_MAX_BACKOFF)
+        elif status == 403:
+            st["consecutive_blocks"] += 1
+            if st["consecutive_blocks"] >= 5:
+                st["backoff"] = _RL_BLOCK_PAUSE
+        else:
+            st["backoff"] = 0.0
+            st["consecutive_blocks"] = 0
+        st["last_req"] = time.time()
+
+
+def _wait_for_host(host):
+    """Sleep if the host is rate-limited."""
+    with _RL_LOCK:
+        st = _RL_STATE.get(host)
+        if st and st["backoff"] > 0:
+            elapsed = time.time() - st["last_req"]
+            wait = max(0, st["backoff"] - elapsed)
+            if wait > 0:
+                time.sleep(min(wait, _RL_MAX_BACKOFF))
+
+
+def _burp_proxy_if_available():
+    try:
+        from burp import is_burp_available, BURP_PROXY
+        if is_burp_available():
+            return BURP_PROXY
+    except ImportError:
+        pass
+    return ""
 
 
 def _cfg():
+    proxy = os.environ.get("HUNT_PROXY") or _burp_proxy_if_available()
     return (os.environ.get("HUNT_USER_AGENT") or "",
             os.environ.get("HUNT_IMPERSONATE") or "safari_ios",
-            os.environ.get("HUNT_PROXY") or "")
+            proxy,
+            os.environ.get("HUNT_PROXY_LIST") or "")
 
 
-def get(url, method="GET", data=None, headers=None, timeout=25, ident=None, slug=None):
+def _pick_proxy(proxy, proxy_list):
+    """Round-robin proxy from HUNT_PROXY_LIST file, or single HUNT_PROXY."""
+    if proxy_list and os.path.isfile(proxy_list):
+        try:
+            with open(proxy_list) as f:
+                proxies = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            if proxies:
+                _pick_proxy._i = getattr(_pick_proxy, "_i", -1) + 1
+                return proxies[_pick_proxy._i % len(proxies)]
+        except OSError:
+            pass
+    return proxy
+
+
+def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug=None):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
-    ua, imp, proxy = _cfg()
+    ua, imp, proxy, proxy_list = _cfg()
     h = dict(headers or {})
     if ua:
         h.setdefault("User-Agent", ua)
@@ -43,17 +104,40 @@ def get(url, method="GET", data=None, headers=None, timeout=25, ident=None, slug
                 h.setdefault(k, v)
         except Exception:  # noqa: BLE001
             pass
+    # Adaptive rate limiting
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+    except Exception:
+        host = ""
+    _wait_for_host(host)
+    chosen_proxy = _pick_proxy(proxy, proxy_list)
+    # Try curl_cffi first (TLS impersonation), fall back to requests
     try:
         from curl_cffi import requests as cr
-    except Exception as e:  # noqa: BLE001
-        return 0, "", {"_error": f"curl_cffi unavailable: {e}"}
-    kw = {"impersonate": imp, "timeout": timeout, "headers": h, "verify": True}
-    if proxy:
-        kw["proxies"] = {"http": proxy, "https": proxy}
-    try:
+        kw = {"impersonate": imp, "timeout": timeout, "headers": h, "verify": True}
+        if chosen_proxy:
+            kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
         r = cr.request(method.upper(), url, data=data, **kw)
+        _rate_limit(host, r.status_code)
         return r.status_code, r.text, {k.lower(): v for k, v in r.headers.items()}
+    except ImportError:
+        pass
     except Exception as e:  # noqa: BLE001
+        _rate_limit(host, 0)
+        # fall through to requests
+    try:
+        import requests as rq
+        kw = {"timeout": timeout, "headers": h, "verify": True}
+        if chosen_proxy:
+            kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
+        r = rq.request(method.upper(), url, data=data, **kw)
+        _rate_limit(host, r.status_code)
+        return r.status_code, r.text, {k.lower(): v for k, v in r.headers.items()}
+    except ImportError:
+        return 0, "", {"_error": "neither curl_cffi nor requests available"}
+    except Exception as e:  # noqa: BLE001
+        _rate_limit(host, 0)
         return 0, "", {"_error": str(e)}
 
 

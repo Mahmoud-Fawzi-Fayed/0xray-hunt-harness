@@ -25,7 +25,47 @@ import time
 ENGINE = os.path.dirname(os.path.abspath(__file__))
 KIMI_BIN = os.environ.get("KIMI_BIN", "kimi")
 CURSOR_BIN = os.environ.get("CURSOR_AGENT_BIN", "cursor-agent")
-OPENCODE_BIN = os.environ.get("OPENCODE_BIN", "/root/.opencode/bin/opencode")
+OPENCODE_BIN = os.environ.get("OPENCODE_BIN", os.path.expanduser("~/.opencode/bin/opencode"))
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+
+
+def _is_claude_code_available():
+    """Check if we can use Claude Code CLI as a fallback agent runtime."""
+    from shutil import which as _which
+    return bool(_which(CLAUDE_BIN))
+
+
+def _claude_code_dispatch(task, timeout=600):
+    """Run a hunt task via Claude Code CLI (headless, non-interactive).
+    Returns the same {result, error, model, session_id, ...} shape as _run_once."""
+    import tempfile
+    prompt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, dir="/tmp")
+    prompt_file.write(task)
+    prompt_file.close()
+    cmd = [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
+           "--max-turns", "25"]
+    try:
+        proc = subprocess.run(cmd, input=task, capture_output=True, text=True,
+                              timeout=timeout, cwd=os.path.dirname(ENGINE))
+        stdout = proc.stdout or ""
+        result_json = extract_json(stdout)
+        return {"result": stdout if not result_json else json.dumps(result_json),
+                "error": None if proc.returncode == 0 else "agent-error",
+                "model": "claude-code", "session_id": None, "reused": False,
+                "duration_s": 0, "complete": proc.returncode == 0,
+                "parsed": result_json}
+    except subprocess.TimeoutExpired:
+        return {"result": "", "error": "timeout", "model": "claude-code",
+                "session_id": None, "reused": False, "duration_s": timeout,
+                "complete": False, "partial": True}
+    except Exception as e:
+        return {"result": "", "error": str(e), "model": "claude-code",
+                "session_id": None, "reused": False, "duration_s": 0}
+    finally:
+        try:
+            os.unlink(prompt_file.name)
+        except OSError:
+            pass
 
 # Model policy: hunt ONLY on this approved pool, rotating per call for diversity (and to dodge a single
 # model's safety-filter stalls). KIMI_HUNT_MODELS wins, then OPENCODE_HUNT_MODELS, then the legacy pools.

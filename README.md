@@ -1,12 +1,14 @@
 # 0xRay Hunt Harness
 
-![skills](https://img.shields.io/badge/skills-81-blue)
-![engine modules](https://img.shields.io/badge/engine%20modules-34-blue)
+![skills](https://img.shields.io/badge/skills-68-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-38-blue)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
-An autonomous, **anti-duplicate** bug-bounty hunting harness. It runs on **Cursor agents**, tests
+An autonomous, **anti-duplicate** bug-bounty hunting harness. It runs on **OpenCode + Claude Code** agents, tests
 **read-only by default**, stays **in-scope**, and **stops at draft — it never submits for you**.
+
+Integrates with **Burp Suite Professional** (MCP), **ContextPilot** (research), and a **self-learning skill system** that evolves playbooks from hunt outcomes.
 
 ---
 
@@ -108,15 +110,14 @@ qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent �
 |------|------------|
 | [`harness/`](harness/) | the glue: n8n `docker-compose`, the novelty-monitor workflow, launch scripts |
 | [`harness/.env.example`](harness/.env.example) | every setting documented — copy to `.env` and fill in |
-| [`.cursor/agents/`](.cursor/agents/) | 5 subagents (orchestrator, recon, vuln-hunter, dedup, report) |
-| [`.cursor/rules/`](.cursor/rules/) | always-on rules: SOP, dedup/novelty, triager-grade reporting |
-| [`engine/`](engine/) | the full engine (34 modules) + 81 skills |
+| [`.claude/`](.claude/) | Claude Code agents + skills (hunt, report, triage, research) |
+| [`engine/`](engine/) | the full engine (38 modules) + 68 skills |
 | [`MANUAL.md`](MANUAL.md) | the deep operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
 ## Quick start
 
-Prereqs: Linux + Docker, Python 3.10+, `pm2`, and `cursor-agent` logged in.
+Prereqs: Linux/WSL, Python 3.10+, Go recon tools (`~/go/bin/`), and [OpenCode](https://github.com/opencode-ai/opencode) or Claude Code.
 
 ```bash
 make setup        # copy harness/.env.example -> harness/.env, then edit it
@@ -158,11 +159,30 @@ The harness can now reach the surface where the paid bugs actually live:
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
-## Skills catalog (80)
+## Burp Suite Professional Integration
+
+When Burp Pro is running (locally or via WSL→Windows port forwarding), agents automatically get:
+
+- **HTTP via Burp** — `send_http1/2_request`, all traffic in proxy history + sitemap
+- **Collaborator OOB** — `generate_collaborator_payload` + `get_collaborator_interactions`
+- **Scanner** — `get_scan_issues` for passive/active findings
+- **Repeater/Intruder** — send requests for manual follow-up
+- **Proxy auto-routing** — `netget.py` routes all requests through Burp when reachable
+- Setup: `python3 engine/engine/burp.py setup` + `bash harness/burp-forward.sh start` (WSL)
+
+## Self-Learning Skill System
+
+The harness teaches itself. When it encounters an unknown stack, vuln class, or bypass:
+
+1. `learn.py auto --kind <tech|vuln|bypass|program>` — researches and drafts a new SKILL.md
+2. Hunt outcomes (`confirmed`, `false-positive`, `duplicate`) feed back into the journal
+3. `evolve_skill()` auto-refines learned skills with proven vectors and FP patterns
+4. Skills are pull-on-demand references — agents reason from the live response first
+
+## Skills catalog (68)
 
 Each `hunt-*` skill is a playbook: *what actually pays*, how to detect it, the minimum proof, and a
-dedup gate. New: ✨ `hunt-mcp`, `hunt-baas`, `hunt-webhook`, `hunt-jwt`, `hunt-api-owasp`,
-`hunt-desktop-macos`, `hunt-desktop-windows`.
+dedup gate. Plus 6 auto-learned tech skills that evolve from hunt outcomes.
 
 - **Recon & novelty** — `web2-recon` · `offensive-osint` · `osint-methodology` · `hunt-subdomain` · `hunt-source-leak` · `changed-js-deepdive` · `hunt-ntlm-info` · `supply-chain-attack-recon`
 - **Injection & server-side** — `hunt-sqli` · `hunt-nosqli` · `hunt-ssrf` · `hunt-rce` · `hunt-lfi` · `hunt-ssti` · `hunt-xxe` · `hunt-deserialization` · `hunt-ldap` · ✨`hunt-webhook`
@@ -174,9 +194,11 @@ dedup gate. New: ✨ `hunt-mcp`, `hunt-baas`, `hunt-webhook`, `hunt-jwt`, `hunt-
 - **Cloud · infra · appliances** — `hunt-cloud-misconfig` · `cloud-iam-deep` · `hunt-k8s` · `hunt-cicd` · `hunt-tls-network` · `enterprise-vpn-attack` · `vmware-vcenter-attack` · ✨`hunt-baas`
 - **Identity providers** — `m365-entra-attack` · `okta-attack`
 - **Desktop / mobile** — ✨`hunt-desktop-macos` · ✨`hunt-desktop-windows` · `apk-redteam-pipeline`
-- **AI / agents** — `hunt-llm-ai` · ✨`hunt-mcp`
+- **AI / agents** — `hunt-llm-ai` · `hunt-mcp`
+- **New** — `hunt-2fa-bypass` · `hunt-crlf` · `hunt-payment-logic` · `hunt-pdf-ssrf` · `hunt-prototype-pollution` · `hunt-methodology`
 - **Web3** — `web3-audit` · `meme-coin-audit`
 - **Methodology · reporting** — `bb-methodology` · `bug-bounty` · `bb-local-toolkit` · `dedup-novelty` · `triage-validation` · `redteam-mindset` · `mid-engagement-ir-detection` · `evidence-hygiene` · `report-writing` · `bugcrowd-reporting` · `redteam-report-template` · `security-arsenal` · `hunt-dispatch` · `hunt-misc`
+- **Auto-learned** — tech playbooks drafted on-the-fly for unknown stacks (BigIP, Express, TYPO3, Istio-Envoy, etc.)
 
 ## Safety contract
 
@@ -192,7 +214,7 @@ See [SECURITY.md](SECURITY.md) for the full responsible-use policy.
 ## Testing & CI
 
 ```bash
-make selfcheck     # crash/loop/hostile-input gauntlet — 66/66
+make selfcheck     # crash/loop/hostile-input gauntlet — 57/57
 make e2e           # end-to-end pipeline trace
 make skills-lint   # frontmatter, naming, secret + client-identifier scan over all skills
 make secret-scan   # fail if obvious secrets are present in the tree

@@ -38,7 +38,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE = os.path.join(ROOT, "engine")
 sys.path.insert(0, ENGINE)
 
-ENV_FILE = os.environ.get("HUNT_ENV_FILE", os.path.expanduser("~/BugHunting_0xRay/harness/.env"))
+_PROJECT_ROOT = os.path.dirname(ROOT)
+ENV_FILE = os.environ.get("HUNT_ENV_FILE",
+           os.path.join(_PROJECT_ROOT, "harness", ".env"))
 BRIDGE = "http://127.0.0.1:8899"
 PANEL = "https://finding.redtracefai.com/panel/"
 
@@ -97,7 +99,7 @@ def s_env():
 def s_runtime():
     oc, cu = None, None
     try:
-        p = subprocess.run([_env("OPENCODE_BIN", "/root/.opencode/bin/opencode"), "--version"],
+        p = subprocess.run([_env("OPENCODE_BIN", os.path.expanduser("~/.opencode/bin/opencode")), "--version"],
                            capture_output=True, text=True, timeout=20)
         if p.returncode == 0:
             oc = (p.stdout.strip() or p.stderr.strip())[:80]

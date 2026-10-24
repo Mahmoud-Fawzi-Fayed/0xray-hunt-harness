@@ -47,6 +47,35 @@ Re-read `GET /orders/{id}` (or the PSP line item). The finding is the amount the
 
 Mass-assignment cousin: body includes `price`, `plan_id`, `discount`, `role` because the update DTO and the database model are the same object (`hunt-api-misconfig`).
 
+## Payment & billing deep-dive
+
+**Negative amount:** `{"amount": -50.00}` on refund, transfer, or credit endpoints. Re-read balance: does the sender *gain* money?
+
+**Currency confusion:** Pay in a zero-decimal currency (JPY, KRW — 100 = $1) but credited as two-decimal (USD — 100 = $100):
+```bash
+curl -s -X POST "$TARGET/api/checkout" -H 'Content-Type: application/json' \
+  -d '{"amount":100,"currency":"JPY","product_id":"PREMIUM"}'
+# Then GET /api/orders/LAST — is the order total ¥100 (~$0.70) for a $100 item?
+```
+
+**Coupon stacking:** Apply the same code twice in one request, or apply two mutually-exclusive codes:
+```bash
+curl -s -X POST "$TARGET/api/cart/coupons" -d '{"codes":["SAVE50","SAVE50"]}'
+curl -s -X POST "$TARGET/api/cart/coupons" -d '{"codes":["SAVE50","WELCOME30"]}'
+```
+Re-read cart total. Discount > 100% or double-applied = finding.
+
+**Race on payment (pay once, credit twice):** Use `hunt-race-condition` last-byte sync on the payment confirmation endpoint. 10 parallel requests, check if credited N times.
+
+**Subscription downgrade — feature retention:** Downgrade from Premium to Free, then check if premium API endpoints still respond:
+```bash
+curl -s -X POST "$TARGET/api/subscription" -d '{"plan":"free"}'
+curl -s "$TARGET/api/premium-feature" -H "Authorization: Bearer $TOKEN"
+# 200 with premium data after downgrade = logic bug
+```
+
+**Refund exceeding capture:** `{"refund_amount": 200}` on a $100 order. Re-read ledger.
+
 ## Step skip and state
 
 - Map the wizard's API calls. Replay the last one with a fresh session that never called the earlier steps.

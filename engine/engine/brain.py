@@ -199,6 +199,34 @@ def open_urls(slug, base=DEFAULT_BASE, limit=8):
     return out
 
 
+def enrich_edge(slug, url, base=DEFAULT_BASE):
+    """Annotate a brain edge with token spend from ContextPilot telemetry (read-only, optional)."""
+    CP_DB = os.path.expanduser("~/.context-pilot/telemetry.db")
+    if not os.path.exists(CP_DB):
+        return {}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{CP_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT COUNT(*) as calls, SUM(payload_bytes) as bytes, "
+            "SUM(duration_ms) as ms FROM events "
+            "WHERE session_id = (SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1) "
+            "AND (tool_input LIKE ? OR tool_input LIKE ?)",
+            (f"%{url}%", f"%{url.rstrip('/')}%"),
+        ).fetchone()
+        conn.close()
+        if not row or not row["calls"]:
+            return {}
+        return {
+            "tool_calls": row["calls"],
+            "payload_bytes": row["bytes"] or 0,
+            "duration_ms": row["ms"] or 0,
+        }
+    except Exception:
+        return {}
+
+
 def _selftest():
     import tempfile
     d = tempfile.mkdtemp(prefix="brain-")
