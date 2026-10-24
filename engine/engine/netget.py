@@ -88,7 +88,7 @@ def _pick_proxy(proxy, proxy_list):
     return proxy
 
 
-def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug=None):
+def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug=None, allow_redirects=False):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
     ua, imp, proxy, proxy_list = _cfg()
@@ -118,7 +118,7 @@ def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug
         kw = {"impersonate": imp, "timeout": timeout, "headers": h, "verify": True}
         if chosen_proxy:
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
-        r = cr.request(method.upper(), url, data=data, **kw)
+        r = cr.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
         _rate_limit(host, r.status_code)
         return r.status_code, r.text, {k.lower(): v for k, v in r.headers.items()}
     except ImportError:
@@ -131,7 +131,7 @@ def get(url, method="GET", data=None, headers=None, timeout=45, ident=None, slug
         kw = {"timeout": timeout, "headers": h, "verify": True}
         if chosen_proxy:
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
-        r = rq.request(method.upper(), url, data=data, **kw)
+        r = rq.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
         _rate_limit(host, r.status_code)
         return r.status_code, r.text, {k.lower(): v for k, v in r.headers.items()}
     except ImportError:

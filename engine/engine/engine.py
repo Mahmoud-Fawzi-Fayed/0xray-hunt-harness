@@ -366,10 +366,8 @@ class Engine:
         ttl = int(os.environ.get("HUNT_RECON_TTL", "10800"))         # 3h default
         last = self.eng.state.get("recon_ts") or 0
         queued = len(self.eng.worklist())
-        # Anything still untested is hunted now. A fresh crawl happens only when the queue is empty.
-        if queued > 0:
-            self.eng.log(f"recon: {queued} item(s) still untested — skipping the crawl, straight to HUNT")
-            return
+        # Skip heavy recon when queue is large enough AND cache is fresh — but always allow discovery
+        # when queue is small, even if items remain, so new surface is found continuously.
         if last and (time.time() - last) < ttl and queued >= self.max_hunts:
             self.eng.log(f"recon: cached ({int((time.time()-last)/60)}m old) + {queued} item(s) queued "
                          f">= {self.max_hunts} — SKIPPING heavy recon, straight to HUNT (cores -> vuln-finding)")
@@ -471,8 +469,9 @@ class Engine:
                     deep.append(e)                    # a leaked-secret item IS the finding — keep as-is
                     continue
                 u = e.get("url", "")
-                if u and u not in seen:
-                    seen.add(u)
+                mk = f"{e.get('method','GET')}:{u}"
+                if u and mk not in seen:
+                    seen.add(mk)
                     d = dict(e)
                     d["vuln_class"] = "deep"
                     d.pop("vuln_classes", None)
@@ -1270,7 +1269,7 @@ class Engine:
         for it in wl:
             if "{" in (it.get("url") or ""):
                 self.eng.log(f"hunt: skipping template url {it['url']}")
-                self.eng.mark_tested(it)
+                self.eng.mark_skipped(it, "unresolved_template")
             elif _skip_static_url(it.get("url") or ""):
                 self.eng.mark_tested(it)
                 skipped_static += 1

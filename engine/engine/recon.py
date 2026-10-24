@@ -547,7 +547,7 @@ def classes_for_openapi(path, method, op, secured):
     return cls[:3]
 
 
-def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-00000"):
+def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-00000", allow_intrusive=False):
     """Probe each DECLARED-secured op unauthenticated; flag any that don't reject (the #1 API risk:
     declared != enforced). SAFE: junk path-ids (destructive ops hit non-existent resources), empty
     bodies (writes hit validation, not execution). 2xx/422 unauth = NOT enforced. Returns broken items."""
@@ -555,10 +555,11 @@ def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-
     import urllib.error
     import time
     glob = "security" in spec
+    allowed = ("get", "head", "options") if not allow_intrusive else ("get", "post", "put", "patch", "delete")
     broken, n = [], 0
     for path, methods in spec.get("paths", {}).items():
         for m, op in methods.items():
-            if m not in ("get", "post", "put", "patch", "delete"):
+            if m not in allowed:
                 continue
             if not (("security" in op and op["security"] != []) or ("security" not in op and glob)):
                 continue

@@ -161,13 +161,28 @@ class Engagement:
         self.save()
 
     def _tested_map(self):
-        """{key: epoch_ts} from either the current dict form or a legacy list[str] (ts=0 => eligible)."""
+        """{key: epoch_ts} from either the current dict form or a legacy list[str] (ts=0 => eligible).
+        Indexes both new 4-field (METHOD|url|param|class) and legacy 3-field (url|param|class) keys
+        so worklist lookups work regardless of which format the key was stored in."""
         t = self.state.get("tested")
+        out = {}
         if isinstance(t, dict):
-            return {str(k): _as_epoch(v) for k, v in t.items()}
-        if isinstance(t, list):
-            return {str(k): 0.0 for k in t}       # legacy: unknown time -> re-hunt once, then TTL applies
-        return {}
+            for k, v in t.items():
+                ts = _as_epoch(v)
+                out[str(k)] = ts
+                parts = str(k).split("|")
+                if len(parts) == 4:
+                    legacy = "|".join(parts[1:])
+                    if legacy not in out:
+                        out[legacy] = ts
+                elif len(parts) == 3:
+                    new_key = f"GET|{k}"
+                    if new_key not in out:
+                        out[new_key] = ts
+        elif isinstance(t, list):
+            for k in t:
+                out[str(k)] = 0.0
+        return out
 
     def worklist(self):
         """Ranked surface items to hunt. UNTESTED items come FIRST — so coverage advances through the
@@ -207,6 +222,10 @@ class Engagement:
 
     @staticmethod
     def _key(s):
+        return f"{s.get('method','GET')}|{s['url']}|{s.get('param','')}|{s.get('vuln_class','')}"
+
+    @staticmethod
+    def _legacy_key(s):
         return f"{s['url']}|{s.get('param','')}|{s.get('vuln_class','')}"
 
     @staticmethod
@@ -220,6 +239,16 @@ class Engagement:
             t = {str(x): 0.0 for x in (t or [])}
             self.state["tested"] = t
         t[k] = time.time()                         # record WHEN -> enables the re-hunt window
+        t[self._legacy_key(item)] = t[k]           # backward compat during key format migration
+        self.save()
+
+    def mark_skipped(self, item, reason="unknown"):
+        k = self._key(item)
+        sk = self.state.get("skipped")
+        if not isinstance(sk, dict):
+            sk = {}
+            self.state["skipped"] = sk
+        sk[k] = {"reason": reason, "ts": time.time()}
         self.save()
 
     # ---- findings ----
@@ -256,7 +285,11 @@ class Engagement:
 
     # ---- progress ----
     def summary(self):
-        return {"surface": len(self.state["surface"]), "tested": len(self.state["tested"]),
+        t = self.state["tested"]
+        # count only new-format keys (METHOD|url|param|class) to avoid double-counting legacy compat keys
+        tested_count = sum(1 for k in (t if isinstance(t, dict) else t or [])
+                          if str(k).count("|") >= 3) or len(t if isinstance(t, dict) else t or [])
+        return {"surface": len(self.state["surface"]), "tested": tested_count,
                 "candidates": len(self.state["candidates"]), "confirmed": len(self.state["confirmed"]),
                 "phase": self.state["phase"]}
 
@@ -275,7 +308,7 @@ def _selftest():
         assert all(s["url"] != "http://t/b" or s.get("param") != "q" for s in e.worklist())
         # re-hunt window: a stale tested item becomes eligible again (no permanent idling)
         globals()["RETEST_HOURS"] = 0.0001
-        e.state["tested"]["http://t/b|q|xss"] = time.time() - 3600   # tested an hour ago
+        e.state["tested"]["GET|http://t/b|q|xss"] = time.time() - 3600   # tested an hour ago
         e.save()
         assert any(s.get("url") == "http://t/b" for s in e.worklist()), "stale item must re-queue"
         # coverage-first: the UNTESTED item (t/a, pri 5) must out-rank the STALE re-test (t/b, pri 9)

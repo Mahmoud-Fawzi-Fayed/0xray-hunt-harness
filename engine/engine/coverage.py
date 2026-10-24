@@ -33,9 +33,17 @@ def _tested_keys(tested):
         if isinstance(t, dict):
             keys.add((t.get("url"), t.get("vuln_class")))
             keys.add(t.get("url"))
-        elif isinstance(t, str) and "||" in t:      # engine stores tested as "url||vuln_class"
-            u, c = t.split("||", 1)
-            keys.add((u, c)); keys.add(u)
+        elif isinstance(t, str):
+            parts = t.split("|")
+            if len(parts) == 4:                      # new: METHOD|url|param|class
+                keys.add((parts[1], parts[3])); keys.add(parts[1])
+            elif len(parts) == 3:                    # legacy: url|param|class
+                keys.add((parts[0], parts[2])); keys.add(parts[0])
+            elif "||" in t:                          # old: url||class
+                u, c = t.split("||", 1)
+                keys.add((u, c)); keys.add(u)
+            else:
+                keys.add(t)
         else:
             keys.add(t)
     return keys

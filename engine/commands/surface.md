@@ -1,6 +1,6 @@
 ---
 name: surface
-description: Show ranked attack surface for a target based on recon output + hunt memory. Invokes recon-ranker agent. Usage: /surface target.com
+description: Show ranked attack surface for a target based on recon output + hunt memory. Usage: /surface target.com
 ---
 
 # /surface
@@ -11,7 +11,7 @@ View the prioritized attack surface for a target.
 
 1. Reads cached recon output from `recon/<target>/`
 2. Reads hunt memory for patterns and previously tested endpoints
-3. Invokes the `recon-ranker` agent to produce a prioritized ranking
+3. Ranks endpoints by yield (via `yieldrank.py`) and hunt memory
 4. Outputs P1 (start here), P2 (after P1), and Kill List (skip)
 
 ## Usage

@@ -67,6 +67,10 @@ def _hosts(block):
         h = SF._host(m)
         if h and h not in out:
             out.append(h)
+    for m in re.findall(r"(?:^|[\s,;])(\*\.[\w.-]+\.\w{2,})", block or "", re.M):
+        h = SF._host(m.strip())
+        if h and h not in out:
+            out.append(h)
     return out
 
 

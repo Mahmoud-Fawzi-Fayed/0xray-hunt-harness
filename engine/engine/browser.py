@@ -22,7 +22,7 @@ sys.path.insert(0, ENGINE)
 SKIP_TYPES = {"image", "font", "stylesheet", "media"}
 
 
-def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000, max_req=500, pages=2):
+def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000, max_req=500, pages=5):
     """Render url and return captured requests [{method,url,type}] (XHR/fetch/doc/script/other), scope-filtered.
     `pages`>0 adds a BOUNDED, read-only deepening pass: scroll (lazy-loaded XHR) + visit up to `pages` more
     same-/in-scope in-app links (GET navigations only, never logout/delete/pay), under a hard time budget —
@@ -56,7 +56,13 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             try:
                 if len(reqs) >= max_req or r.resource_type in SKIP_TYPES:
                     return
-                key = (r.method, r.url.split("?")[0])
+                base_url = r.url.split("?")[0]
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    params = tuple(sorted(parse_qs(urlparse(r.url).query).keys()))
+                except Exception:
+                    params = ()
+                key = (r.method, base_url, params)
                 if key in seen:
                     return
                 seen.add(key)

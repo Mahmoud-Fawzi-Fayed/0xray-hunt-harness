@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
 Engine: `~/0xray-hunt-harness/engine/engine/`. Config/secrets: `~/0xray-hunt-harness/harness/.env`.
-Recon tools: `~/go/bin/` (add to PATH). Skills: `~/0xray-hunt-harness/engine/skills/` (61 hunt-*).
+Recon tools: `~/go/bin/` (add to PATH). Skills: `~/0xray-hunt-harness/engine/skills/` (89 skills).
 Findings publish to `https://finding.redtracefai.com` + email `x00xrayx00x@gmail.com`. STOP at draft.
 
 ## Model routing

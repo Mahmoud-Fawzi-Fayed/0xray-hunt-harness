@@ -225,14 +225,29 @@ class Orchestrator:
         if not wd:
             return None
         try:
-            os.makedirs(wd, exist_ok=True)
+            drafts = os.path.join(wd, "drafts")
+            os.makedirs(drafts, exist_ok=True)
             slug = f"finding-{self.eng.scope.name}-{idx:02d}-{(f.get('vuln_class') or 'x')}".replace("/", "-")
-            open(os.path.join(wd, slug + ".html"), "w", encoding="utf-8").write(
+            open(os.path.join(drafts, slug + ".html"), "w", encoding="utf-8").write(
                 self._finding_html(self.eng.scope.name, f, v, md))
-            return (base.rstrip("/") + "/" + slug + ".html") if base else None
+            return (base.rstrip("/") + "/drafts/" + slug + ".html") if base else None
         except Exception as e:  # noqa: BLE001
             self.eng.eng.log(f"publish: skipped ({e})")
             return None
+
+    @staticmethod
+    def approve_finding(filename):
+        """Move a draft finding from drafts/ to the public web dir after explicit approval."""
+        wd = os.environ.get("HUNT_WEB_DIR")
+        if not wd:
+            return False
+        src = os.path.join(wd, "drafts", filename)
+        dst = os.path.join(wd, filename)
+        if os.path.isfile(src):
+            import shutil
+            shutil.move(src, dst)
+            return True
+        return False
 
     def _write_index(self, drafted):
         wd = os.environ.get("HUNT_WEB_DIR")

@@ -80,8 +80,8 @@ def is_burp_available():
         req = urllib.request.Request(BURP_MCP_URL, method="GET")
         urllib.request.urlopen(req, timeout=3)
         return True
-    except urllib.error.HTTPError:
-        return True  # 403/405 = server is there, just not a plain GET endpoint
+    except urllib.error.HTTPError as e:
+        return e.code in (400, 403, 404, 405)
     except Exception:
         return False
 
