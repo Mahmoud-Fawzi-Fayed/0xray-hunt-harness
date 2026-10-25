@@ -97,12 +97,10 @@ def in_scope(url, scope):
         import scope as _scope_mod
         ins_n = [_norm_scope_pattern(p) for p in ins]
         oos_n = [_norm_scope_pattern(p) for p in (s.get("out_of_scope") or [])]
-        return _scope_mod.Scope(ins_n, oos_n, path_restrictions=s.get("path_restrictions", {})).in_scope_host(url)
-    except Exception:                      # fallback: local matcher (deny-wins), never break the gate
-        for bad in s.get("out_of_scope") or []:
-            if _host_matches(host, bad):
-                return False
-        return any(_host_matches(host, g) for g in ins)
+        return _scope_mod.Scope(ins_n, oos_n, path_restrictions=s.get("path_restrictions", {}),
+                                out_path_restrictions=s.get("out_path_restrictions", {})).in_scope_host(url)
+    except Exception:
+        return False  # fail closed — if canonical scope cannot load, deny all writes
 
 
 def max_accounts():
@@ -184,8 +182,8 @@ def check(program, action, url=None, scope=None, base=None, log=True):
             audit(program, action, False, reason, url, base=base)
         return False, reason
 
-    # scope-bearing actions must target an in-scope host
-    if action in ("register", "login", "tempmail-verify") and url is not None:
+    # ALL actions with a URL must target an in-scope host
+    if url is not None:
         if not in_scope(url, scope):
             reason = f"refused: {_host_of(url)!r} is not in-scope for {program!r} (or no scope loaded)"
             if log:

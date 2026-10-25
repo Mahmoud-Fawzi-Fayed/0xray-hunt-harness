@@ -8,11 +8,11 @@ Deny wins: an out-of-scope match excludes even if an in-scope pattern also match
 Default deny: anything not matching an in-scope pattern is out of scope.
 
 Pattern forms (matched against the URL's host):
-  example.com        -> the apex AND any subdomain (example.com, api.example.com)
-  *.example.com      -> any subdomain (NOT the bare apex)
-  api.example.com    -> that exact host
+  example.com        -> that exact host only (safe default)
+  *.example.com      -> any subdomain AND the bare apex
+  =api.example.com   -> that exact host (explicit exact)
   10.0.0.0/8         -> any IP in the CIDR (IPv4)
-  re:^staging[0-9]+\\.example\\.com$   -> explicit regex (prefix re:)
+  re:^staging[0-9]+\\.example\\.com$   -> explicit regex, fullmatch (prefix re:)
 """
 import ipaddress
 import re
@@ -23,31 +23,39 @@ def _host_of(target):
     t = target.strip()
     if "://" not in t:
         t = "//" + t
-    host = (urlparse(t).hostname or "").lower().rstrip(".")
+    try:
+        parsed = urlparse(t)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except Exception:
+        return ""
+    # Strip userinfo attacks (evil@example.com)
+    if "@" in (parsed.netloc or ""):
+        host = (parsed.netloc.rsplit("@", 1)[-1].split(":")[0]).lower().rstrip(".")
     return host
 
 
 def _match(pattern, host):
-    p = pattern.strip().lower()
+    p = pattern.strip().lower().rstrip(".")
+    host = host.rstrip(".")
     if not p or not host:
         return False
     if p.startswith("="):
-        return host == p[1:]
+        return host == p[1:].rstrip(".")
     if p.startswith("re:"):
         try:
-            return re.search(p[3:], host) is not None
+            return re.fullmatch(p[3:], host) is not None
         except re.error:
             return False
-    if "/" in p and p.replace(".", "").replace("/", "").isdigit():  # CIDR
+    if "/" in p and p.replace(".", "").replace("/", "").replace(":", "").isdigit():  # CIDR
         try:
             return ipaddress.ip_address(host) in ipaddress.ip_network(p, strict=False)
         except ValueError:
             return False
     if p.startswith("*."):
-        base = p[2:]
-        return host.endswith("." + base)
-    # bare domain: apex or any subdomain; or exact host
-    return host == p or host.endswith("." + p)
+        base = p[2:].rstrip(".")
+        return host == base or host.endswith("." + base)
+    # Bare domain = exact host only (safe default)
+    return host == p
 
 
 class Scope:
@@ -164,35 +172,42 @@ class Scope:
 
 
 def _selftest():
-    s = Scope(in_scope=["example.com", "*.test.example.com", "10.0.0.0/8",
+    # Bare domain = exact host only (safe default). *.domain = subdomains + apex.
+    s = Scope(in_scope=["*.example.com", "*.test.example.com", "10.0.0.0/8",
                         "re:^lab[0-9]+\\.acme\\.io$"],
               out_of_scope=["admin.example.com", "internal.example.com"])
     ok = lambda t: s.in_scope_host(t)
-    assert ok("https://example.com/login")           # apex
-    assert ok("http://api.example.com/x")            # subdomain of bare domain
+    assert ok("https://example.com/login")           # apex via *.example.com
+    assert ok("http://api.example.com/x")            # subdomain via *.example.com
     assert ok("https://a.test.example.com")          # wildcard
     assert ok("https://10.1.2.3:8080/")              # CIDR
-    assert ok("https://lab42.acme.io")               # regex
+    assert ok("https://lab42.acme.io")               # regex (fullmatch)
     assert not ok("https://admin.example.com")       # out-of-scope (deny wins)
     assert not ok("https://internal.example.com/x")  # out-of-scope
-    assert ok("https://test.example.com")            # in scope via bare example.com rule
+    assert ok("https://test.example.com")            # in scope via *.example.com
     assert not ok("https://evil.com")                # default deny
     assert not ok("https://notexample.com")          # suffix-confusion guard
     assert not ok("https://example.com.evil.com")    # suffix-confusion guard
     assert not ok("https://11.0.0.1")                # outside CIDR
     assert s.reject_reason("https://evil.com")
     assert s.reject_reason("https://example.com") is None
-    # wildcard depth: *.test.example.com needs a label deeper than test.example.com
+    # Bare domain = exact only
+    s_exact = Scope(in_scope=["example.com"])
+    assert s_exact.in_scope_host("https://example.com/x")
+    assert not s_exact.in_scope_host("https://api.example.com")     # bare = no subdomains
+    assert not s_exact.in_scope_host("https://sub.example.com")
+    # Wildcard depth: *.test.example.com needs a label deeper than test.example.com
     s2 = Scope(in_scope=["*.test.example.com"])
     assert s2.in_scope_host("a.test.example.com")
-    assert not s2.in_scope_host("test.example.com")
+    assert s2.in_scope_host("test.example.com")      # *.x = apex + subdomains
+    assert not s2.in_scope_host("example.com")
     # S02: wildcard path restrictions apply to resolved subdomains
     s3 = Scope(in_scope=["*.example.com"],
                path_restrictions={"*.example.com": ["/api/research"]})
     assert s3.in_scope_host("https://api.example.com/api/research/papers")
     assert not s3.in_scope_host("https://api.example.com/admin/users")
     assert not s3.in_scope_host("https://api.example.com/")
-    # out_path_restrictions: path-specific exclusions
+    # Out path restrictions: path-specific exclusions
     s5 = Scope(in_scope=["*.acme.com"], out_of_scope=[],
                out_path_restrictions={"*.acme.com": ["/admin"]})
     assert s5.in_scope_host("https://api.acme.com/api/v1/users")   # allowed
@@ -205,6 +220,14 @@ def _selftest():
     assert s4.in_scope_host("https://api.example.com/x")
     assert not s4.in_scope_host("https://sub.api.example.com")
     assert not s4.in_scope_host("https://example.com")
+    # Regex uses fullmatch — partial match must fail
+    s6 = Scope(in_scope=["re:^staging\\.example\\.com$"])
+    assert s6.in_scope_host("https://staging.example.com")
+    assert not s6.in_scope_host("https://staging.example.com.evil.com")
+    # Userinfo attack
+    assert not Scope(in_scope=["example.com"]).in_scope_host("https://evil@example.com.attacker.com/x")
+    # Trailing dot normalization
+    assert Scope(in_scope=["example.com"]).in_scope_host("https://example.com./x")
     print("scope.py self-test: PASS")
 
 

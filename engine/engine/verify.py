@@ -252,7 +252,9 @@ def _in_scope(url, scope):
         return None
     try:
         import scope as SCMOD
-        s = SCMOD.Scope(scope.get("in_scope", []), scope.get("out_of_scope", []))
+        s = SCMOD.Scope(scope.get("in_scope", []), scope.get("out_of_scope", []),
+                        path_restrictions=scope.get("path_restrictions", {}),
+                        out_path_restrictions=scope.get("out_path_restrictions", {}))
         return s.in_scope_host(url)
     except Exception:  # noqa: BLE001
         return None

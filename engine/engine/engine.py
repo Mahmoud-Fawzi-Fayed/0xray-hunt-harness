@@ -1366,7 +1366,7 @@ class Engine:
         pending = TP.pending_cases(plan_cases) if plan_cases else []
         _plan_index = {}  # state_key -> case, for post-hunt status update
         if pending:
-            prio_order = {"high": 0, "medium": 1, "low": 2}
+            prio_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
             pending.sort(key=lambda c: prio_order.get(c.get("priority", "low"), 3))
             plan_items = []
             plan_keys = set()
@@ -1669,9 +1669,11 @@ class Engine:
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
         cls = (it.get("vuln_class") or "").lower()
+        original_class = cls
         if os.environ.get("HUNT_DEEP", "1") == "1" and cls not in ("deep",):
             it = dict(it)
             it["vuln_class"] = "deep"
+            it["_original_vuln_class"] = original_class
             cls = "deep"
         # DEAD-SURFACE PRE-PROBE: don't burn a ~2-min LLM hunt on an endpoint whose host is WAF/staging-walled.
         # A staging host that 403s every path wastes the whole budget if we hunt each URL.

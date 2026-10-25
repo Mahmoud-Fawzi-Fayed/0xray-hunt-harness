@@ -46,8 +46,8 @@ def _empty_feature():
 def _empty_endpoint():
     return {
         "method": "GET", "url": "", "function": "", "params": [],
-        "body_schema": None, "auth_required": True, "roles": [],
-        "source": "unknown", "confidence": "observed",
+        "body_schema": None, "auth_required": None, "roles": [],
+        "source": "unknown", "confidence": "unknown",
     }
 
 
@@ -105,24 +105,23 @@ def _endpoints_from_surface(state):
             "method": m, "url": u,
             "function": s.get("note") or s.get("vuln_class") or "",
             "params": [s["param"]] if s.get("param") else [],
-            "auth_required": True,
+            "auth_required": s.get("auth_required"),
             "source": s.get("source") or "recon",
-            "confidence": "observed",
+            "confidence": "observed" if s.get("source") in ("browser", "proxy", "recon") else "inferred",
         })
     return eps
 
 
 # ---------------------------------------------------------------- source: Burp proxy history
 def _host_matches_scope(host, scope_hosts):
-    """Check if host matches any scope host (exact or subdomain, not substring)."""
+    """Check if host matches any scope host using canonical scope matching."""
     if not host:
         return False
-    host = host.lower().rstrip(".")
-    for sh in scope_hosts:
-        sh = sh.lower().rstrip(".")
-        if host == sh or host.endswith("." + sh):
-            return True
-    return False
+    try:
+        import scope as _scope_mod
+        return _scope_mod.Scope(scope_hosts).in_scope_host(f"https://{host}/")
+    except Exception:
+        return False
 
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)

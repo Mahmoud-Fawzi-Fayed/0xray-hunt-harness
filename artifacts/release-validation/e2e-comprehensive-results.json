@@ -1,0 +1,165 @@
+{
+  "timestamp": "2026-10-25T10:03:09Z",
+  "pass": 26,
+  "fail": 0,
+  "blocked": 0,
+  "not_verified": 0,
+  "results": [
+    {
+      "id": "T1.1",
+      "name": "Bare domain exact-only",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T1.2",
+      "name": "Wildcard scope + deny",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T1.3",
+      "name": "Path allow/deny restrictions",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T1.4",
+      "name": "CIDR, regex fullmatch, exact prefix",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T1.5",
+      "name": "Userinfo and trailing dot normalization",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T1.6",
+      "name": "Suffix confusion prevention",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T1.7",
+      "name": "Local test scope enforcement",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T2.1",
+      "name": "Guardrails scope on all URL actions",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T2.2",
+      "name": "Guardrails fail-closed on empty scope",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T3.1",
+      "name": "netget allows in-scope requests",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T3.2",
+      "name": "netget blocks out-of-scope",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T3.3",
+      "name": "Zero OOS sink requests after netget",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T4.1",
+      "name": "Explorer analyzes surface",
+      "status": "PASS",
+      "detail": "5 pages, 3 APIs"
+    },
+    {
+      "id": "T5.1",
+      "name": "Test plan generates cases",
+      "status": "PASS",
+      "detail": "16 cases"
+    },
+    {
+      "id": "T5.2",
+      "name": "Case IDs are unique",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T5.3",
+      "name": "Multi-param cases in plan",
+      "status": "PASS",
+      "detail": "6 multi-param cases"
+    },
+    {
+      "id": "T5.4",
+      "name": "All priorities valid",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T6.1",
+      "name": "Worklist populated",
+      "status": "PASS",
+      "detail": "6 items"
+    },
+    {
+      "id": "T6.2",
+      "name": "GET/PATCH separate in worklist",
+      "status": "PASS",
+      "detail": "5 GET, 1 PATCH"
+    },
+    {
+      "id": "T6.3",
+      "name": "Method isolation in coverage",
+      "status": "PASS",
+      "detail": "no same-URL different-method pair"
+    },
+    {
+      "id": "T6.4",
+      "name": "Coverage report generated",
+      "status": "PASS",
+      "detail": "surface=6 tested=1"
+    },
+    {
+      "id": "T7.1",
+      "name": "Dedup gate functional",
+      "status": "PASS",
+      "detail": "verdict=UNKNOWN"
+    },
+    {
+      "id": "T8.1",
+      "name": "Playwright browser capture",
+      "status": "PASS",
+      "detail": "6 requests, 3 API endpoints"
+    },
+    {
+      "id": "T8.2",
+      "name": "Browser zero OOS requests",
+      "status": "PASS",
+      "detail": "0 OOS requests"
+    },
+    {
+      "id": "T9.1",
+      "name": "Verify checks finding quality",
+      "status": "PASS",
+      "detail": "result={'verdict': 'DO_NOT_SUBMIT', 'score': 55, 'program': 'vuln-local', 'vuln_class': 'info-disclosure', 'severity': 'info', 'url': 'http://127.0.0.1:19877/api/users/1', 'checks': [{'check': 'has repro steps', 'pass': False, 'note': 'add numbered reproduction steps', 'fix': \"Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\"}, {'check': 'has PoC / evidence', 'pass': True, 'note': ''}, {'check': 'has impact stated', 'pass': False, 'note': 'state the concrete security impact', 'fix': \"State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any authenticated user can read any other user's invoices (PII: name, address, amount)'.\"}, {'check': 'required fields present', 'pass': False, 'note': 'missing: title', 'fix': 'Address the note on this check, then re-verify.'}, {'check': 'in scope', 'pass': True, 'note': ''}, {'check': 'class is qualifying', 'pass': True, 'note': ''}, {'check': 'not an always-rejected class', 'pass': False, 'note': 'always-rejected: version/banner disclosure without exploit', 'fix': 'This pattern is always rejected as-is. The only way through: chain it to a demonstrated higher impact (e.g. self-XSS \u2192 stored XSS hitting other users) and show the full chain working.'}, {'check': 'disposition (not RTFS / Informative)', 'pass': True, 'note': ''}, {'check': 'PoC minimum', 'pass': True, 'note': 'unknown class \u2014 ensure the PoC proves real impact'}, {'check': 'dedup (not a known duplicate)', 'pass': True, 'note': 'dedup verdict: UNKNOWN'}, {'check': 'demonstrated (concrete proof, not hypothetical)', 'pass': False, 'note': \"show it FIRING: attach the request+RESPONSE (or a screenshot / HAR / the returned data). Prose like 'an attacker could\u2026' with no response or artifact is not proof.\", 'fix': 'Address the note on this check, then re-verify.'}], 'failed': ['has repro steps', 'has impact stated', 'required fields present', 'not an always-rejected class', 'demonstrated (concrete proof, not hypothetical)'], 'missing': ['title'], 'how_to_fix': [{'check': 'has repro steps', 'fix': \"Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\"}, {'check': 'has impact stated', 'fix': \"State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any authenticated user can read any other user's invoices (PII: name, address, amount)'.\"}, {'check': 'required fields present', 'fix': 'Address the note on this check, then re-verify.'}, {'check': 'not an always-rejected class', 'fix': 'This pattern is always rejected as-is. The only way through: chain it to a demonstrated higher impact (e.g. self-XSS \u2192 stored XSS hitting other users) and show the full chain working.'}, {'check': 'demonstrated (concrete proof, not hypothetical)', 'fix': 'Address the note on this check, then re-verify.'}], 'dedup': {'verdict': 'UNKNOWN', 'score': 0.0, 'matches': [], 'corpus_size': 0}, 'accept': False, 'summary': {'verdict': 'DO_NOT_SUBMIT', 'why': \"Would likely be closed (RTFS / Informative / N/A): has repro steps (add numbered reproduction steps); has impact stated (state the concrete security impact); required fields present (missing: title); not an always-rejected class (always-rejected: version/banner disclosure without exploit); demonstrated (concrete proof, not hypothetical) (show it FIRING: attach the request+RESPONSE (or a screenshot / HAR / the returned data). Prose like 'an attacker could\u2026' with no response or artifact is not proof.)\", 'next': \"Do NOT submit as-is. Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\", 'how_to_fix': [\"Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\", \"State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any authenticated user can read any other user's invoices (PII: name, address, amount)'.\", 'Address the note on this check, then re-verify.', 'This pattern is always rejected as-is. The only way through: chain it to a demonstrated higher impact (e.g. self-XSS \u2192 stored XSS hitting other users) and show the full chain working.', 'Address the note on this check, then re-verify.']}}"
+    },
+    {
+      "id": "T10.1",
+      "name": "Total OOS sink requests",
+      "status": "PASS",
+      "detail": "0 prohibited requests"
+    }
+  ]
+}

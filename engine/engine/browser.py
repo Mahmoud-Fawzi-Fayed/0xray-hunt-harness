@@ -213,7 +213,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
     return reqs
 
 
-def screenshot(url, output_path, slug=None, ident=None, wait=4, timeout=15000):
+def screenshot(url, output_path, slug=None, ident=None, wait=4, timeout=15000, scope=None):
     """Take a full-page screenshot for evidence collection."""
     from playwright.sync_api import sync_playwright
     import authn
