@@ -876,7 +876,7 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
         out, seen = [], set()
         for seed in seeds:
             try:
-                reqs = B.capture(seed, slug=slug, ident=ident, scope_hosts=scope_hosts, wait=wait, pages=2)
+                reqs = B.capture(seed, slug=slug, ident=ident, scope_hosts=scope_hosts, wait=wait, pages=2, scope=scope)
             except Exception as e:  # noqa: BLE001
                 log(f"browser-recon: {seed} failed ({type(e).__name__}: {str(e)[:90]})")
                 continue

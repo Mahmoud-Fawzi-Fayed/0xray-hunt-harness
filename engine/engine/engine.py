@@ -1052,8 +1052,15 @@ class Engine:
                 url = ep.get("path") or ep.get("url") or ""
                 if not url:
                     continue
+                if not url.startswith(("http://", "https://")):
+                    continue
+                if not self.scope.in_scope_host(url):
+                    continue
+                method = ep.get("method", "GET")
+                if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"):
+                    continue
                 self.eng.state["surface"].append({
-                    "url": url, "method": ep.get("method", "GET"),
+                    "url": url, "method": method,
                     "params": ep.get("params", []), "confidence": "inferred",
                     "source": "explorer/" + ep.get("source", "unknown"),
                 })
@@ -1457,7 +1464,9 @@ class Engine:
             self.eng.mark_tested(it)
             # --- update test plan case status ---
             if self._plan_index:
-                _sk = f"{it.get('method','GET')}|{it.get('url','')}|{it.get('param','')}|{it.get('vuln_class','')}"
+                _sk = TP.state_key({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
+                                    "params": [it["param"]] if it.get("param") else [],
+                                    "category": it.get("vuln_class", "")})
                 _pc = self._plan_index.get(_sk)
                 if _pc:
                     try:
@@ -1466,7 +1475,7 @@ class Engine:
                         elif f and f.get("skipped"):
                             TP.mark_case(_pc, "blocked", evidence=f.get("skipped") or "skipped by hunt agent")
                         else:
-                            TP.mark_case(_pc, "disproved", evidence=(f or {}).get("analysis") or "no vulnerability found by hunt agent")
+                            TP.mark_case(_pc, "tested", evidence=(f or {}).get("analysis") or "tested — no vulnerability found")
                     except (ValueError, TypeError):
                         pass  # evidence validation failed — leave as pending
             self._feedback_surface(f)                 # endpoints the agent found mid-hunt -> back into the worklist
