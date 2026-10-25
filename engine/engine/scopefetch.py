@@ -28,11 +28,18 @@ import sys
 from urllib.parse import urlparse
 
 HOST_RE = re.compile(r"^\*?\.?[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}$")
+_IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 WEB_TYPES = {"web-application", "web", "api", "url", "website", "wildcard", "domain", "ip-address", ""}
 
 
+def _is_host_like(core):
+    """Check if a string (without port or wildcard prefix) looks like a valid host or IP."""
+    return bool(HOST_RE.match(core) or _IP_RE.match(core))
+
+
 def _host_and_path(s):
-    """Normalize scope entry to (host/wildcard, path_prefix_or_None)."""
+    """Normalize scope entry to (host/wildcard[:port], path_prefix_or_None).
+    Preserves port when present (e.g. '127.0.0.1:8080' stays as-is)."""
     if not isinstance(s, str):
         return None, None
     s = s.strip()
@@ -46,17 +53,39 @@ def _host_and_path(s):
             path = p
         s = parsed.netloc or s
     s = s.split("/")[0].strip().lower().rstrip(".")
+    # Separate port suffix if present
+    port_suffix = ""
+    core_for_check = s
     if s.startswith("*."):
-        core = s[2:]
+        prefix = "*."
+        rest = s[2:]
     elif s.startswith("."):
-        core = s[1:]
+        prefix = "."
+        rest = s[1:]
     else:
-        core = s
-    return (s if HOST_RE.match(core) else None), path
+        prefix = ""
+        rest = s
+    # Check for port in the rest part (after wildcard prefix)
+    if ":" in rest:
+        host_part, maybe_port = rest.rsplit(":", 1)
+        if maybe_port.isdigit():
+            port_suffix = ":" + maybe_port
+            core_for_check = prefix + host_part
+            rest = host_part
+        else:
+            core_for_check = s
+    else:
+        core_for_check = prefix + rest
+
+    # Validate the host part (without port, without wildcard prefix)
+    core = rest
+    if _is_host_like(core):
+        return core_for_check.rstrip(".") + port_suffix, path
+    return None, path
 
 
 def _host(s):
-    """Normalize one scope entry to a host/wildcard, or None if it isn't host-like."""
+    """Normalize one scope entry to a host/wildcard[:port], or None if it isn't host-like."""
     h, _ = _host_and_path(s)
     return h
 
@@ -119,15 +148,19 @@ def convert(blob, name, seed_limit=50):     # seed ALL concrete in-scope hosts (
 
     seeds, seen = [], set()
     for h in sorted(in_hosts):
+        # Strip wildcard and port for seed URL generation
         apex = h[2:] if h.startswith("*.") else h
-        if apex not in seen and "*" not in apex:
-            seen.add(apex)
+        host_for_seed = apex.split(":")[0] if ":" in apex else apex
+        port_for_seed = apex.split(":")[1] if ":" in apex else None
+        if host_for_seed not in seen and "*" not in host_for_seed:
+            seen.add(host_for_seed)
+            seed_host = f"{host_for_seed}:{port_for_seed}" if port_for_seed else host_for_seed
             paths = path_restrictions.get(h, [])
             if paths:
                 for p in paths:
-                    seeds.append("https://" + apex + p)
+                    seeds.append("https://" + seed_host + p)
             else:
-                seeds.append("https://" + apex)
+                seeds.append("https://" + seed_host)
         if len(seeds) >= seed_limit:
             break
 
@@ -194,6 +227,28 @@ def _selftest(_a=None):
     sc4 = convert({"in_scope": ["*.example.com"], "out_of_scope": ["https://example.com/admin"]}, "pathex")
     assert "example.com" not in sc4["out_of_scope"], f"path-only exclusion blocked whole host: {sc4}"
     assert sc4.get("out_path_restrictions", {}).get("example.com") == ["/admin"], sc4
+
+    # Port preservation: URLs with ports must keep port in scope entry
+    h, p = _host_and_path("https://127.0.0.1:8080/api/v1/*")
+    assert h == "127.0.0.1:8080", f"port lost: {h}"
+    assert p == "/api/v1", f"path wrong: {p}"
+
+    # IP addresses without port
+    h2, _ = _host_and_path("https://10.0.0.1/admin")
+    assert h2 == "10.0.0.1", f"IP rejected: {h2}"
+
+    # Port on domain
+    h3, _ = _host_and_path("https://api.example.com:9443")
+    assert h3 == "api.example.com:9443", f"domain port lost: {h3}"
+
+    # Wildcard with no port still works
+    h4, _ = _host_and_path("*.example.com")
+    assert h4 == "*.example.com", f"wildcard broken: {h4}"
+
+    # Convert with ported entries preserves port in scope and seeds
+    sc5 = convert({"in_scope": ["https://127.0.0.1:8080/api/*"]}, "ported")
+    assert "127.0.0.1:8080" in sc5["in_scope"], f"ported scope: {sc5['in_scope']}"
+    assert any("8080" in s for s in sc5["seeds"]), f"ported seed: {sc5['seeds']}"
 
     print("scopefetch.py self-test: PASS")
     return 0

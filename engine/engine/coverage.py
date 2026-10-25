@@ -102,8 +102,8 @@ def _is_tested(method, url, vuln_class, tested_records, param="", role="", owner
 
 
 def _testplan_coverage(test_plan):
-    """Extract coverage from test_plan cases. Returns {(method, url, category, param, role): status}.
-    Uses 5-tuple keys to prevent different param/role cases from sharing coverage credit."""
+    """Extract coverage from test_plan cases. Returns {(method, url, category, param, role, owner, accessor): status}.
+    Uses 7-tuple keys so different ownership scenarios cannot overwrite each other."""
     covered = {}
     if not test_plan:
         return covered
@@ -118,7 +118,9 @@ def _testplan_coverage(test_plan):
         params = case.get("params") or []
         p = ",".join(sorted(params)) if params else ""
         role = case.get("role", "")
-        covered[(m, u, c, p, role)] = case.get("status", "pending")
+        owner = case.get("owner", "")
+        accessor = case.get("accessor", "")
+        covered[(m, u, c, p, role, owner, accessor)] = case.get("status", "pending")
     return covered
 
 
@@ -146,8 +148,12 @@ def report(slug, base=DEFAULT_BASE):
         v["total"] += 1
         v["endpoints"].add(u)
         param = it.get("param", "")
-        is_covered = (_is_tested(m, u, c, tested_records, param=param, role=role) or
-                      plan_cov.get((m, u, c, param, role)) in ("tested", "confirmed", "disproved"))
+        owner = it.get("owner", "")
+        accessor = it.get("accessor", "")
+        is_covered = (_is_tested(m, u, c, tested_records, param=param, role=role,
+                                 owner=owner, accessor=accessor) or
+                      plan_cov.get((m, u, c, param, role, owner, accessor))
+                      in ("tested", "confirmed", "disproved"))
         if is_covered:
             v["tested"] += 1
 

@@ -1393,6 +1393,8 @@ class Engine:
                     "param": params[0] if params else "",
                     "params": params,
                     "role": c.get("role", ""),
+                    "owner": c.get("owner", ""),
+                    "accessor": c.get("accessor", ""),
                     "vuln_class": c.get("category", "deep"),
                     "source": "test-plan",
                     "priority": prio_order.get(c.get("priority", "low"), 3),

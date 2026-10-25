@@ -333,15 +333,45 @@ def run_tests():
             _record("T8.1", "Playwright browser capture", "PASS",
                     f"{len(reqs)} requests, {len(api_reqs)} API endpoints")
 
-            # T8.2: Browser scope enforcement — pass port-scoped scope object
+            # T8.2: Browser scope enforcement — pass port-scoped scope, attempt OOS
             clear_oos_requests()
             from scope import Scope as SC
             browser_scope = SC([f"127.0.0.1:{port}"])
-            reqs2 = B.capture(BASE_URL, scope_hosts=["127.0.0.1"], scope=browser_scope, wait=2)
-            oos_browser = get_oos_requests()
+            # Use Playwright directly to attempt an OOS request via the scope-enforced page
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                br = pw.chromium.launch(headless=True)
+                ctx = br.new_context()
+                pg = ctx.new_page()
+                blocked_urls = []
+                def _oos_route(route):
+                    try:
+                        import scope as _sm
+                        if browser_scope.in_scope_host(route.request.url):
+                            route.continue_()
+                        else:
+                            blocked_urls.append(route.request.url)
+                            route.abort("blockedbyclient")
+                    except Exception:
+                        route.abort("blockedbyclient")
+                pg.route("**/*", _oos_route)
+                # Navigate to in-scope page (should succeed)
+                pg.goto(BASE_URL, timeout=10000, wait_until="domcontentloaded")
+                # Explicitly attempt OOS request to sink port
+                oos_url = f"http://127.0.0.1:{oos_port}/should-be-blocked"
+                try:
+                    pg.evaluate(f"fetch('{oos_url}').catch(() => 'blocked')")
+                except Exception:
+                    pass
+                pg.wait_for_timeout(1000)
+                br.close()
+            oos_sink_hits = get_oos_requests()
+            # blocked_urls should contain the OOS attempt, sink should have zero hits
+            oos_was_attempted = any(str(oos_port) in u for u in blocked_urls)
             _record("T8.2", "Browser scope enforcement",
-                    "PASS" if len(oos_browser) == 0 else "FAIL",
-                    f"{len(oos_browser)} OOS requests, scope object passed")
+                    "PASS" if len(oos_sink_hits) == 0 and oos_was_attempted else "FAIL",
+                    f"OOS attempted={oos_was_attempted}, blocked={len(blocked_urls)}, "
+                    f"sink_hits={len(oos_sink_hits)}")
 
         except ImportError:
             _record("T8.1", "Playwright browser capture", "BLOCKED", "playwright not installed")

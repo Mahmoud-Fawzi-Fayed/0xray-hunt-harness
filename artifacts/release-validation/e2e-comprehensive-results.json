@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-25T11:23:41Z",
+  "timestamp": "2026-10-25T11:36:50Z",
   "pass": 27,
   "fail": 0,
   "blocked": 0,
@@ -153,7 +153,7 @@
       "id": "T8.2",
       "name": "Browser scope enforcement",
       "status": "PASS",
-      "detail": "0 OOS requests, scope object passed"
+      "detail": "OOS attempted=True, blocked=1, sink_hits=0"
     },
     {
       "id": "T9.1",

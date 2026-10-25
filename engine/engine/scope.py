@@ -162,8 +162,14 @@ class Scope:
         if not any(_match(p, host) for p in self.in_scope):
             return False
         # Port enforcement: if scope entries specified ports for this host, only those are allowed
-        port = _port_of(target)
-        if port and host in self._allowed_ports:
+        if host in self._allowed_ports:
+            port = _port_of(target)
+            if port is None:
+                try:
+                    scheme = urlparse(target.strip()).scheme or "https"
+                except Exception:
+                    scheme = "https"
+                port = 443 if scheme == "https" else 80
             if port not in self._allowed_ports[host]:
                 return False
         try:
@@ -187,8 +193,14 @@ class Scope:
             return f"{host} matches an out-of-scope rule"
         if not any(_match(p, host) for p in self.in_scope):
             return f"{host} matches no in-scope rule (default deny)"
-        port = _port_of(target)
-        if port and host in self._allowed_ports:
+        if host in self._allowed_ports:
+            port = _port_of(target)
+            if port is None:
+                try:
+                    scheme = urlparse(target.strip()).scheme or "https"
+                except Exception:
+                    scheme = "https"
+                port = 443 if scheme == "https" else 80
             if port not in self._allowed_ports[host]:
                 return f"port {port} not in allowed ports {self._allowed_ports[host]} for {host}"
         try:
@@ -266,8 +278,9 @@ def _selftest():
     assert s_port.in_scope_host("http://127.0.0.1:8080/api/test")
     assert not s_port.in_scope_host("http://127.0.0.1:9090/api/test"), "wrong port must be denied"
     assert not s_port.in_scope_host("http://127.0.0.1:8081/"), "adjacent port must be denied"
-    # Port-less URL against port-scoped entry: no port in URL means no port to check — allow
-    assert s_port.in_scope_host("http://127.0.0.1/api/test")
+    # Port-less URL against port-scoped entry: default port (80 for http) is inferred and must match
+    assert not s_port.in_scope_host("http://127.0.0.1/api/test"), "http default port 80 not in {8080}"
+    assert not s_port.in_scope_host("https://127.0.0.1/api/test"), "https default port 443 not in {8080}"
     # Bare scope entry (no port) allows any port (backwards compat)
     s_noport = Scope(in_scope=["127.0.0.1"])
     assert s_noport.in_scope_host("http://127.0.0.1:8080/")
