@@ -33,45 +33,51 @@ def _load(slug, base):
 
 
 def _parse_tested(tested):
-    """Parse tested entries into structured records: {(method, url, vuln_class): timestamp}.
-    Handles 4-field (METHOD|url|param|class), 3-field legacy, dict, and old url||class formats."""
+    """Parse tested entries into structured records: {(method, url, vuln_class, param, role): timestamp}.
+    Handles 5-field (METHOD|url|params|category|role), 4-field, 3-field legacy, dict, and old url||class formats."""
     records = {}
     if isinstance(tested, dict):
         for k, ts in tested.items():
             parts = k.split("|")
-            if len(parts) == 4:
-                records[(parts[0], parts[1], parts[3])] = ts
+            if len(parts) >= 5:
+                records[(parts[0], parts[1], parts[3], parts[2], parts[4])] = ts
+            elif len(parts) == 4:
+                records[(parts[0], parts[1], parts[3], parts[2], "")] = ts
             elif len(parts) == 3:
-                records[("*", parts[0], parts[2])] = ts
+                records[("*", parts[0], parts[2], "", "")] = ts
             else:
-                records[("*", k, "")] = ts
+                records[("*", k, "", "", "")] = ts
         return records
     for t in tested or []:
         if isinstance(t, dict):
             m = t.get("method", "GET")
             u = t.get("url", "")
             c = t.get("vuln_class", "")
-            records[(m, u, c)] = 0.0
+            records[(m, u, c, "", "")] = 0.0
         elif isinstance(t, str):
             parts = t.split("|")
-            if len(parts) == 4:
-                records[(parts[0], parts[1], parts[3])] = 0.0
+            if len(parts) >= 5:
+                records[(parts[0], parts[1], parts[3], parts[2], parts[4])] = 0.0
+            elif len(parts) == 4:
+                records[(parts[0], parts[1], parts[3], parts[2], "")] = 0.0
             elif len(parts) == 3:
-                records[("*", parts[0], parts[2])] = 0.0
+                records[("*", parts[0], parts[2], "", "")] = 0.0
             elif "||" in t:
                 u, c = t.split("||", 1)
-                records[("*", u, c)] = 0.0
+                records[("*", u, c, "", "")] = 0.0
             else:
-                records[("*", t, "")] = 0.0
+                records[("*", t, "", "", "")] = 0.0
     return records
 
 
-def _is_tested(method, url, vuln_class, tested_records):
-    """Check if a specific (method, url, class) combination is tested.
-    A wildcard method '*' matches any method (legacy compat)."""
-    if (method, url, vuln_class) in tested_records:
+def _is_tested(method, url, vuln_class, tested_records, param="", role=""):
+    """Check if a specific (method, url, class, param, role) combination is tested.
+    A wildcard method '*' matches any method (legacy compat). Empty param/role matches any."""
+    if (method, url, vuln_class, param, role) in tested_records:
         return True
-    if ("*", url, vuln_class) in tested_records:
+    if (method, url, vuln_class, "", "") in tested_records:
+        return True
+    if ("*", url, vuln_class, "", "") in tested_records:
         return True
     return False
 
@@ -116,7 +122,8 @@ def report(slug, base=DEFAULT_BASE):
         v = by_class.setdefault(c, {"total": 0, "tested": 0, "endpoints": set()})
         v["total"] += 1
         v["endpoints"].add(u)
-        is_covered = (_is_tested(m, u, c, tested_records) or
+        param = it.get("param", "")
+        is_covered = (_is_tested(m, u, c, tested_records, param=param, role=role) or
                       plan_cov.get((m, u, c)) in ("tested", "confirmed", "disproved"))
         if is_covered:
             v["tested"] += 1
@@ -150,7 +157,7 @@ def report(slug, base=DEFAULT_BASE):
               "severity": x.get("severity"), "proof_note": x.get("proof_note", "")}
              for x in cand]
 
-    unique_tested = sum(v["tested"] for v in by_class.values())
+    unique_tested = len(tested_records)
 
     # Class-level blind spot detection: vuln classes with hunt skills but zero test coverage
     _EXPECTED_CLASSES = {

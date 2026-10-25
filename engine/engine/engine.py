@@ -1534,11 +1534,15 @@ class Engine:
                                      "— authz.py diff and netget --as B were not run")
                         continue
                     analysis = (str(analysis) + "\n" + line).strip()
-                if analysis:
+                has_execution_evidence = bool(
+                    classes or
+                    (isinstance(f, dict) and (f.get("request") or f.get("_model") or f.get("tool_calls")))
+                )
+                if analysis and has_execution_evidence:
                     self.eng.mark_tested(it)
                     _plan_status = ("tested", analysis[:300])
                 else:
-                    self.eng.log(f"hunt: no analysis returned for {it.get('vuln_class')}@{it['url']} — left untested")
+                    self.eng.log(f"hunt: insufficient execution evidence for {it.get('vuln_class')}@{it['url']} — left untested")
                 self.eng.note_hunt(it, analysis, classes)
                 self._remember(it, analysis, classes, result="nothing", finding=f)
                 tail = f" — {str(analysis)[:160]}" if analysis else ""
@@ -1592,7 +1596,7 @@ class Engine:
         task = (self._session_preamble() + "\n"
                 f"PENTEST THIS ONE ENDPOINT.\n"
                 + lead + memory +
-                f"URL: {url}   method: {it.get('method','GET')}   known param(s): {it.get('param','')}   "
+                f"URL: {url}   method: {it.get('method','GET')}   known param(s): {', '.join(it.get('params') or []) or it.get('param','')}   "
                 f"tech: {', '.join(tech) or 'unknown'}\n"
                 "Use the session's Cookie/headers on EVERY request. "
                 + skill_hint + "\n"
