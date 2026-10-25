@@ -65,8 +65,10 @@ def skills_for(vuln_class, tech=None, url="", analysis=""):
     extra = " ".join(x for x in (vuln_class, analysis) if x)
     hits = matching(url, tech, extra)
     slug = "hunt-" + str(vuln_class or "").replace("_", "-").lower()
-    if vuln_class and vuln_class not in ("deep", "") and slug in _present() and slug not in hits:
-        hits.append(slug)
+    if vuln_class and vuln_class not in ("deep", "") and slug in _present():
+        if slug in hits:
+            hits.remove(slug)
+        hits.insert(0, slug)
     if hits:
         return hits
     # No class match — fall back to hypothesis-driven hunting

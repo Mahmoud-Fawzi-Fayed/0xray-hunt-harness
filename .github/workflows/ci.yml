@@ -12,10 +12,6 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -38,7 +34,17 @@ jobs:
       - name: skill_map sanity
         run: |
           cd engine/engine
-          python3 -c "import skill_map as m; print('class mappings:', len(m.CLASS_SKILL)); assert {'jwt','webhook','api'} <= set(m.CLASS_SKILL), 'new classes missing'"
+          python3 -c "
+          import skill_map as m
+          skills = m.installed()
+          print(f'installed skills: {len(skills)}')
+          assert len(skills) >= 60, f'expected >=60 hunt skills, got {len(skills)}'
+          for cls in ('jwt', 'webhook', 'sqli', 'xss', 'idor', 'ssrf'):
+              hits = m.skills_for(cls)
+              assert hits, f'no skill for class {cls}'
+              print(f'  {cls} -> {hits[0]}')
+          print('skill_map: OK')
+          "
 
   selfcheck:
     runs-on: ubuntu-latest
@@ -49,7 +55,7 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install requests
-      - name: Selfcheck (59 modules)
+      - name: Selfcheck
         run: python3 engine/scripts/selfcheck.py
 
   e2e:

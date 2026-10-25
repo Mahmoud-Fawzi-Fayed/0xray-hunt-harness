@@ -1,5 +1,5 @@
 ---
-name: analysing-attack
+name: dfir
 description: Analyse Mitre ATT&CK tactics, techniques and sub-techniques. Use when performing analysis of threat detections, threat models, security risks or cyber threat intelligence
 ---
 
