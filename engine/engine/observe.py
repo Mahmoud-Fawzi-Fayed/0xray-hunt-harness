@@ -120,8 +120,11 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
         for s in subs[:cap_hosts]:
             if time.time() - t0 > deadline_s:
                 break
+            sub_url = f"https://{s}"
+            if scope and not scope.in_scope_host(sub_url):
+                continue
             hdr_out = _run(["curl", "-sL", "-D", "-", "-o", "/dev/null", "-m", "10",
-                           f"https://{s}"], timeout=15).strip()
+                           sub_url], timeout=15).strip()
             code, tech = "", []
             for hl in hdr_out.splitlines():
                 if hl.startswith("HTTP/"):
@@ -142,6 +145,8 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
             if time.time() - t0 > deadline_s:
                 break
             url = h["url"]
+            if scope and not scope.in_scope_host(url):
+                continue
             html = _run(["curl", "-sL", "-m", "12", url], timeout=15)
             for m in _JS_SRC.findall(html):
                 if time.time() - t0 > deadline_s:

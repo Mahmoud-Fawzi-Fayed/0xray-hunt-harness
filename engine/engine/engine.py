@@ -1275,6 +1275,19 @@ class Engine:
         result = TP.build_test_plan(fmap, state=self.eng.state,
                                     scope={"in_scope": self.eng.scope.in_scope,
                                            "out_of_scope": self.eng.scope.out_of_scope})
+        existing_plan = self.eng.state.get("test_plan") or []
+        if existing_plan:
+            existing_statuses = {}
+            for c in existing_plan:
+                if isinstance(c, dict) and c.get("status") not in ("pending", None):
+                    sk = TP.state_key(c)
+                    existing_statuses[sk] = {"status": c["status"], "evidence": c.get("evidence")}
+            for c in result["plan"]:
+                sk = TP.state_key(c)
+                if sk in existing_statuses:
+                    c["status"] = existing_statuses[sk]["status"]
+                    if existing_statuses[sk].get("evidence"):
+                        c["evidence"] = existing_statuses[sk]["evidence"]
         self.eng.state["test_plan"] = result["plan"]
         self.eng.state["test_plan_summary"] = result["summary"]
         plan_path = os.path.join(self.eng.dir, "test-plan.md")
