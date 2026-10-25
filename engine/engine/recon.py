@@ -40,6 +40,9 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+_recon_scope = None  # set by recon() to enforce scope on redirects inside _get()
+
+
 def _ua():
     return os.environ.get("HUNT_USER_AGENT") or _UA
 
@@ -76,7 +79,19 @@ try:
         if _impersonating():
             return _get_impersonate(url, timeout)
         try:
-            r = _SESS.get(url, timeout=timeout, allow_redirects=True, headers={"User-Agent": _ua()})
+            r = _SESS.get(url, timeout=timeout, allow_redirects=False, headers={"User-Agent": _ua()})
+            # Follow redirects manually so we can check scope on each hop
+            for _ in range(6):
+                if r.status_code not in (301, 302, 303, 307, 308):
+                    break
+                loc = r.headers.get("Location", "")
+                if not loc:
+                    break
+                next_url = urljoin(r.url, loc)
+                # Scope guard on redirect target: if _recon_scope is set, block out-of-scope redirects
+                if _recon_scope and not _recon_scope.in_scope_host(next_url):
+                    return "", url, {}
+                r = _SESS.get(next_url, timeout=timeout, allow_redirects=False, headers={"User-Agent": _ua()})
             return r.text, r.url, {k.lower(): v for k, v in r.headers.items()}
         except Exception:
             return "", url, {}
@@ -91,9 +106,12 @@ except ImportError:                          # stdlib fallback
             req = urllib.request.Request(url, headers={"User-Agent": _ua(), "Accept-Encoding": "gzip"})
             r = urllib.request.urlopen(req, timeout=timeout)
             data = r.read()
+            final_url = r.geturl()
+            if _recon_scope and final_url != url and not _recon_scope.in_scope_host(final_url):
+                return "", url, {}
             if r.headers.get("Content-Encoding") == "gzip":
                 data = gzip.decompress(data)
-            return data.decode("utf-8", "replace"), r.geturl(), {k.lower(): v for k, v in r.headers.items()}
+            return data.decode("utf-8", "replace"), final_url, {k.lower(): v for k, v in r.headers.items()}
         except Exception:
             return "", url, {}
 
@@ -229,6 +247,8 @@ def spa_recon(scope, seeds=None, max_js=20, interesting_only=True, log=print):
     """Deterministically map the in-scope surface. Returns (surface_items, oos_hosts).
     seeds: explicit seed URLs (e.g. OSINT-discovered live hosts); defaults to scope.seeds.
     interesting_only filters out marketing/content pages, keeping real attack surface."""
+    global _recon_scope
+    _recon_scope = scope
     # Relative routes retain the origin of the HTML/JS that disclosed them. A shared relative path
     # can legitimately exist on several seeds; binding everything to the first seed loses that surface.
     found_rel, found_abs, forms, js_urls, secrets = set(), set(), [], set(), []

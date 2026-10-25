@@ -67,12 +67,12 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
         if _scope_obj:
             def _scope_route(route):
                 try:
-                    if not _scope_obj.in_scope_host(route.request.url):
-                        route.abort()
+                    if _scope_obj.in_scope_host(route.request.url):
+                        route.continue_()
                         return
                 except Exception:
                     pass
-                route.continue_()
+                route.abort()
             pg.route("**/*", _scope_route)
 
         def on_req(r):

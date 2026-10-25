@@ -1138,10 +1138,14 @@ class Engine:
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
         groups = OrderedDict()
         for s in sorted(self.eng.state["surface"], key=lambda z: -z.get("priority", 0)):
-            key = (s["url"], s.get("param", ""))
+            url = s.get("url") or ""
+            cls = s.get("vuln_class") or "deep"
+            if not url:
+                continue
+            key = (url, s.get("param", ""))
             g = groups.setdefault(key, {"classes": [], "src": s.get("source", "")})
-            if s["vuln_class"] not in g["classes"]:
-                g["classes"].append(s["vuln_class"])
+            if cls not in g["classes"]:
+                g["classes"].append(cls)
         tech_sk = SM.tech_skills(tech)
         # self-learning: a detected app/framework with NO playbook is a capability gap -> research +
         # auto-draft a skill so the NEXT hunt already knows it. Infra fingerprints are skipped (too generic).
@@ -1356,7 +1360,7 @@ class Engine:
         if collapsed:
             self.eng.log(f"hunt: {collapsed} duplicate object-id URL(s) collapsed to one pattern each")
         self._honor_review_skips()
-        # --- test-plan-driven hunting: prioritize planned cases over raw worklist ---
+        # --- test-plan-driven hunting: expand each pending plan case into its own worklist item ---
         import testplan as TP
         plan_cases = self.eng.state.get("test_plan") or []
         pending = TP.pending_cases(plan_cases) if plan_cases else []
@@ -1364,20 +1368,29 @@ class Engine:
         if pending:
             prio_order = {"high": 0, "medium": 1, "low": 2}
             pending.sort(key=lambda c: prio_order.get(c.get("priority", "low"), 3))
-            plan_urls = set()
+            plan_items = []
+            plan_keys = set()
             for c in pending:
                 sk = TP.state_key(c)
                 _plan_index[sk] = c
-                plan_urls.add(c.get("endpoint", ""))
+                item = {
+                    "url": c.get("endpoint", ""),
+                    "method": c.get("method", "GET"),
+                    "param": (c.get("params") or [""])[0],
+                    "vuln_class": c.get("category", "deep"),
+                    "source": "test-plan",
+                    "priority": prio_order.get(c.get("priority", "low"), 3),
+                }
+                ik = (item["url"], item["method"], item["param"], item["vuln_class"])
+                if ik not in plan_keys and item["url"]:
+                    plan_keys.add(ik)
+                    plan_items.append(item)
             raw_wl = self.eng.worklist()
-            plan_items, other_items = [], []
-            for it in raw_wl:
-                if it.get("url") in plan_urls:
-                    plan_items.append(it)
-                else:
-                    other_items.append(it)
+            other_items = [it for it in raw_wl
+                           if (it.get("url", ""), it.get("method", "GET"), it.get("param", ""), it.get("vuln_class", ""))
+                           not in plan_keys]
             wl = (plan_items + other_items)[: self.max_hunts]
-            self.eng.log(f"hunt: {len(plan_items)} items from test plan, {len(other_items)} from worklist")
+            self.eng.log(f"hunt: {len(plan_items)} cases from test plan, {len(other_items)} extra from worklist")
         else:
             wl = self.eng.worklist()[: self.max_hunts]
         self._plan_index = _plan_index
@@ -1388,11 +1401,11 @@ class Engine:
                 self.eng.log(f"hunt: skipping template url {it['url']}")
                 self.eng.mark_skipped(it, "unresolved_template")
             elif _skip_static_url(it.get("url") or ""):
-                self.eng.mark_tested(it)
+                self.eng.mark_skipped(it, "static_or_cdn")
                 skipped_static += 1
             elif not self.scope.in_scope_host(it["url"]):     # belt-and-suspenders scope gate
                 self.eng.log(f"hunt: REFUSING out-of-scope {it['url']} ({self.scope.reject_reason(it['url'])})")
-                self.eng.mark_tested(it)
+                self.eng.mark_skipped(it, "out_of_scope")
             elif self._auth_dead:
                 from urllib.parse import urlparse as _up
                 dead = (self._auth_dead_host or "").split("/")[0].split(":")[0].lower()

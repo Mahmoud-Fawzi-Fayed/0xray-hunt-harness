@@ -408,11 +408,13 @@ def validate_evidence(status, evidence, category=None):
         return False, f"status '{status}' requires evidence"
     ev = str(evidence).lower()
     if status == "confirmed":
-        has_req = any(k in ev for k in ("request", "http", "curl", "post ", "get ", "put "))
-        has_impact = any(k in ev for k in ("response", "returned", "leaked", "accessed",
-                                           "modified", "created", "deleted", "executed"))
-        if not (has_req or has_impact):
-            return False, "confirmed findings must include request/response or impact evidence"
+        has_req = any(k in ev for k in ("request", "http", "curl", "post ", "get ", "put ",
+                                        "burp", "response", "status"))
+        has_impact = any(k in ev for k in ("leaked", "accessed", "modified", "created",
+                                           "deleted", "executed", "returned", "vulnerable",
+                                           "injection", "bypass", "takeover", "exfiltrat"))
+        if not (has_req and has_impact):
+            return False, "confirmed findings must include both request evidence AND demonstrated impact"
         if category and category in _CATEGORY_EVIDENCE:
             cat_kw = _CATEGORY_EVIDENCE[category]
             if not any(k in ev for k in cat_kw):
