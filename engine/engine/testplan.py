@@ -386,26 +386,30 @@ def _render_markdown(cases, summary, slug, scope=None):
 
 
 def state_key(case):
-    """Convert a test case to a unique state key: method|url|params|category|role.
-    Params are comma-joined (not pipe) to avoid ambiguity with the field delimiter."""
+    """Human-readable state key (for logging/debugging). Primary identity is case_id()."""
     url = case.get("endpoint", "")
     method = case.get("method", "GET")
     params = case.get("params") or []
     param = ",".join(sorted(params)) if params else ""
     category = case.get("category", "")
     role = case.get("role", "")
-    return f"{method}|{url}|{param}|{category}|{role}"
+    owner = case.get("owner", "")
+    accessor = case.get("accessor", "")
+    return f"{method}|{url}|{param}|{category}|{role}|{owner}|{accessor}"
 
 
 def case_id(case):
     """Stable hash-based identifier for a test case. Collision-free across method, url,
-    params, category, and role. Returns a 16-char hex digest (64-bit)."""
+    params, category, role, owner, and accessor. Returns a 16-char hex digest (64-bit).
+    This is the PRIMARY key used in state, coverage, and plan index."""
     canonical = json.dumps({
-        "method": (case.get("method") or "GET").upper(),
-        "url": case.get("endpoint") or case.get("url") or "",
-        "params": sorted(case.get("params") or []),
+        "accessor": case.get("accessor") or "",
         "category": case.get("category") or case.get("vuln_class") or "",
+        "method": (case.get("method") or "GET").upper(),
+        "owner": case.get("owner") or "",
+        "params": sorted(case.get("params") or []),
         "role": case.get("role") or "",
+        "url": case.get("endpoint") or case.get("url") or "",
     }, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
@@ -711,7 +715,7 @@ def _selftest(_a=None):
 
     # state_key bridge
     sk = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
-    assert sk == "POST|https://a.com/x|id|idor|", f"got: {sk}"
+    assert sk == "POST|https://a.com/x|id|idor|||", f"got: {sk}"
     # multi-param + role: keys must not collide
     sk2 = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id", "name"], "category": "idor"})
     sk3 = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor", "role": "admin"})
@@ -733,8 +737,13 @@ def _selftest(_a=None):
     # url/endpoint aliases produce same id
     cid6 = case_id({"url": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
     assert cid1 == cid6, "url and endpoint must produce same case_id"
+    # owner/accessor collision avoidance
+    cid7 = case_id({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor", "owner": "A", "accessor": "B"})
+    cid8 = case_id({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor", "owner": "B", "accessor": "A"})
+    assert cid7 != cid8, "A/B vs B/A must produce different case_ids"
+    assert cid7 != cid1, "owner/accessor case must differ from unscoped"
     assert "id,name" in sk2, sk2
-    assert sk3.endswith("|admin"), sk3
+    assert "|admin|" in sk3, sk3
 
     # execute_plan with mock runner (evidence must pass validation)
     import copy

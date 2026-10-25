@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-10-25T10:40:42Z",
-  "pass": 26,
+  "timestamp": "2026-10-25T11:23:41Z",
+  "pass": 27,
   "fail": 0,
   "blocked": 0,
   "not_verified": 0,
@@ -45,7 +45,7 @@
       "id": "T1.7",
       "name": "Local test scope enforcement",
       "status": "PASS",
-      "detail": ""
+      "detail": "port 19877 allowed, port 19878 denied"
     },
     {
       "id": "T2.1",
@@ -87,7 +87,7 @@
       "id": "T5.1",
       "name": "Test plan generates cases",
       "status": "PASS",
-      "detail": "16 cases"
+      "detail": "22 cases"
     },
     {
       "id": "T5.2",
@@ -99,13 +99,19 @@
       "id": "T5.3",
       "name": "Multi-param cases in plan",
       "status": "PASS",
-      "detail": "6 multi-param cases"
+      "detail": "8 multi-param cases"
     },
     {
       "id": "T5.4",
       "name": "All priorities valid",
       "status": "PASS",
       "detail": ""
+    },
+    {
+      "id": "T5.5",
+      "name": "Auth A/B cases with both directions",
+      "status": "PASS",
+      "detail": "6 auth cases, 2 unique pairs"
     },
     {
       "id": "T6.1",
@@ -123,7 +129,7 @@
       "id": "T6.3",
       "name": "Method isolation in coverage",
       "status": "PASS",
-      "detail": "GET tested, PATCH key 'PATCH|http://127.0.0.1:19877/api/users/1|id,name||' not in tested"
+      "detail": "GET tested, PATCH key 'c930d7398a207518' not in tested"
     },
     {
       "id": "T6.4",

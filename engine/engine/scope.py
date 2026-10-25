@@ -34,11 +34,26 @@ def _host_of(target):
     return host
 
 
+def _port_of(target):
+    t = target.strip()
+    if "://" not in t:
+        t = "//" + t
+    try:
+        return urlparse(t).port
+    except Exception:
+        return None
+
+
 def _match(pattern, host):
     p = pattern.strip().lower().rstrip(".")
     host = host.rstrip(".")
     if not p or not host:
         return False
+    # Strip port suffix from pattern for host matching (port checked separately)
+    if ":" in p and not p.startswith("re:") and "/" not in p:
+        parts = p.rsplit(":", 1)
+        if parts[1].rstrip(".").isdigit():
+            p = parts[0]
     if p.startswith("="):
         return host == p[1:].rstrip(".")
     if p.startswith("re:"):
@@ -76,6 +91,15 @@ class Scope:
         self.path_restrictions = path_restrictions or {}  # {host: ["/allowed/path"]} from URL-scoped entries
         self.out_path_restrictions = out_path_restrictions or {}  # {host: ["/excluded/path"]} path-specific exclusions
         self.policy = {}  # program-level policy: rate_limit, prohibited_actions, required_headers, auth_restrictions
+        # Port enforcement: scope entries with explicit ports restrict that host to those ports only
+        self._allowed_ports = {}  # {host: set(ports)}
+        for p in self.in_scope:
+            stripped = p.strip().lower()
+            if ":" in stripped and not stripped.startswith("re:") and "/" not in stripped:
+                parts = stripped.rsplit(":", 1)
+                if parts[1].rstrip(".").isdigit():
+                    host = parts[0].lstrip("=").rstrip(".").lstrip("*.")
+                    self._allowed_ports.setdefault(host, set()).add(int(parts[1]))
 
     @classmethod
     def load(cls, path):
@@ -137,6 +161,11 @@ class Scope:
             return False          # deny wins
         if not any(_match(p, host) for p in self.in_scope):
             return False
+        # Port enforcement: if scope entries specified ports for this host, only those are allowed
+        port = _port_of(target)
+        if port and host in self._allowed_ports:
+            if port not in self._allowed_ports[host]:
+                return False
         try:
             path = urlparse(target).path or "/"
         except Exception:
@@ -158,6 +187,10 @@ class Scope:
             return f"{host} matches an out-of-scope rule"
         if not any(_match(p, host) for p in self.in_scope):
             return f"{host} matches no in-scope rule (default deny)"
+        port = _port_of(target)
+        if port and host in self._allowed_ports:
+            if port not in self._allowed_ports[host]:
+                return f"port {port} not in allowed ports {self._allowed_ports[host]} for {host}"
         try:
             path = urlparse(target).path or "/"
         except Exception:
@@ -228,6 +261,26 @@ def _selftest():
     assert not Scope(in_scope=["example.com"]).in_scope_host("https://evil@example.com.attacker.com/x")
     # Trailing dot normalization
     assert Scope(in_scope=["example.com"]).in_scope_host("https://example.com./x")
+    # Port enforcement: scope entry with port restricts to that port only
+    s_port = Scope(in_scope=["127.0.0.1:8080"])
+    assert s_port.in_scope_host("http://127.0.0.1:8080/api/test")
+    assert not s_port.in_scope_host("http://127.0.0.1:9090/api/test"), "wrong port must be denied"
+    assert not s_port.in_scope_host("http://127.0.0.1:8081/"), "adjacent port must be denied"
+    # Port-less URL against port-scoped entry: no port in URL means no port to check — allow
+    assert s_port.in_scope_host("http://127.0.0.1/api/test")
+    # Bare scope entry (no port) allows any port (backwards compat)
+    s_noport = Scope(in_scope=["127.0.0.1"])
+    assert s_noport.in_scope_host("http://127.0.0.1:8080/")
+    assert s_noport.in_scope_host("http://127.0.0.1:9999/")
+    assert s_noport.in_scope_host("http://127.0.0.1/")
+    # Multiple allowed ports
+    s_multi = Scope(in_scope=["127.0.0.1:8080", "127.0.0.1:8443"])
+    assert s_multi.in_scope_host("http://127.0.0.1:8080/")
+    assert s_multi.in_scope_host("https://127.0.0.1:8443/")
+    assert not s_multi.in_scope_host("http://127.0.0.1:9090/")
+    # reject_reason includes port info
+    assert "port" in (s_port.reject_reason("http://127.0.0.1:9090/") or "")
+    assert s_port.reject_reason("http://127.0.0.1:8080/") is None
     print("scope.py self-test: PASS")
 
 

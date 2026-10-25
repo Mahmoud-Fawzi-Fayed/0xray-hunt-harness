@@ -110,11 +110,10 @@ def run_tests():
         assert not s5.in_scope_host("https://example.com.evil.com")
         _record("T1.6", "Suffix confusion prevention", "PASS")
 
-        # T1.7: Local test scope — use localhost for app, 127.0.0.1 for OOS sink
-        # Since scope doesn't enforce ports, we use different hosts to distinguish
+        # T1.7: Local test scope — port-scoped so OOS sink on port+1 is truly OOS
         scope_data = {
             "name": "vuln-local",
-            "in_scope": ["127.0.0.1", "localhost"],
+            "in_scope": [f"127.0.0.1:{port}", "localhost"],
             "out_of_scope": [],
             "seeds": [BASE_URL],
             "self_register_ok": True,
@@ -123,11 +122,11 @@ def run_tests():
         }
         sc = S.Scope(scope_data["in_scope"], scope_data["out_of_scope"],
                       seeds=scope_data["seeds"], name=scope_data["name"])
-        assert sc.in_scope_host(f"{BASE_URL}/api/users/1")
-        assert not sc.in_scope_host("http://evil.com/x")
-        # Note: OOS sink runs on 127.0.0.1:oos_port — same host, different port.
-        # Port-based scope enforcement is a known limitation for localhost testing.
-        _record("T1.7", "Local test scope enforcement", "PASS")
+        assert sc.in_scope_host(f"{BASE_URL}/api/users/1"), "app port must be in scope"
+        assert not sc.in_scope_host("http://evil.com/x"), "external host must be denied"
+        assert not sc.in_scope_host(f"{OOS_URL}/test"), "OOS sink port must be denied"
+        _record("T1.7", "Local test scope enforcement", "PASS",
+                f"port {port} allowed, port {oos_port} denied")
 
         # ============================================================
         # SECTION 2: Guardrails
@@ -225,7 +224,13 @@ def run_tests():
         print("\n--- Section 5: Test planner ---")
 
         import testplan as TP
-        plan = TP.build_test_plan({"endpoints": state["surface"]}, state=state, scope=scope_data)
+        test_identities = [
+            {"ident": "A", "role": "user", "email": "alice@t1.local"},
+            {"ident": "B", "role": "user", "email": "carol@t2.local"},
+        ]
+        plan = TP.build_test_plan(
+            {"endpoints": state["surface"], "identities": test_identities},
+            state=state, scope=scope_data)
         cases = plan.get("plan", plan.get("test_cases", []))
         assert isinstance(cases, list) and len(cases) >= 1
         _record("T5.1", "Test plan generates cases", "PASS", f"{len(cases)} cases")
@@ -246,6 +251,20 @@ def run_tests():
         for c in cases:
             assert c.get("priority", "low") in prio_order, f"unknown priority: {c.get('priority')}"
         _record("T5.4", "All priorities valid", "PASS")
+
+        # T5.5: Auth cases generated with distinct owner/accessor
+        auth_cases = [c for c in cases if c.get("owner") and c.get("accessor")]
+        if auth_cases:
+            pairs = {(c["owner"], c["accessor"]) for c in auth_cases}
+            has_both_dirs = any(
+                (b, a) in pairs for (a, b) in pairs if a != b
+            )
+            _record("T5.5", "Auth A/B cases with both directions",
+                    "PASS" if has_both_dirs else "FAIL",
+                    f"{len(auth_cases)} auth cases, {len(pairs)} unique pairs")
+        else:
+            _record("T5.5", "Auth A/B cases with both directions", "FAIL",
+                    "no auth cases generated despite identities")
 
         # ============================================================
         # SECTION 6: Coverage tracking
@@ -314,10 +333,10 @@ def run_tests():
             _record("T8.1", "Playwright browser capture", "PASS",
                     f"{len(reqs)} requests, {len(api_reqs)} API endpoints")
 
-            # T8.2: Browser scope enforcement — pass actual scope object
+            # T8.2: Browser scope enforcement — pass port-scoped scope object
             clear_oos_requests()
             from scope import Scope as SC
-            browser_scope = SC(["127.0.0.1"])
+            browser_scope = SC([f"127.0.0.1:{port}"])
             reqs2 = B.capture(BASE_URL, scope_hosts=["127.0.0.1"], scope=browser_scope, wait=2)
             oos_browser = get_oos_requests()
             _record("T8.2", "Browser scope enforcement",

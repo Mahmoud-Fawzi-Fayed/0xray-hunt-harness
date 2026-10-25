@@ -455,6 +455,19 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
     api_spec_urls = sorted({ep.get("url") for ep in merged
                             if any(m in (ep.get("url") or "").lower() for m in _SPEC_MARKERS)})
 
+    identities = []
+    try:
+        import authn
+        for ident_key in authn.identities(slug, base):
+            data = authn.load(slug, base).get(ident_key, {})
+            identities.append({
+                "ident": ident_key,
+                "role": data.get("role", "user"),
+                "email": data.get("email", ""),
+            })
+    except Exception:
+        pass
+
     return {
         "slug": slug,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -468,6 +481,7 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
         "api_spec_urls": api_spec_urls,
         "features": features,
         "endpoints": merged,
+        "identities": identities,
     }
 
 

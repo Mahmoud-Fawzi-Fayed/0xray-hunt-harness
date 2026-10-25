@@ -33,28 +33,34 @@ def _load(slug, base):
 
 
 def _parse_tested(tested):
-    """Parse tested entries into structured records: {(method, url, vuln_class, param, role): timestamp}.
-    Handles 5-field (METHOD|url|params|category|role — params are comma-separated within their field),
-    4-field legacy, 3-field legacy, dict, and old url||class formats."""
+    """Parse tested entries into a dict keyed by case_id hash AND legacy tuples.
+    Returns {hash_or_tuple: timestamp}. Hash keys (16-char hex) are stored as-is.
+    Legacy pipe-delimited keys are converted to both their hash and tuple form."""
     records = {}
     if isinstance(tested, dict):
         for k, ts in tested.items():
-            parts = str(k).split("|")
-            if len(parts) == 5:
-                # Canonical: method|url|comma_params|category|role
+            ks = str(k)
+            # Hash-based key (16 hex chars) — store as-is
+            if len(ks) == 16 and all(c in "0123456789abcdef" for c in ks):
+                records[ks] = ts
+                continue
+            # Legacy pipe-delimited: parse AND compute hash
+            parts = ks.split("|")
+            if len(parts) >= 5:
                 records[(parts[0], parts[1], parts[3], parts[2], parts[4])] = ts
+                import testplan as TP
+                case = {"method": parts[0], "endpoint": parts[1],
+                        "params": parts[2].split(",") if parts[2] else [],
+                        "category": parts[3], "role": parts[4] if len(parts) > 4 else "",
+                        "owner": parts[5] if len(parts) > 5 else "",
+                        "accessor": parts[6] if len(parts) > 6 else ""}
+                records[TP.case_id(case)] = ts
             elif len(parts) == 4:
-                # Legacy 4-field: method|url|param|class (no role)
                 records[(parts[0], parts[1], parts[3], parts[2], "")] = ts
             elif len(parts) == 3:
-                # Legacy 3-field: url|param|class (no method)
                 records[("*", parts[0], parts[2], parts[1], "")] = ts
-            elif len(parts) > 5:
-                # Old pipe-separated multi-param keys — last two are class and role,
-                # middle parts are params (ambiguous, best-effort)
-                records[(parts[0], parts[1], parts[-2], ",".join(parts[2:-2]), parts[-1])] = ts
             else:
-                records[("*", k, "", "", "")] = ts
+                records[("*", ks, "", "", "")] = ts
         return records
     for t in tested or []:
         if isinstance(t, dict):
@@ -65,7 +71,7 @@ def _parse_tested(tested):
             records[(m, u, c, p, "")] = 0.0
         elif isinstance(t, str):
             parts = t.split("|")
-            if len(parts) == 5:
+            if len(parts) >= 5:
                 records[(parts[0], parts[1], parts[3], parts[2], parts[4])] = 0.0
             elif len(parts) == 4:
                 records[(parts[0], parts[1], parts[3], parts[2], "")] = 0.0
@@ -79,10 +85,15 @@ def _parse_tested(tested):
     return records
 
 
-def _is_tested(method, url, vuln_class, tested_records, param="", role=""):
-    """Check if a specific (method, url, class, param, role) combination is tested.
-    Exact match only — no fallback that ignores param/role (prevents overclaim).
-    Legacy wildcard method '*' from old 3-field state files is the sole exception."""
+def _is_tested(method, url, vuln_class, tested_records, param="", role="", owner="", accessor=""):
+    """Check if a specific case is tested. Uses case_id hash as primary lookup,
+    falls back to legacy tuple match. No param/role fallback (prevents overclaim)."""
+    import testplan as TP
+    case = {"method": method, "endpoint": url, "params": [param] if param else [],
+            "category": vuln_class, "role": role, "owner": owner, "accessor": accessor}
+    hk = TP.case_id(case)
+    if hk in tested_records:
+        return True
     if (method, url, vuln_class, param, role) in tested_records:
         return True
     if ("*", url, vuln_class, param, role) in tested_records:

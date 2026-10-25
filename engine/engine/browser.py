@@ -51,29 +51,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             except Exception:  # noqa: BLE001
                 pass
         pg = ctx.new_page()
-        # Block browser requests to out-of-scope hosts at the network layer
-        _scope_obj = None
-        if scope:
-            try:
-                import scope as _scope_mod
-                if isinstance(scope, _scope_mod.Scope):
-                    _scope_obj = scope
-                elif isinstance(scope, dict):
-                    _scope_obj = _scope_mod.Scope(scope.get("in_scope", []), scope.get("out_of_scope", []),
-                                                  path_restrictions=scope.get("path_restrictions", {}),
-                                                  out_path_restrictions=scope.get("out_path_restrictions", {}))
-            except Exception:
-                pass
-        if _scope_obj:
-            def _scope_route(route):
-                try:
-                    if _scope_obj.in_scope_host(route.request.url):
-                        route.continue_()
-                        return
-                except Exception:
-                    pass
-                route.abort()
-            pg.route("**/*", _scope_route)
+        _install_scope_blocker(pg, scope)
 
         def on_req(r):
             try:
@@ -213,6 +191,35 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
     return reqs
 
 
+def _install_scope_blocker(page, scope):
+    """Install scope-enforcing route handler on a Playwright page. Fail-closed on error."""
+    if not scope:
+        return False
+    _scope_obj = None
+    try:
+        import scope as _scope_mod
+        if isinstance(scope, _scope_mod.Scope):
+            _scope_obj = scope
+        elif isinstance(scope, dict):
+            _scope_obj = _scope_mod.Scope(scope.get("in_scope", []), scope.get("out_of_scope", []),
+                                          path_restrictions=scope.get("path_restrictions", {}),
+                                          out_path_restrictions=scope.get("out_path_restrictions", {}))
+    except Exception:
+        pass
+    if not _scope_obj:
+        return False
+    def _route(route):
+        try:
+            if _scope_obj.in_scope_host(route.request.url):
+                route.continue_()
+                return
+        except Exception:
+            pass
+        route.abort("blockedbyclient")
+    page.route("**/*", _route)
+    return True
+
+
 def screenshot(url, output_path, slug=None, ident=None, wait=4, timeout=15000, scope=None):
     """Take a full-page screenshot for evidence collection."""
     from playwright.sync_api import sync_playwright
@@ -238,6 +245,7 @@ def screenshot(url, output_path, slug=None, ident=None, wait=4, timeout=15000, s
             except Exception:
                 pass
         page = ctx.new_page()
+        _install_scope_blocker(page, scope)
         try:
             page.goto(url, timeout=timeout, wait_until="networkidle")
         except Exception:
@@ -248,9 +256,17 @@ def screenshot(url, output_path, slug=None, ident=None, wait=4, timeout=15000, s
     return output_path
 
 
-def dom_xss_probe(url, params=None, timeout=10000):
+def dom_xss_probe(url, params=None, timeout=10000, scope=None):
     """Probe URL for DOM-based XSS by injecting canary into URL params and hash.
     Returns list of findings [{param, sink, evidence}]."""
+    if scope:
+        try:
+            import scope as _scope_mod
+            s = scope if isinstance(scope, _scope_mod.Scope) else _scope_mod.Scope(scope.get("in_scope", []))
+            if not s.in_scope_host(url):
+                return []
+        except Exception:
+            return []
     from playwright.sync_api import sync_playwright
     canary = "xRay0xDOM"
     findings = []
@@ -258,6 +274,7 @@ def dom_xss_probe(url, params=None, timeout=10000):
         b = p.chromium.launch(headless=True)
         ctx = b.new_context()
         page = ctx.new_page()
+        _install_scope_blocker(page, scope)
         alerts = []
         page.on("dialog", lambda d: (alerts.append(d.message), d.dismiss()))
         # Test hash-based injection
@@ -289,9 +306,17 @@ def dom_xss_probe(url, params=None, timeout=10000):
     return findings
 
 
-def csrf_check(url, slug=None, ident=None, timeout=10000):
+def csrf_check(url, slug=None, ident=None, timeout=10000, scope=None):
     """Check if a page has CSRF protection on its forms.
     Returns list of unprotected forms [{action, method, has_token}]."""
+    if scope:
+        try:
+            import scope as _scope_mod
+            s = scope if isinstance(scope, _scope_mod.Scope) else _scope_mod.Scope(scope.get("in_scope", []))
+            if not s.in_scope_host(url):
+                return []
+        except Exception:
+            return []
     from playwright.sync_api import sync_playwright
     import authn
     sess_headers = {}
@@ -313,6 +338,7 @@ def csrf_check(url, slug=None, ident=None, timeout=10000):
             except Exception:
                 pass
         page = ctx.new_page()
+        _install_scope_blocker(page, scope)
         try:
             page.goto(url, timeout=timeout, wait_until="networkidle")
         except Exception:

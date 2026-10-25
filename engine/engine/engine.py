@@ -1280,10 +1280,10 @@ class Engine:
             existing_statuses = {}
             for c in existing_plan:
                 if isinstance(c, dict) and c.get("status") not in ("pending", None):
-                    sk = TP.state_key(c)
+                    sk = TP.case_id(c)
                     existing_statuses[sk] = {"status": c["status"], "evidence": c.get("evidence")}
             for c in result["plan"]:
-                sk = TP.state_key(c)
+                sk = TP.case_id(c)
                 if sk in existing_statuses:
                     c["status"] = existing_statuses[sk]["status"]
                     if existing_statuses[sk].get("evidence"):
@@ -1384,7 +1384,7 @@ class Engine:
             plan_items = []
             plan_keys = set()
             for c in pending:
-                sk = TP.state_key(c)
+                sk = TP.case_id(c)
                 _plan_index[sk] = c
                 params = c.get("params") or []
                 item = {
@@ -1403,9 +1403,10 @@ class Engine:
                     plan_items.append(item)
             raw_wl = self.eng.worklist()
             other_items = [it for it in raw_wl
-                           if TP.state_key({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
+                           if TP.case_id({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
                                             "params": it.get("params") or ([it["param"]] if it.get("param") else []),
-                                            "category": it.get("vuln_class", ""), "role": it.get("role", "")})
+                                            "category": it.get("vuln_class", ""), "role": it.get("role", ""),
+                                            "owner": it.get("owner", ""), "accessor": it.get("accessor", "")})
                            not in plan_keys]
             wl = (plan_items + other_items)[: self.max_hunts]
             self.eng.log(f"hunt: {len(plan_items)} cases from test plan, {len(other_items)} extra from worklist")
@@ -1565,10 +1566,11 @@ class Engine:
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}{tail}")
             # --- update test plan case status ---
             if _plan_status and self._plan_index:
-                _sk = it.get("_plan_key") or TP.state_key({
+                _sk = it.get("_plan_key") or TP.case_id({
                     "endpoint": it.get("url", ""), "method": it.get("method", "GET"),
                     "params": it.get("params") or ([it["param"]] if it.get("param") else []),
-                    "category": it.get("vuln_class", ""), "role": it.get("role", "")})
+                    "category": it.get("vuln_class", ""), "role": it.get("role", ""),
+                    "owner": it.get("owner", ""), "accessor": it.get("accessor", "")})
                 _pc = self._plan_index.get(_sk)
                 if _pc:
                     try:
