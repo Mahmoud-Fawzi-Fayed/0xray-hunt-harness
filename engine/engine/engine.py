@@ -1474,26 +1474,11 @@ class Engine:
                     self.eng.log(f"hunt: error on {it.get('vuln_class')}@{it['url']} ({err}) "
                                  f"— not marking tested, will retry next round")
                     continue
-            self.eng.mark_tested(it)
-            # --- update test plan case status ---
-            if self._plan_index:
-                _sk = TP.state_key({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
-                                    "params": [it["param"]] if it.get("param") else [],
-                                    "category": it.get("vuln_class", "")})
-                _pc = self._plan_index.get(_sk)
-                if _pc:
-                    try:
-                        if f and f.get("vulnerable"):
-                            TP.mark_case(_pc, "confirmed", evidence=f.get("evidence") or f.get("proof_note") or "confirmed by hunt agent")
-                        elif f and f.get("skipped"):
-                            TP.mark_case(_pc, "blocked", evidence=f.get("skipped") or "skipped by hunt agent")
-                        else:
-                            TP.mark_case(_pc, "tested", evidence=(f or {}).get("analysis") or "tested — no vulnerability found")
-                    except (ValueError, TypeError):
-                        pass  # evidence validation failed — leave as pending
+            # --- classify result BEFORE marking tested ---
             self._feedback_surface(f)                 # endpoints the agent found mid-hunt -> back into the worklist
             if f and f.get("rate_limited"):
                 self.eng.log("hunt: ⚠ model usage limit hit — remaining results may be partial")
+            _plan_status = None  # determined by result quality, applied after
             if f and f.get("vulnerable"):
                 oos = self._scope_audit(f)
                 cand = {"url": it["url"], "param": it.get("param", ""),
@@ -1516,8 +1501,12 @@ class Engine:
                     self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
                                   f"host(s): {', '.join(oos)} (flagged)") if oos
                                  else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
+                # Candidate awaits validate phase — mark tested but plan stays "tested" not "confirmed"
+                self.eng.mark_tested(it)
+                _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
             elif f and f.get("skipped"):
                 self.eng.log(f"hunt: skipped {it.get('vuln_class')}@{it['url']} — {f['skipped']}")
+                _plan_status = ("blocked", f.get("skipped") or "skipped by hunt agent")
             else:
                 analysis = ""
                 classes = []
@@ -1525,7 +1514,6 @@ class Engine:
                     analysis = f.get("analysis") or ""
                     classes = f.get("classes_considered") or []
                 if _logged_out_result(analysis):
-                    self._unmark_tested(it)
                     self.eng.note_hunt(it, analysis, classes)
                     self._remember(it, analysis, classes, result="auth_wall", finding=f)
                     self.eng.log(f"hunt: auth wall on {it.get('vuln_class')}@{it['url']} — left untested "
@@ -1537,15 +1525,27 @@ class Engine:
                         and self._needs_authz_gate(it.get("url"))):
                     line = self._authz_closeout(it.get("url"))
                     if not line:
-                        self._unmark_tested(it)
                         self.eng.log(f"hunt: refused nothing on {it.get('vuln_class')}@{it['url']} "
                                      "— authz.py diff and netget --as B were not run")
                         continue
                     analysis = (str(analysis) + "\n" + line).strip()
+                self.eng.mark_tested(it)
+                _plan_status = ("tested", (f or {}).get("analysis") or "tested — no vulnerability found")
                 self.eng.note_hunt(it, analysis, classes)
                 self._remember(it, analysis, classes, result="nothing", finding=f)
                 tail = f" — {str(analysis)[:160]}" if analysis else ""
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}{tail}")
+            # --- update test plan case status ---
+            if _plan_status and self._plan_index:
+                _sk = TP.state_key({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
+                                    "params": [it["param"]] if it.get("param") else [],
+                                    "category": it.get("vuln_class", "")})
+                _pc = self._plan_index.get(_sk)
+                if _pc:
+                    try:
+                        TP.mark_case(_pc, _plan_status[0], evidence=_plan_status[1])
+                    except (ValueError, TypeError):
+                        pass
         # --- persist updated test plan statuses ---
         if plan_cases and self._plan_index:
             cov = TP.plan_coverage(plan_cases)

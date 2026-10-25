@@ -374,13 +374,14 @@ def _render_markdown(cases, summary, slug, scope=None):
 
 
 def state_key(case):
-    """Convert a test case to the state.py tested-key format: method|url|param|category."""
+    """Convert a test case to a unique state key: method|url|params|category|role."""
     url = case.get("endpoint", "")
     method = case.get("method", "GET")
     params = case.get("params") or []
-    param = params[0] if params else ""
+    param = "|".join(sorted(params)) if params else ""
     category = case.get("category", "")
-    return f"{method}|{url}|{param}|{category}"
+    role = case.get("role", "")
+    return f"{method}|{url}|{param}|{category}|{role}"
 
 
 VALID_STATUSES = {"pending", "running", "tested", "blocked", "inconclusive", "disproved", "confirmed"}
@@ -684,7 +685,14 @@ def _selftest(_a=None):
 
     # state_key bridge
     sk = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
-    assert sk == "POST|https://a.com/x|id|idor", sk
+    assert sk == "POST|https://a.com/x|id|idor|", sk
+    # multi-param + role: keys must not collide
+    sk2 = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id", "name"], "category": "idor"})
+    sk3 = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor", "role": "admin"})
+    assert sk2 != sk, "multi-param key must differ from single-param"
+    assert sk3 != sk, "role key must differ from no-role"
+    assert "id|name" in sk2, sk2
+    assert sk3.endswith("|admin"), sk3
 
     # execute_plan with mock runner (evidence must pass validation)
     import copy

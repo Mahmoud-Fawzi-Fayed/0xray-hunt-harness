@@ -612,6 +612,8 @@ def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-
                 if pp.get("in") == "path":
                     url = url.replace("{%s}" % pp["name"], junk)
             url = url.replace("{", "").replace("}", "")
+            if _recon_scope and not _recon_scope.in_scope_host(url):
+                continue
             q = [f"{pp['name']}={junk}" for pp in op.get("parameters", [])
                  if pp.get("in") == "query" and pp.get("required")]
             if q:
