@@ -123,7 +123,7 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
             sub_url = f"https://{s}"
             if scope and not scope.in_scope_host(sub_url):
                 continue
-            hdr_out = _run(["curl", "-sL", "-D", "-", "-o", "/dev/null", "-m", "10",
+            hdr_out = _run(["curl", "-s", "-D", "-", "-o", "/dev/null", "-m", "10",
                            sub_url], timeout=15).strip()
             code, tech = "", []
             for hl in hdr_out.splitlines():
@@ -147,7 +147,7 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
             url = h["url"]
             if scope and not scope.in_scope_host(url):
                 continue
-            html = _run(["curl", "-sL", "-m", "12", url], timeout=15)
+            html = _run(["curl", "-s", "-m", "12", url], timeout=15)
             for m in _JS_SRC.findall(html):
                 if time.time() - t0 > deadline_s:
                     break
@@ -156,7 +156,7 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
                     continue
                 if scope and not scope.in_scope_host(ju):
                     continue
-                body = _run(["curl", "-sL", "-m", "12", ju], timeout=15)
+                body = _run(["curl", "-s", "-m", "12", ju], timeout=15)
                 if body:
                     js[ju] = hashlib.sha256(body.encode("utf-8", "ignore")).hexdigest()[:16]
             if len(js) >= cap_js:

@@ -34,17 +34,25 @@ def _load(slug, base):
 
 def _parse_tested(tested):
     """Parse tested entries into structured records: {(method, url, vuln_class, param, role): timestamp}.
-    Handles 5-field (METHOD|url|params|category|role), 4-field, 3-field legacy, dict, and old url||class formats."""
+    Handles 5-field (METHOD|url|params|category|role — params are comma-separated within their field),
+    4-field legacy, 3-field legacy, dict, and old url||class formats."""
     records = {}
     if isinstance(tested, dict):
         for k, ts in tested.items():
-            parts = k.split("|")
-            if len(parts) >= 5:
+            parts = str(k).split("|")
+            if len(parts) == 5:
+                # Canonical: method|url|comma_params|category|role
                 records[(parts[0], parts[1], parts[3], parts[2], parts[4])] = ts
             elif len(parts) == 4:
+                # Legacy 4-field: method|url|param|class (no role)
                 records[(parts[0], parts[1], parts[3], parts[2], "")] = ts
             elif len(parts) == 3:
-                records[("*", parts[0], parts[2], "", "")] = ts
+                # Legacy 3-field: url|param|class (no method)
+                records[("*", parts[0], parts[2], parts[1], "")] = ts
+            elif len(parts) > 5:
+                # Old pipe-separated multi-param keys — last two are class and role,
+                # middle parts are params (ambiguous, best-effort)
+                records[(parts[0], parts[1], parts[-2], ",".join(parts[2:-2]), parts[-1])] = ts
             else:
                 records[("*", k, "", "", "")] = ts
         return records
@@ -53,15 +61,16 @@ def _parse_tested(tested):
             m = t.get("method", "GET")
             u = t.get("url", "")
             c = t.get("vuln_class", "")
-            records[(m, u, c, "", "")] = 0.0
+            p = ",".join(sorted(t.get("params") or []))
+            records[(m, u, c, p, "")] = 0.0
         elif isinstance(t, str):
             parts = t.split("|")
-            if len(parts) >= 5:
+            if len(parts) == 5:
                 records[(parts[0], parts[1], parts[3], parts[2], parts[4])] = 0.0
             elif len(parts) == 4:
                 records[(parts[0], parts[1], parts[3], parts[2], "")] = 0.0
             elif len(parts) == 3:
-                records[("*", parts[0], parts[2], "", "")] = 0.0
+                records[("*", parts[0], parts[2], parts[1], "")] = 0.0
             elif "||" in t:
                 u, c = t.split("||", 1)
                 records[("*", u, c, "", "")] = 0.0
@@ -72,18 +81,18 @@ def _parse_tested(tested):
 
 def _is_tested(method, url, vuln_class, tested_records, param="", role=""):
     """Check if a specific (method, url, class, param, role) combination is tested.
-    A wildcard method '*' matches any method (legacy compat). Empty param/role matches any."""
+    Exact match only — no fallback that ignores param/role (prevents overclaim).
+    Legacy wildcard method '*' from old 3-field state files is the sole exception."""
     if (method, url, vuln_class, param, role) in tested_records:
         return True
-    if (method, url, vuln_class, "", "") in tested_records:
-        return True
-    if ("*", url, vuln_class, "", "") in tested_records:
+    if ("*", url, vuln_class, param, role) in tested_records:
         return True
     return False
 
 
 def _testplan_coverage(test_plan):
-    """Extract coverage from test_plan cases. Returns {(method, url, category): status}."""
+    """Extract coverage from test_plan cases. Returns {(method, url, category, param, role): status}.
+    Uses 5-tuple keys to prevent different param/role cases from sharing coverage credit."""
     covered = {}
     if not test_plan:
         return covered
@@ -95,7 +104,10 @@ def _testplan_coverage(test_plan):
         m = case.get("method", "GET")
         u = case.get("endpoint") or case.get("url", "")
         c = case.get("category") or case.get("vuln_class", "")
-        covered[(m, u, c)] = case.get("status", "pending")
+        params = case.get("params") or []
+        p = ",".join(sorted(params)) if params else ""
+        role = case.get("role", "")
+        covered[(m, u, c, p, role)] = case.get("status", "pending")
     return covered
 
 
@@ -116,15 +128,15 @@ def report(slug, base=DEFAULT_BASE):
         m = it.get("method", "GET")
         u = it.get("url", "")
         c = it.get("vuln_class", "?")
-        role = it.get("role", "default")
-        roles_seen.add(role)
+        role = it.get("role", "")
+        roles_seen.add(role or "default")
 
         v = by_class.setdefault(c, {"total": 0, "tested": 0, "endpoints": set()})
         v["total"] += 1
         v["endpoints"].add(u)
         param = it.get("param", "")
         is_covered = (_is_tested(m, u, c, tested_records, param=param, role=role) or
-                      plan_cov.get((m, u, c)) in ("tested", "confirmed", "disproved"))
+                      plan_cov.get((m, u, c, param, role)) in ("tested", "confirmed", "disproved"))
         if is_covered:
             v["tested"] += 1
 
@@ -148,7 +160,7 @@ def report(slug, base=DEFAULT_BASE):
     for (m, u), op in sorted(by_operation.items()):
         classes_detail = {}
         for c, status in op["classes"].items():
-            checks = tested_checks.get(f"{m}|{u}||{c}", [])
+            checks = tested_checks.get(f"{m}|{u}||{c}|", tested_checks.get(f"{m}|{u}||{c}", []))
             classes_detail[c] = {"status": status, "checks": checks,
                                  "roles_tested": sorted(op["roles"])}
         operations.append({"method": m, "url": u, "classes": classes_detail})
@@ -266,13 +278,14 @@ def _selftest():
               {"url": "u3", "method": "GET", "vuln_class": "bac", "role": "user_a"},
               {"url": "u3", "method": "GET", "vuln_class": "bac", "role": "user_b"},
           ],
-          "tested": {"GET|u1||idor": 1.0, "POST|u1||idor": 1.0},
-          "tested_checks": {"GET|u1||idor": ["horizontal_idor"]},
+          "tested": {"GET|u1||idor|": 1.0, "POST|u1||idor|": 1.0},
+          "tested_checks": {"GET|u1||idor|": ["horizontal_idor"], "GET|u1||idor": ["horizontal_idor"]},
           "candidates": [{"url": "u2", "vuln_class": "idor", "severity": "high",
                           "proof_note": "B read A order"}],
           "confirmed": [],
           "test_plan": {"cases": [
-              {"method": "GET", "endpoint": "u3", "category": "bac", "status": "tested"},
+              {"method": "GET", "endpoint": "u3", "category": "bac", "role": "user_a", "status": "tested"},
+              {"method": "GET", "endpoint": "u3", "category": "bac", "role": "user_b", "status": "tested"},
           ]}}
     json.dump(st, open(os.path.join(base, "acme", "state.json"), "w"))
     r = report("acme", base)
@@ -285,9 +298,18 @@ def _selftest():
     # xss: 1 total, 0 tested — testing GET u1 for idor does NOT count as xss
     assert r["coverage_by_class"]["xss"]["total"] == 1, r["coverage_by_class"]["xss"]
     assert r["coverage_by_class"]["xss"]["tested"] == 0, r["coverage_by_class"]["xss"]
-    # bac: 2 total, 2 tested via test_plan
+    # bac: 2 total — each role tested separately via per-role test_plan cases
     assert r["coverage_by_class"]["bac"]["total"] == 2, r["coverage_by_class"]["bac"]
     assert r["coverage_by_class"]["bac"]["tested"] == 2, r["coverage_by_class"]["bac"]
+    # Exact coverage: a roleless plan case must NOT credit a role-specific surface item
+    st2 = dict(st)
+    st2["test_plan"] = {"cases": [
+        {"method": "GET", "endpoint": "u3", "category": "bac", "status": "tested"},
+    ]}
+    json.dump(st2, open(os.path.join(base, "acme", "state.json"), "w"))
+    r2 = report("acme", base)
+    assert r2["coverage_by_class"]["bac"]["tested"] == 0, \
+        f"roleless plan case must NOT credit role-specific surface: {r2['coverage_by_class']['bac']}"
     # Per-role
     assert "user_a" in r["coverage_by_role"], r["coverage_by_role"]
     assert "user_b" in r["coverage_by_role"], r["coverage_by_role"]

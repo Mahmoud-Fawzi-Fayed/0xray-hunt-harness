@@ -266,22 +266,22 @@ def run_tests():
                 "PASS" if get_items and patch_items else "FAIL",
                 f"{len(get_items)} GET, {len(patch_items)} PATCH")
 
-        # T6.3: mark_tested then verify coverage
-        if wl:
-            eng.mark_tested(wl[0], checks=["test-check"])
+        # T6.3: Method isolation — marking GET must NOT cover PATCH on same URL
+        get_item = next((w for w in wl if w.get("method") == "GET" and "/api/" in w.get("url", "")), None)
+        patch_item = next((w for w in wl if w.get("method") == "PATCH" and "/api/" in w.get("url", "")), None)
+        if get_item and patch_item:
+            eng.mark_tested(get_item, checks=["test-check"])
             tested = eng.state.get("tested", {})
-            assert len(tested) >= 1
-            # Marking one item should NOT cover a different method on same URL
-            other = [w for w in wl if w.get("url") == wl[0].get("url") and w.get("method") != wl[0].get("method")]
-            if other:
-                key = ST._key(other[0]) if hasattr(ST, '_key') else None
-                if key and key not in tested:
-                    _record("T6.3", "Method isolation in coverage", "PASS")
-                else:
-                    _record("T6.3", "Method isolation in coverage", "PASS",
-                            "same-URL different-method not tested separately")
+            patch_key = ST.Engagement._key(patch_item)
+            if patch_key not in tested:
+                _record("T6.3", "Method isolation in coverage", "PASS",
+                        f"GET tested, PATCH key {patch_key!r} not in tested")
             else:
-                _record("T6.3", "Method isolation in coverage", "PASS", "no same-URL different-method pair")
+                _record("T6.3", "Method isolation in coverage", "FAIL",
+                        f"PATCH key {patch_key!r} wrongly marked tested by GET")
+        else:
+            _record("T6.3", "Method isolation in coverage", "FAIL",
+                    f"Missing GET/PATCH pair: GET={get_item is not None}, PATCH={patch_item is not None}")
 
         # T6.4: Coverage report
         import coverage as COV
@@ -314,13 +314,15 @@ def run_tests():
             _record("T8.1", "Playwright browser capture", "PASS",
                     f"{len(reqs)} requests, {len(api_reqs)} API endpoints")
 
-            # T8.2: Browser scope — no OOS requests through browser
+            # T8.2: Browser scope enforcement — pass actual scope object
             clear_oos_requests()
-            reqs2 = B.capture(BASE_URL, scope_hosts=["127.0.0.1"], wait=2)
+            from scope import Scope as SC
+            browser_scope = SC(["127.0.0.1"])
+            reqs2 = B.capture(BASE_URL, scope_hosts=["127.0.0.1"], scope=browser_scope, wait=2)
             oos_browser = get_oos_requests()
-            _record("T8.2", "Browser zero OOS requests",
+            _record("T8.2", "Browser scope enforcement",
                     "PASS" if len(oos_browser) == 0 else "FAIL",
-                    f"{len(oos_browser)} OOS requests")
+                    f"{len(oos_browser)} OOS requests, scope object passed")
 
         except ImportError:
             _record("T8.1", "Playwright browser capture", "BLOCKED", "playwright not installed")
@@ -342,8 +344,15 @@ def run_tests():
             "proof_note": "server version disclosed",
         }, program="vuln-local", base=base)
         accepted = result[0] if isinstance(result, tuple) else result
-        _record("T9.1", "Verify checks finding quality",
-                "PASS", f"result={accepted}")
+        if isinstance(accepted, dict):
+            is_rejected = accepted.get("accept") is False or accepted.get("verdict") == "DO_NOT_SUBMIT"
+            _record("T9.1", "Verify rejects weak finding",
+                    "PASS" if is_rejected else "FAIL",
+                    f"accept={accepted.get('accept')}, verdict={accepted.get('verdict')}")
+        else:
+            _record("T9.1", "Verify rejects weak finding",
+                    "PASS" if not accepted else "FAIL",
+                    f"result={accepted}")
 
         # ============================================================
         # SECTION 10: OOS sink final check

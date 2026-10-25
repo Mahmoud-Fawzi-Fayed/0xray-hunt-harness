@@ -162,7 +162,7 @@ class Engagement:
 
     def _tested_map(self):
         """{key: epoch_ts} from either the current dict form or a legacy list[str] (ts=0 => eligible).
-        Indexes both new 4-field (METHOD|url|param|class) and legacy 3-field (url|param|class) keys
+        Indexes 5-field (METHOD|url|params|class|role), 4-field, and legacy 3-field keys
         so worklist lookups work regardless of which format the key was stored in."""
         t = self.state.get("tested")
         out = {}
@@ -171,10 +171,16 @@ class Engagement:
                 ts = _as_epoch(v)
                 out[str(k)] = ts
                 parts = str(k).split("|")
-                if len(parts) == 4:
-                    legacy = "|".join(parts[1:])
-                    if legacy not in out:
-                        out[legacy] = ts
+                if len(parts) >= 5:
+                    # 5-field: also index as 4-field (no role) for compat
+                    legacy4 = "|".join(parts[:4])
+                    if legacy4 not in out:
+                        out[legacy4] = ts
+                elif len(parts) == 4:
+                    # 4-field: promote to 5-field with empty role for lookup
+                    promoted = k + "|"
+                    if promoted not in out:
+                        out[promoted] = ts
                 elif len(parts) == 3:
                     out[k] = ts
         elif isinstance(t, list):
@@ -223,7 +229,15 @@ class Engagement:
 
     @staticmethod
     def _key(s):
-        return f"{s.get('method','GET')}|{s['url']}|{s.get('param','')}|{s.get('vuln_class','')}"
+        """5-field key: method|url|params|vuln_class|role — matches testplan.state_key().
+        Params are comma-joined (not pipe) to avoid ambiguity with the field delimiter."""
+        params = s.get("params") or []
+        if not params and s.get("param"):
+            params = [s["param"]]
+        param_str = ",".join(sorted(params)) if params else ""
+        role = s.get("role", "")
+        return f"{s.get('method','GET')}|{s['url']}|{param_str}|{s.get('vuln_class','')}" \
+               f"|{role}"
 
     @staticmethod
     def _legacy_key(s):
@@ -231,7 +245,7 @@ class Engagement:
 
     @staticmethod
     def _pat_key(s):
-        return (s.get("method", "GET"), url_pattern(s.get("url", "")), s.get("param") or "", s.get("vuln_class") or "")
+        return (s.get("method", "GET"), url_pattern(s.get("url", "")), s.get("param") or "", s.get("vuln_class") or "", s.get("role") or "")
 
     def mark_tested(self, item, checks=None):
         k = self._key(item)
@@ -315,7 +329,7 @@ def _selftest():
         assert all(s["url"] != "http://t/b" or s.get("param") != "q" for s in e.worklist())
         # re-hunt window: a stale tested item becomes eligible again (no permanent idling)
         globals()["RETEST_HOURS"] = 0.0001
-        e.state["tested"]["GET|http://t/b|q|xss"] = time.time() - 3600   # tested an hour ago
+        e.state["tested"]["GET|http://t/b|q|xss|"] = time.time() - 3600   # tested an hour ago
         e.save()
         assert any(s.get("url") == "http://t/b" for s in e.worklist()), "stale item must re-queue"
         # coverage-first: the UNTESTED item (t/a, pri 5) must out-rank the STALE re-test (t/b, pri 9)

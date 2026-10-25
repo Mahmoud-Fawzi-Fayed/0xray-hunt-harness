@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-25T10:03:09Z",
+  "timestamp": "2026-10-25T10:40:42Z",
   "pass": 26,
   "fail": 0,
   "blocked": 0,
@@ -123,7 +123,7 @@
       "id": "T6.3",
       "name": "Method isolation in coverage",
       "status": "PASS",
-      "detail": "no same-URL different-method pair"
+      "detail": "GET tested, PATCH key 'PATCH|http://127.0.0.1:19877/api/users/1|id,name||' not in tested"
     },
     {
       "id": "T6.4",
@@ -145,15 +145,15 @@
     },
     {
       "id": "T8.2",
-      "name": "Browser zero OOS requests",
+      "name": "Browser scope enforcement",
       "status": "PASS",
-      "detail": "0 OOS requests"
+      "detail": "0 OOS requests, scope object passed"
     },
     {
       "id": "T9.1",
-      "name": "Verify checks finding quality",
+      "name": "Verify rejects weak finding",
       "status": "PASS",
-      "detail": "result={'verdict': 'DO_NOT_SUBMIT', 'score': 55, 'program': 'vuln-local', 'vuln_class': 'info-disclosure', 'severity': 'info', 'url': 'http://127.0.0.1:19877/api/users/1', 'checks': [{'check': 'has repro steps', 'pass': False, 'note': 'add numbered reproduction steps', 'fix': \"Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\"}, {'check': 'has PoC / evidence', 'pass': True, 'note': ''}, {'check': 'has impact stated', 'pass': False, 'note': 'state the concrete security impact', 'fix': \"State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any authenticated user can read any other user's invoices (PII: name, address, amount)'.\"}, {'check': 'required fields present', 'pass': False, 'note': 'missing: title', 'fix': 'Address the note on this check, then re-verify.'}, {'check': 'in scope', 'pass': True, 'note': ''}, {'check': 'class is qualifying', 'pass': True, 'note': ''}, {'check': 'not an always-rejected class', 'pass': False, 'note': 'always-rejected: version/banner disclosure without exploit', 'fix': 'This pattern is always rejected as-is. The only way through: chain it to a demonstrated higher impact (e.g. self-XSS \u2192 stored XSS hitting other users) and show the full chain working.'}, {'check': 'disposition (not RTFS / Informative)', 'pass': True, 'note': ''}, {'check': 'PoC minimum', 'pass': True, 'note': 'unknown class \u2014 ensure the PoC proves real impact'}, {'check': 'dedup (not a known duplicate)', 'pass': True, 'note': 'dedup verdict: UNKNOWN'}, {'check': 'demonstrated (concrete proof, not hypothetical)', 'pass': False, 'note': \"show it FIRING: attach the request+RESPONSE (or a screenshot / HAR / the returned data). Prose like 'an attacker could\u2026' with no response or artifact is not proof.\", 'fix': 'Address the note on this check, then re-verify.'}], 'failed': ['has repro steps', 'has impact stated', 'required fields present', 'not an always-rejected class', 'demonstrated (concrete proof, not hypothetical)'], 'missing': ['title'], 'how_to_fix': [{'check': 'has repro steps', 'fix': \"Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\"}, {'check': 'has impact stated', 'fix': \"State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any authenticated user can read any other user's invoices (PII: name, address, amount)'.\"}, {'check': 'required fields present', 'fix': 'Address the note on this check, then re-verify.'}, {'check': 'not an always-rejected class', 'fix': 'This pattern is always rejected as-is. The only way through: chain it to a demonstrated higher impact (e.g. self-XSS \u2192 stored XSS hitting other users) and show the full chain working.'}, {'check': 'demonstrated (concrete proof, not hypothetical)', 'fix': 'Address the note on this check, then re-verify.'}], 'dedup': {'verdict': 'UNKNOWN', 'score': 0.0, 'matches': [], 'corpus_size': 0}, 'accept': False, 'summary': {'verdict': 'DO_NOT_SUBMIT', 'why': \"Would likely be closed (RTFS / Informative / N/A): has repro steps (add numbered reproduction steps); has impact stated (state the concrete security impact); required fields present (missing: title); not an always-rejected class (always-rejected: version/banner disclosure without exploit); demonstrated (concrete proof, not hypothetical) (show it FIRING: attach the request+RESPONSE (or a screenshot / HAR / the returned data). Prose like 'an attacker could\u2026' with no response or artifact is not proof.)\", 'next': \"Do NOT submit as-is. Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\", 'how_to_fix': [\"Add numbered steps a stranger can follow: exact URL + params, the account role used, what to click/send, and the before/after. e.g. '1) login as user A 2) POST /api/x with {...} 3) observe Y in the response'.\", \"State WHO is affected and WHAT the attacker gets, in one sentence: e.g. 'any authenticated user can read any other user's invoices (PII: name, address, amount)'.\", 'Address the note on this check, then re-verify.', 'This pattern is always rejected as-is. The only way through: chain it to a demonstrated higher impact (e.g. self-XSS \u2192 stored XSS hitting other users) and show the full chain working.', 'Address the note on this check, then re-verify.']}}"
+      "detail": "accept=False, verdict=DO_NOT_SUBMIT"
     },
     {
       "id": "T10.1",

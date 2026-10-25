@@ -1519,9 +1519,13 @@ class Engine:
                     self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
                                   f"host(s): {', '.join(oos)} (flagged)") if oos
                                  else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
-                # Candidate awaits validate phase — mark tested but plan stays "tested" not "confirmed"
-                self.eng.mark_tested(it)
-                _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
+                # Candidate awaits validate phase — mark tested only with execution proof
+                if f.get("request") or f.get("tool_calls"):
+                    self.eng.mark_tested(it)
+                    _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
+                else:
+                    self.eng.log(f"hunt: candidate at {it['url']} lacks request/tool evidence — not marking tested")
+                    _plan_status = ("blocked", "candidate found but no execution evidence recorded")
             elif f and f.get("skipped"):
                 self.eng.log(f"hunt: skipped {it.get('vuln_class')}@{it['url']} — {f['skipped']}")
                 _plan_status = ("blocked", f.get("skipped") or "skipped by hunt agent")
@@ -1548,8 +1552,7 @@ class Engine:
                         continue
                     analysis = (str(analysis) + "\n" + line).strip()
                 has_execution_evidence = bool(
-                    classes or
-                    (isinstance(f, dict) and (f.get("request") or f.get("_model") or f.get("tool_calls")))
+                    isinstance(f, dict) and (f.get("request") or f.get("tool_calls"))
                 )
                 if analysis and has_execution_evidence:
                     self.eng.mark_tested(it)
@@ -1899,7 +1902,7 @@ class Engine:
             url = it.get("url") or ""
             if not (_skip_static_url(url) or (skip_junk and _REVIEW_JUNK.search(url))):
                 continue
-            key = f"{url}|{it.get('param','')}|{it.get('vuln_class','')}"
+            key = self.eng._key(it)
             if key in tested:
                 continue
             self.eng.mark_tested(it)

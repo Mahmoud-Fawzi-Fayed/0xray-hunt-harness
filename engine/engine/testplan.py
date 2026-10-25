@@ -11,6 +11,7 @@ CLI:
   python3 engine/engine/testplan.py selftest
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -295,6 +296,17 @@ def build_test_plan(feature_map, state=None, scope=None):
 
     cases = generate_test_cases(endpoints, tested_checks)
 
+    # Integrate ownership/authorization test cases when identities are available
+    identities = feature_map.get("identities") or []
+    if identities:
+        auth_cases = generate_auth_tests(endpoints, identities)
+        existing_ids = {state_key(c) for c in cases}
+        for ac in auth_cases:
+            sk = state_key(ac)
+            if sk not in existing_ids:
+                cases.append(ac)
+                existing_ids.add(sk)
+
     by_category = {}
     for c in cases:
         by_category.setdefault(c["category"], []).append(c)
@@ -374,14 +386,28 @@ def _render_markdown(cases, summary, slug, scope=None):
 
 
 def state_key(case):
-    """Convert a test case to a unique state key: method|url|params|category|role."""
+    """Convert a test case to a unique state key: method|url|params|category|role.
+    Params are comma-joined (not pipe) to avoid ambiguity with the field delimiter."""
     url = case.get("endpoint", "")
     method = case.get("method", "GET")
     params = case.get("params") or []
-    param = "|".join(sorted(params)) if params else ""
+    param = ",".join(sorted(params)) if params else ""
     category = case.get("category", "")
     role = case.get("role", "")
     return f"{method}|{url}|{param}|{category}|{role}"
+
+
+def case_id(case):
+    """Stable hash-based identifier for a test case. Collision-free across method, url,
+    params, category, and role. Returns a 16-char hex digest (64-bit)."""
+    canonical = json.dumps({
+        "method": (case.get("method") or "GET").upper(),
+        "url": case.get("endpoint") or case.get("url") or "",
+        "params": sorted(case.get("params") or []),
+        "category": case.get("category") or case.get("vuln_class") or "",
+        "role": case.get("role") or "",
+    }, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 VALID_STATUSES = {"pending", "running", "tested", "blocked", "inconclusive", "disproved", "confirmed"}
@@ -685,13 +711,29 @@ def _selftest(_a=None):
 
     # state_key bridge
     sk = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
-    assert sk == "POST|https://a.com/x|id|idor|", sk
+    assert sk == "POST|https://a.com/x|id|idor|", f"got: {sk}"
     # multi-param + role: keys must not collide
     sk2 = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id", "name"], "category": "idor"})
     sk3 = state_key({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor", "role": "admin"})
     assert sk2 != sk, "multi-param key must differ from single-param"
     assert sk3 != sk, "role key must differ from no-role"
-    assert "id|name" in sk2, sk2
+
+    # case_id: stable hash, collision-free
+    cid1 = case_id({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
+    cid2 = case_id({"endpoint": "https://a.com/x", "method": "POST", "params": ["id", "name"], "category": "idor"})
+    cid3 = case_id({"endpoint": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor", "role": "admin"})
+    cid4 = case_id({"endpoint": "https://a.com/x", "method": "GET", "params": ["id"], "category": "idor"})
+    assert len(cid1) == 16 and all(c in "0123456789abcdef" for c in cid1), f"bad case_id format: {cid1}"
+    assert cid1 != cid2, "multi-param case_id must differ"
+    assert cid1 != cid3, "role case_id must differ"
+    assert cid1 != cid4, "method case_id must differ"
+    # param order doesn't matter
+    cid5 = case_id({"endpoint": "https://a.com/x", "method": "POST", "params": ["name", "id"], "category": "idor"})
+    assert cid2 == cid5, "param order must not affect case_id"
+    # url/endpoint aliases produce same id
+    cid6 = case_id({"url": "https://a.com/x", "method": "POST", "params": ["id"], "category": "idor"})
+    assert cid1 == cid6, "url and endpoint must produce same case_id"
+    assert "id,name" in sk2, sk2
     assert sk3.endswith("|admin"), sk3
 
     # execute_plan with mock runner (evidence must pass validation)
