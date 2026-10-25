@@ -1373,21 +1373,26 @@ class Engine:
             for c in pending:
                 sk = TP.state_key(c)
                 _plan_index[sk] = c
+                params = c.get("params") or []
                 item = {
                     "url": c.get("endpoint", ""),
                     "method": c.get("method", "GET"),
-                    "param": (c.get("params") or [""])[0],
+                    "param": params[0] if params else "",
+                    "params": params,
+                    "role": c.get("role", ""),
                     "vuln_class": c.get("category", "deep"),
                     "source": "test-plan",
                     "priority": prio_order.get(c.get("priority", "low"), 3),
+                    "_plan_key": sk,
                 }
-                ik = (item["url"], item["method"], item["param"], item["vuln_class"])
-                if ik not in plan_keys and item["url"]:
-                    plan_keys.add(ik)
+                if sk not in plan_keys and item["url"]:
+                    plan_keys.add(sk)
                     plan_items.append(item)
             raw_wl = self.eng.worklist()
             other_items = [it for it in raw_wl
-                           if (it.get("url", ""), it.get("method", "GET"), it.get("param", ""), it.get("vuln_class", ""))
+                           if TP.state_key({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
+                                            "params": it.get("params") or ([it["param"]] if it.get("param") else []),
+                                            "category": it.get("vuln_class", ""), "role": it.get("role", "")})
                            not in plan_keys]
             wl = (plan_items + other_items)[: self.max_hunts]
             self.eng.log(f"hunt: {len(plan_items)} cases from test plan, {len(other_items)} extra from worklist")
@@ -1529,17 +1534,21 @@ class Engine:
                                      "— authz.py diff and netget --as B were not run")
                         continue
                     analysis = (str(analysis) + "\n" + line).strip()
-                self.eng.mark_tested(it)
-                _plan_status = ("tested", (f or {}).get("analysis") or "tested — no vulnerability found")
+                if analysis:
+                    self.eng.mark_tested(it)
+                    _plan_status = ("tested", analysis[:300])
+                else:
+                    self.eng.log(f"hunt: no analysis returned for {it.get('vuln_class')}@{it['url']} — left untested")
                 self.eng.note_hunt(it, analysis, classes)
                 self._remember(it, analysis, classes, result="nothing", finding=f)
                 tail = f" — {str(analysis)[:160]}" if analysis else ""
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}{tail}")
             # --- update test plan case status ---
             if _plan_status and self._plan_index:
-                _sk = TP.state_key({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
-                                    "params": [it["param"]] if it.get("param") else [],
-                                    "category": it.get("vuln_class", "")})
+                _sk = it.get("_plan_key") or TP.state_key({
+                    "endpoint": it.get("url", ""), "method": it.get("method", "GET"),
+                    "params": it.get("params") or ([it["param"]] if it.get("param") else []),
+                    "category": it.get("vuln_class", ""), "role": it.get("role", "")})
                 _pc = self._plan_index.get(_sk)
                 if _pc:
                     try:

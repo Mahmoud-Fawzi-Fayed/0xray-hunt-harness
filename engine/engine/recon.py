@@ -103,12 +103,16 @@ except ImportError:                          # stdlib fallback
         if _impersonating():
             return _get_impersonate(url, timeout)
         try:
+            class _ScopeRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    if _recon_scope and not _recon_scope.in_scope_host(newurl):
+                        return None
+                    return super().redirect_request(req, fp, code, msg, headers, newurl)
+            opener = urllib.request.build_opener(_ScopeRedirectHandler)
             req = urllib.request.Request(url, headers={"User-Agent": _ua(), "Accept-Encoding": "gzip"})
-            r = urllib.request.urlopen(req, timeout=timeout)
+            r = opener.open(req, timeout=timeout)
             data = r.read()
             final_url = r.geturl()
-            if _recon_scope and final_url != url and not _recon_scope.in_scope_host(final_url):
-                return "", url, {}
             if r.headers.get("Content-Encoding") == "gzip":
                 data = gzip.decompress(data)
             return data.decode("utf-8", "replace"), final_url, {k.lower(): v for k, v in r.headers.items()}
