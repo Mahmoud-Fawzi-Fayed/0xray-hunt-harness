@@ -2,16 +2,32 @@
   "harness_version": "10.0",
   "generated": "2026-10-26T15:30:00Z",
   "baseline_tag": "baseline-pre-release",
-  "head_commit": "53e34ea",
-  "selftest_modules": {"passed": 63, "failed": 0, "total": 63},
-  "e2e_comprehensive": {"passed": 27, "failed": 0, "blocked": 0, "total": 27},
-  "policy_egress": {"passed": 10, "failed": 0, "total": 10},
-  "evidence_pipeline": {"passed": 9, "failed": 0, "total": 9},
+  "head_commit": "ee2eccb",
+  "selftest_modules": {
+    "passed": 63,
+    "failed": 0,
+    "total": 63
+  },
+  "e2e_comprehensive": {
+    "passed": 27,
+    "failed": 0,
+    "blocked": 0,
+    "total": 27
+  },
+  "policy_egress": {
+    "passed": 10,
+    "failed": 0,
+    "total": 10
+  },
+  "evidence_pipeline": {
+    "passed": 9,
+    "failed": 0,
+    "total": 9
+  },
   "oos_requests_total": 0,
-
   "requirements": {
     "P0_1_cli_policy_enforcement": {
-      "section": "§1",
+      "section": "\u00a71",
       "title": "Standalone CLI tools load a policy before any request",
       "priority": "P0",
       "status": "PASS",
@@ -27,7 +43,7 @@
       ]
     },
     "P0_2_browser_cli_policy": {
-      "section": "§2",
+      "section": "\u00a72",
       "title": "browser.py CLI requires scope policy, exits nonzero without it",
       "priority": "P0",
       "status": "PASS",
@@ -38,7 +54,7 @@
       ]
     },
     "P0_3_safe_redirects": {
-      "section": "§3",
+      "section": "\u00a73",
       "title": "Safe redirect following with per-hop scope re-authorization",
       "priority": "P0",
       "status": "PASS",
@@ -51,7 +67,7 @@
       ]
     },
     "P0_4_deterministic_ab_auth": {
-      "section": "§4",
+      "section": "\u00a74",
       "title": "Deterministic A/B authorization from test plan",
       "priority": "P0",
       "status": "PASS",
@@ -64,7 +80,7 @@
       ]
     },
     "P0_5_evidence_pipeline": {
-      "section": "§5",
+      "section": "\u00a75",
       "title": "Transport-recorded evidence pipeline with append-only storage",
       "priority": "P0",
       "status": "PASS",
@@ -79,7 +95,7 @@
       ]
     },
     "P0_6_phase_states": {
-      "section": "§6",
+      "section": "\u00a76",
       "title": "Explicit phase statuses with dependency checking and failure propagation",
       "priority": "P0",
       "status": "PASS",
@@ -92,7 +108,7 @@
       ]
     },
     "P1_7_discovery_reliability": {
-      "section": "§7",
+      "section": "\u00a77",
       "title": "Discovery coverage metric and source provenance",
       "priority": "P1",
       "status": "PASS",
@@ -104,7 +120,7 @@
       ]
     },
     "P1_8_runtime_permissions": {
-      "section": "§8",
+      "section": "\u00a78",
       "title": "Runtime capability and permission correctness",
       "priority": "P1",
       "status": "PASS",
@@ -116,7 +132,7 @@
       ]
     },
     "P1_9_auth_lifecycle": {
-      "section": "§9",
+      "section": "\u00a79",
       "title": "Authorization, authentication and identity lifecycle",
       "priority": "P1",
       "status": "PASS",
@@ -128,7 +144,7 @@
       ]
     },
     "P1_10_detection_quality": {
-      "section": "§10",
+      "section": "\u00a710",
       "title": "Detection, triage and anti-duplicate quality",
       "priority": "P1",
       "status": "PASS",
@@ -141,7 +157,7 @@
       ]
     },
     "P1_11_ci_quality": {
-      "section": "§11",
+      "section": "\u00a711",
       "title": "CI pipeline with comprehensive test suites",
       "priority": "P1",
       "status": "PASS",
@@ -155,7 +171,7 @@
       ]
     },
     "P2_12_usability_docs": {
-      "section": "§12",
+      "section": "\u00a712",
       "title": "Usability, observability, documentation, performance",
       "priority": "P2",
       "status": "PASS",
@@ -169,7 +185,7 @@
       ]
     },
     "safety_oos_zero": {
-      "section": "§SAFETY",
+      "section": "\u00a7SAFETY",
       "title": "Zero out-of-scope requests in adversarial test suite",
       "priority": "P0",
       "status": "PASS",
@@ -180,19 +196,44 @@
       ]
     }
   },
-
   "deliverables": {
-    "release_contract": {"file": "docs/RELEASE-CONTRACT.md", "status": "COMPLETE"},
-    "threat_model": {"file": "docs/THREAT-MODEL.md", "status": "COMPLETE"},
-    "test_case_schema": {"file": "docs/TEST-CASE-SCHEMA.md", "status": "COMPLETE"},
-    "evidence_schema": {"file": "docs/EVIDENCE-SCHEMA.md", "status": "COMPLETE"},
-    "operator_runbook": {"file": "docs/OPERATOR-RUNBOOK.md", "status": "COMPLETE"},
-    "release_gate_json": {"file": "artifacts/release-validation/release-gate.json", "status": "COMPLETE"},
-    "e2e_results": {"file": "artifacts/release-validation/e2e-comprehensive-results.json", "status": "COMPLETE"},
-    "policy_egress_results": {"file": "artifacts/release-validation/policy-egress-results.json", "status": "COMPLETE"},
-    "evidence_pipeline_results": {"file": "artifacts/release-validation/evidence-pipeline-results.json", "status": "COMPLETE"}
+    "release_contract": {
+      "file": "docs/RELEASE-CONTRACT.md",
+      "status": "COMPLETE"
+    },
+    "threat_model": {
+      "file": "docs/THREAT-MODEL.md",
+      "status": "COMPLETE"
+    },
+    "test_case_schema": {
+      "file": "docs/TEST-CASE-SCHEMA.md",
+      "status": "COMPLETE"
+    },
+    "evidence_schema": {
+      "file": "docs/EVIDENCE-SCHEMA.md",
+      "status": "COMPLETE"
+    },
+    "operator_runbook": {
+      "file": "docs/OPERATOR-RUNBOOK.md",
+      "status": "COMPLETE"
+    },
+    "release_gate_json": {
+      "file": "artifacts/release-validation/release-gate.json",
+      "status": "COMPLETE"
+    },
+    "e2e_results": {
+      "file": "artifacts/release-validation/e2e-comprehensive-results.json",
+      "status": "COMPLETE"
+    },
+    "policy_egress_results": {
+      "file": "artifacts/release-validation/policy-egress-results.json",
+      "status": "COMPLETE"
+    },
+    "evidence_pipeline_results": {
+      "file": "artifacts/release-validation/evidence-pipeline-results.json",
+      "status": "COMPLETE"
+    }
   },
-
   "gate_verdict": "PASS",
   "gate_notes": "All P0 safety fixes verified. All P1 quality gates pass. Zero OOS requests across all test suites. 63/63 selftests, 46/46 integration tests. LIKELY_DUP hard gate enforced in report(). netget.py --help UX fixed. All deliverable docs complete."
 }
