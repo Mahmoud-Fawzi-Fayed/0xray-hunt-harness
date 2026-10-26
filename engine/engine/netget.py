@@ -34,6 +34,7 @@ _SCOPE_GUARD = None  # Scope instance or None (disabled)
 
 # Evidence pipeline — auto-record HTTP observations when an engagement dir is set
 _EVIDENCE_DIR = None
+_CURRENT_CASE_ID = threading.local()
 
 
 def set_evidence_dir(path):
@@ -41,15 +42,25 @@ def set_evidence_dir(path):
     _EVIDENCE_DIR = path
 
 
+def set_current_case(case_id):
+    _CURRENT_CASE_ID.value = case_id
+
+
+def clear_current_case():
+    _CURRENT_CASE_ID.value = None
+
+
 def _record_obs(method, url, req_headers, resp_status, resp_body, ident):
-    if not _EVIDENCE_DIR or resp_status <= 0:
+    edir = _EVIDENCE_DIR or os.environ.get("HUNT_EVIDENCE_DIR")
+    if not edir or resp_status <= 0:
         return
     try:
         import evidence as EV
+        case_id = getattr(_CURRENT_CASE_ID, "value", None)
         EV.record_observation(
-            _EVIDENCE_DIR, method.upper(), url,
+            edir, method.upper(), url,
             req_headers=req_headers, resp_status=resp_status, resp_body=resp_body,
-            identity=ident,
+            identity=ident, case_id=case_id,
             policy_id=getattr(_SCOPE_GUARD, "name", None))
     except Exception:  # noqa: BLE001
         pass
@@ -354,6 +365,11 @@ def _main(argv):
         method, url, body = "GET", pos[0], None
     else:
         method, url, body = pos[0], pos[1], (pos[2] if len(pos) > 2 else None)
+    # Initialize evidence dir from environment for subprocess capture
+    if os.environ.get("HUNT_EVIDENCE_DIR") and not _EVIDENCE_DIR:
+        set_evidence_dir(os.environ["HUNT_EVIDENCE_DIR"])
+    if os.environ.get("HUNT_CASE_ID"):
+        set_current_case(os.environ["HUNT_CASE_ID"])
     # Load scope guard before any request — fail-closed for non-localhost
     if not _is_localhost(url):
         if not _load_scope_for_cli(scope_file=scope_file, slug=slug):

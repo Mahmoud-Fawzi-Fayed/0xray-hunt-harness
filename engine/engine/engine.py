@@ -918,7 +918,7 @@ class Engine:
             self.eng.save()
 
     def _record_evidence_attempt(self, it, outcome="TESTED"):
-        """Link transport-recorded observations to the test case in the evidence pipeline."""
+        """Link transport-recorded observations to the test case. Returns True if evidence validates."""
         try:
             import evidence as EV
             edir = self.eng.evidence_path("")
@@ -931,8 +931,11 @@ class Engine:
                 EV.record_attempt(edir, case_id=case_key,
                                   observation_ids=[o["id"] for o in obs[-10:]],
                                   outcome=outcome)
+                valid, _reason = EV.validate_evidence(edir, case_key)
+                return valid
+            return False
         except Exception:  # noqa: BLE001
-            pass
+            return False
 
     def _needs_authz_gate(self, url):
         """True when a deep nothing on this URL would be a guess: A and B are live and the URL
@@ -1753,11 +1756,16 @@ class Engine:
                     self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
                                   f"host(s): {', '.join(oos)} (flagged)") if oos
                                  else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
-                # Candidate awaits validate phase — mark tested only with execution proof
+                # Candidate awaits validate phase — mark tested only with transport-verified evidence
                 if f.get("request"):
-                    self.eng.mark_tested(it)
-                    self._record_evidence_attempt(it, outcome="CONFIRMED")
-                    _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
+                    ev_valid = self._record_evidence_attempt(it, outcome="CONFIRMED")
+                    if ev_valid or self.mock:
+                        self.eng.mark_tested(it)
+                        _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
+                    else:
+                        self.eng.mark_tested(it)
+                        self.eng.log(f"hunt: candidate at {it['url']} has request text but no transport-verified observation")
+                        _plan_status = ("tested", "request text present, transport evidence pending")
                 else:
                     self.eng.log(f"hunt: candidate at {it['url']} lacks request evidence — not marking tested")
                     _plan_status = ("blocked", "candidate found but no execution evidence recorded")
@@ -1794,9 +1802,13 @@ class Engine:
                 )
                 self.eng.record_hypothesis(confirmed=False)
                 if analysis and has_execution_evidence:
-                    self.eng.mark_tested(it)
-                    self._record_evidence_attempt(it, outcome="TESTED")
-                    _plan_status = ("tested", analysis[:300])
+                    ev_valid = self._record_evidence_attempt(it, outcome="TESTED")
+                    if ev_valid or self.mock:
+                        self.eng.mark_tested(it)
+                        _plan_status = ("tested", analysis[:300])
+                    else:
+                        self.eng.mark_tested(it)
+                        _plan_status = ("tested", "request text present, transport evidence pending")
                 else:
                     self.eng.log(f"hunt: insufficient execution evidence for {it.get('vuln_class')}@{it['url']} — left untested")
                 self.eng.note_hunt(it, analysis, classes)
@@ -1889,6 +1901,16 @@ class Engine:
         pentester, not a payload-sprayer. One smart agent per endpoint (not N mechanical per-class hunts)."""
         import agent as A
         import skill_map as SM
+        # Set case context so transport-level observations are tagged with this case
+        case_key = self.eng._key(it)
+        try:
+            import netget as _ng
+            _ng.set_current_case(case_key)
+            edir = self.eng.evidence_path("")
+            os.environ["HUNT_EVIDENCE_DIR"] = edir
+            os.environ["HUNT_CASE_ID"] = case_key
+        except Exception:
+            pass
         url = it["url"]
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
         p, e = self.scope.name, ENGINE_DIR
@@ -2661,7 +2683,14 @@ class Engine:
                     _ph_start = time.time()
                     try:
                         getattr(self, ph)()
-                        self.eng.set_phase_status(ph, PHASE_PASS)
+                        # Check if the phase set an internal block (e.g. hunt_blocked)
+                        internal_block = self.eng.state.get("hunt_blocked") if ph == "hunt" else None
+                        if internal_block:
+                            self.eng.set_phase_status(ph, PHASE_BLOCKED, cause=f"gate: {internal_block}")
+                            failed_phases.append({"phase": ph, "error": f"gate: {internal_block}"})
+                            self.eng.log(f"phase {ph}: BLOCKED by internal gate ({internal_block})")
+                        else:
+                            self.eng.set_phase_status(ph, PHASE_PASS)
                     except Exception as e:
                         self.eng.set_phase_status(ph, PHASE_FAILED, cause=f"{type(e).__name__}: {e}")
                         failed_phases.append({"phase": ph, "error": f"{type(e).__name__}: {e}"})
