@@ -32,6 +32,14 @@ cat ~/.bughunter-engagements/<slug>/report.md
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BUGHUNTER_BASE` | `~/.bughunter-engagements` | Base directory for all engagements |
+| `HUNT_USER_AGENT` | (required) | SOC-tagging User-Agent header for all requests |
+| `HUNT_PROXY` | unset | HTTP(S)/SOCKS5 proxy URL for egress |
+| `HUNT_IMPERSONATE` | `safari_ios` | curl_cffi TLS impersonation profile |
+| `HUNT_MAX_REQUESTS` | `5000` | Per-engagement request budget |
+| `HUNT_REQUESTS_PER_SECOND` | `10` | Rate limit (requests per second) |
+| `HUNT_REQUEST_TIMEOUT` | `30` | Default request timeout in seconds |
+| `HUNT_MAX_REDIRECTS` | `5` | Maximum redirect hops for `follow_redirects()` |
+| `HUNT_RETEST_HOURS` | `48` | Re-hunt window (hours since last test) |
 | `HUNT_MAX_ACCOUNTS` | `3` | Max accounts created per program |
 | `HUNT_SKIP_COVERAGE_GATE` | unset | Set to `1` to bypass 80% coverage gate |
 | `HUNT_SKIP_AUTH_GATE` | unset | Set to `1` to bypass auth-wall gate |
