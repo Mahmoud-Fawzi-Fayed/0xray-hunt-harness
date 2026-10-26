@@ -370,7 +370,22 @@ def _main(argv=None):
         return _selftest()
     if a.slug:
         os.environ.setdefault("HUNT_TARGET_SLUG", a.slug)
-    reqs = capture(a.url, slug=a.slug, ident=a.ident, scope_hosts=a.scope or None, wait=a.wait)
+    _scope_obj = None
+    if a.slug:
+        try:
+            from scope import Scope as _Scope
+            _base = os.path.expanduser(os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements"))
+            _tgt = os.path.join(_base, "_targets", a.slug + ".json")
+            if os.path.isfile(_tgt):
+                _scope_obj = _Scope.load(_tgt)
+        except Exception:
+            pass
+    if not _scope_obj and a.scope:
+        _scope_obj = {"in_scope": a.scope}
+    if not _scope_obj and not a.scope:
+        print("WARNING: no --scope or --slug — browser requests are NOT scope-enforced", file=sys.stderr)
+    reqs = capture(a.url, slug=a.slug, ident=a.ident, scope_hosts=a.scope or None,
+                   wait=a.wait, scope=_scope_obj)
     xhr = [r for r in reqs if r.get("type") in ("xhr", "fetch")]
     print(json.dumps(reqs, indent=2))
     print(f"\ncaptured {len(reqs)} request(s), {len(xhr)} XHR/fetch — feed the API ones to authz.py / the worklist.",

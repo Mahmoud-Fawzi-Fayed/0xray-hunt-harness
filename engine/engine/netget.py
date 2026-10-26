@@ -134,6 +134,16 @@ def reset_request_count():
     _request_count = 0
 
 
+def _is_localhost(url):
+    """True when the URL targets a loopback address (selftest, local dev)."""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
+    except Exception:
+        return False
+
+
 def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, slug=None, allow_redirects=False):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
@@ -143,6 +153,8 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         reason = _SCOPE_GUARD.reject_reason(url)
         if reason:
             return 0, "", {"_error": f"scope violation: {reason}"}
+    elif not _is_localhost(url):
+        return 0, "", {"_error": "no scope guard set — refusing non-localhost request (call set_scope_guard first)"}
     global _request_count
     _request_count += 1
     if _request_count > _MAX_REQUESTS:
@@ -266,16 +278,23 @@ def _selftest():
     assert code2 == 0 and "scope violation" in h2.get("_error", ""), f"expected out-of-scope block: {code2} {h2}"
     set_scope_guard(None)
 
-    # budget tracking
+    # fail-closed: no scope guard + non-localhost = blocked
+    code_fc, _, h_fc = get("https://example.com/test")
+    assert code_fc == 0 and "no scope guard" in h_fc.get("_error", ""), f"expected fail-closed block: {code_fc} {h_fc}"
+    # localhost is allowed without scope guard (selftest, local dev)
+    code_lo, _, h_lo = get("http://127.0.0.1:1/test", timeout=1)
+    assert "no scope guard" not in h_lo.get("_error", ""), f"localhost should not be blocked: {h_lo}"
+
+    # budget tracking (use localhost — scope guard not needed)
     global _request_count, _MAX_REQUESTS
     saved_count, saved_max = _request_count, _MAX_REQUESTS
     _request_count = 0
     _MAX_REQUESTS = 2
     assert request_count() == 0
-    get("https://httpbin.org/status/200", timeout=5)
+    get("http://127.0.0.1:1/status/200", timeout=1)
     assert request_count() >= 1
     _request_count = _MAX_REQUESTS + 1
-    code3, _, h3 = get("https://httpbin.org/status/200", timeout=5)
+    code3, _, h3 = get("http://127.0.0.1:1/status/200", timeout=1)
     assert code3 == 0 and "budget" in h3.get("_error", ""), f"expected budget block: {code3} {h3}"
     _request_count, _MAX_REQUESTS = saved_count, saved_max
 

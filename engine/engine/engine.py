@@ -925,7 +925,7 @@ class Engine:
             return False
         return "A" in ids and "B" in ids
 
-    def _authz_closeout(self, url):
+    def _authz_closeout(self, url, method="GET"):
         """Read-only authz.py diff plus netget as B. Logs `authz:` only from that run.
         Returns the log line, or '' if the commands were not run (caller must refuse nothing)."""
         try:
@@ -933,8 +933,8 @@ class Engine:
             import authz
             import netget
             slug = authn._slug(self.scope.name)
-            d = authz.diff_one("GET", url, None, self.scope.name)
-            sb, _tb, _h = netget.get(url, method="GET", ident="B", slug=slug)
+            d = authz.diff_one(method, url, None, self.scope.name)
+            sb, _tb, _h = netget.get(url, method=method, ident="B", slug=slug)
         except Exception:  # noqa: BLE001
             return ""
         line = (f"authz: diff A={d.get('A_status')} B={d.get('B_status')} "
@@ -1754,7 +1754,7 @@ class Engine:
                 # netget --as B have actually run. The log line is the proof authz_logged reads.
                 if ((it.get("vuln_class") or "").lower() == "deep"
                         and self._needs_authz_gate(it.get("url"))):
-                    line = self._authz_closeout(it.get("url"))
+                    line = self._authz_closeout(it.get("url"), method=it.get("method", "GET"))
                     if not line:
                         self.eng.log(f"hunt: refused nothing on {it.get('vuln_class')}@{it['url']} "
                                      "— authz.py diff and netget --as B were not run")
@@ -1904,6 +1904,17 @@ class Engine:
         if it.get("tags"):
             meta_parts.append(f"tags: {', '.join(it['tags'][:6])}")
         metadata_line = f"  {' | '.join(meta_parts)}\n" if meta_parts else ""
+        # Planned identities from test plan (owner/accessor/role)
+        identity_block = ""
+        if it.get("owner") or it.get("accessor") or it.get("role"):
+            id_parts = []
+            if it.get("owner"):
+                id_parts.append(f"OWNER identity: {it['owner']} (create/own the resource with `--as {it['owner']}`)")
+            if it.get("accessor"):
+                id_parts.append(f"ACCESSOR identity: {it['accessor']} (attempt unauthorized access with `--as {it['accessor']}`)")
+            if it.get("role"):
+                id_parts.append(f"TEST ROLE: {it['role']}")
+            identity_block = "PLANNED IDENTITIES:\n  " + "\n  ".join(id_parts) + "\n"
         # Related endpoints — sibling operations on the same resource
         siblings = self._related_endpoints(url, it.get("method", "GET"))
         related_block = ""
@@ -1922,7 +1933,7 @@ class Engine:
                 + lead + memory +
                 f"URL: {url}   method: {it.get('method','GET')}   known param(s): {', '.join(it.get('params') or []) or it.get('param','')}   "
                 f"tech: {', '.join(tech) or 'unknown'}\n"
-                + metadata_line
+                + metadata_line + identity_block
                 + f"Signals: {', '.join(endpoint_profile.get('signals', [])) or 'general'}   "
                 f"Priority: {endpoint_profile.get('priority', 'medium')}\n"
                 + knowledge_block + related_block + round_block
