@@ -1093,7 +1093,7 @@ class Engine:
                     host = "https://" + host
                 caps = browser.capture(host, slug=self.scope.name,
                                        scope_hosts=[urlparse(self.scope.seeds[0]).hostname],
-                                       ident="A")
+                                       ident="A", scope=self.scope)
                 browser_items = []
                 for it in (caps or []):
                     url = it.get("url") or ""
@@ -2665,9 +2665,13 @@ def main():
         phases = DEFAULT_PHASES                   # default: recon -> rank -> map, then STOP for the operator
     eng = Engine(a.scope, a.base, a.model, a.max_hunts, a.max_turns, a.timeout, a.mock,
                  a.allow_intrusive, a.parallel, a.expand)
-    eng.run(phases)
+    result = eng.run(phases)
     print("\n" + json.dumps(eng.eng.summary(), indent=2))
     print("engagement dir:", eng.eng.dir)
+    if result.get("status") == "blocked":
+        sys.exit(3)
+    if result.get("failed_phases"):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

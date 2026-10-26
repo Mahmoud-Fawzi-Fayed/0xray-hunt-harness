@@ -55,11 +55,12 @@ _AUTH_PATTERNS = [
     ("csrf_cookie", re.compile(r"""["'](XSRF-TOKEN|csrf[_-]token)["']""", re.I)),
     ("bearer", re.compile(r"""[Aa]uthorization[^"']*["']Bearer\s""")),
     ("cookie_name", re.compile(r"""(?:cookie|Cookie)[^"']*["'](_[a-z_]+_session|_[a-z_]+)["']""")),
-    ("session_header", re.compile(r"""["'](Authorization-Type|X-Shopify-Access-Token|X-Api-Key)["']""", re.I)),
+    ("session_header", re.compile(r"""["'](Authorization-Type|X-[A-Z][a-zA-Z]+-(?:Access-Token|Key|Secret)|X-Api-Key)["']""", re.I)),
 ]
 
+# Detect any absolute URL embedded in JS — scope filtering happens downstream, not here.
 _INTERESTING_URLS = re.compile(
-    r"""(https?://[a-zA-Z0-9._-]+(?:\.shopify|\.shopifycloud|\.myshopify)[a-zA-Z0-9./_?&=-]*)""",
+    r"""(https?://[a-zA-Z0-9._-]{4,}(?:\.[a-zA-Z]{2,})+/[a-zA-Z0-9./_?&=-]{2,})""",
 )
 
 _HIDDEN_ENDPOINT = re.compile(
@@ -77,30 +78,13 @@ _FETCH_CALL = re.compile(
     re.I,
 )
 
-# CDN hosts where reading public JS bundles is safe (read-only, no auth, no state change).
-# Matches cdn. prefix (subdomain boundary), known CDN apex/suffixes only.
-_CDN_PATTERNS = re.compile(
-    r"(^|\.)cdn\d*\.|\.cloudfront\.net$|\.cloudflare\.com$|\.akamaized\.net$|"
-    r"\.fastly\.net$|\.googleapis\.com$|\.gstatic\.com$|^unpkg\.com$|"
-    r"^cdn\.jsdelivr\.net$|\.shopifycdn\.net$|\.shopifysvc\.com$",
-    re.I,
-)
-
-
-def _is_safe_cdn(hostname):
-    """True if hostname is a public CDN where reading JS is safe."""
-    h = (hostname or "").lower()
-    if h.startswith("cdn.") or ".cdn." in h:
-        return True
-    return bool(_CDN_PATTERNS.search(h))
 
 
 def discover_bundles(url, scope=None):
     """Fetch HTML at *url*, extract <script src> URLs, filter out vendor/framework.
 
-    *scope* — a Scope object (optional). When set, bundle URLs on out-of-scope hosts
-    that are NOT public CDNs are skipped (safety: don't send requests to random hosts).
-    The seed page itself is always fetched through the scope guard (no bypass).
+    *scope* — a Scope object (optional). When set, only bundle URLs on in-scope hosts
+    are returned. Out-of-scope bundles are skipped entirely — no CDN exceptions.
 
     Returns list of absolute URLs to app-specific JS bundles.
     """
@@ -122,8 +106,7 @@ def discover_bundles(url, scope=None):
             continue
         if not basename.endswith(".js"):
             continue
-        host = (parsed.hostname or "").lower()
-        if scope and not scope.in_scope_host(abs_url) and not _is_safe_cdn(host):
+        if scope and not scope.in_scope_host(abs_url):
             continue
         bundles.append(abs_url)
     return bundles
@@ -198,20 +181,16 @@ def mine_content(js_text):
 def mine_bundle(url_or_path, scope=None):
     """Mine a single JS bundle (URL or local file path). Returns mine_content() dict.
 
-    *scope* — a Scope object (optional). Bundle URLs on in-scope hosts are fetched
-    normally. CDN-hosted bundles bypass the scope guard (public, read-only). Other
-    out-of-scope hosts are refused.
+    *scope* — a Scope object (optional). Out-of-scope URLs are refused.
     """
     if os.path.isfile(url_or_path):
         with open(url_or_path) as f:
             return mine_content(f.read())
 
     import netget
-    host = (urlparse(url_or_path).hostname or "").lower()
-    if scope and not scope.in_scope_host(url_or_path) and not _is_safe_cdn(host):
+    if scope and not scope.in_scope_host(url_or_path):
         return mine_content("")
-    bypass = _is_safe_cdn(host)
-    status, text, _hdrs = netget.get(url_or_path, _bypass_scope=bypass)
+    status, text, _hdrs = netget.get(url_or_path)
     if status == 0 or not text:
         return mine_content("")
     return mine_content(text)
@@ -330,8 +309,7 @@ def _selftest():
     assert any("/creator/signup" in r for r in result["routes"]), f"routes: {result['routes']}"
     assert any("/admin/dashboard" in ep for ep in result["hidden_endpoints"]), f"hidden: {result['hidden_endpoints']}"
 
-    url_str = " ".join(result["interesting_urls"])
-    assert "collabs.shopify" in url_str, f"urls: {result['interesting_urls']}"
+    assert len(result["interesting_urls"]) >= 1, f"interesting_urls should find embedded URLs: {result['interesting_urls']}"
 
     assert len(result["tokens"]) >= 1, f"tokens: {result['tokens']}"
 

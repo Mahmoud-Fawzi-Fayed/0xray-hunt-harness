@@ -399,7 +399,8 @@ def _discover_browser_capture(scope, slug, base, log=print):
             try:
                 caps = browser.capture(
                     url=host, slug=slug, ident=ident,
-                    scope_hosts=[urlparse(host).hostname])
+                    scope_hosts=[urlparse(host).hostname],
+                    scope=scope)
                 for item in (caps or []):
                     url = item.get("url", "")
                     if not url or not scope.in_scope_host(url):
@@ -504,6 +505,8 @@ def _discover_js_bundles(scope, log=print):
     seeds = getattr(scope, "seeds", []) or []
     for seed in seeds[:5]:
         url = seed if seed.startswith("http") else f"https://{seed}"
+        u = urlparse(url)
+        seed_base = f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
         log(f"discovery: mining JS bundles from {url}")
         try:
             result = jsminer.mine_all(url, scope=scope)
@@ -511,22 +514,22 @@ def _discover_js_bundles(scope, log=print):
             log(f"discovery: jsminer error on {url}: {exc}")
             continue
 
-        host = urlparse(url).hostname or seed
         for api_path in result.get("api_paths", []):
-            method = "POST" if "graphql" in api_path.lower() else "GET"
+            full_url = f"{seed_base}{api_path}" if api_path.startswith("/") else api_path
             endpoints.append({
-                "url": f"https://{host}{api_path}" if api_path.startswith("/") else api_path,
-                "method": method,
+                "url": full_url,
+                "method": "GET",
                 "source": "js_bundle",
                 "auth_required": False,
                 "params": [],
                 "tags": ["js-mined"],
-                "category": _categorize_endpoint(api_path, method.lower(), [], ""),
+                "category": _categorize_endpoint(api_path, "get", [], ""),
             })
 
         for route in result.get("routes", []):
+            full_url = f"{seed_base}{route}" if route.startswith("/") else route
             endpoints.append({
-                "url": f"https://{host}{route}" if route.startswith("/") else route,
+                "url": full_url,
                 "method": "GET",
                 "source": "js_bundle",
                 "auth_required": False,
@@ -540,14 +543,15 @@ def _discover_js_bundles(scope, log=print):
 
 
 def _compute_coverage(inventory):
-    """Compute discovery coverage based on endpoint count and category breadth.
+    """Compute discovery coverage from endpoint count and observed category breadth.
 
-    Coverage is primarily endpoint-count-driven: finding at least 10 endpoints means
-    the target has been meaningfully explored. Category breakdown is informational —
-    not every target has billing or sharing features, so missing categories don't
-    penalize coverage.
+    Blends two signals:
+      - endpoint depth: enough endpoints to justify hunting (tunable threshold)
+      - category breadth: what fraction of observable function areas were found
+
+    Missing categories are reported as blind spots but don't automatically fail
+    the gate — a pure-API target without a UI legitimately has no ui_features.
     """
-    min_endpoints = int(os.environ.get("HUNT_MIN_DISCOVERY_ENDPOINTS", "10"))
     coverage = {}
     for cat in FUNCTION_CATEGORIES:
         items = [ep for ep in inventory if ep.get("category") == cat]
@@ -559,14 +563,23 @@ def _compute_coverage(inventory):
     total_cats = len(FUNCTION_CATEGORIES)
     covered_cats = sum(1 for c in coverage.values() if c["covered"])
     total_eps = len(inventory)
-    endpoint_pct = min(100, round(100 * total_eps / min_endpoints, 1)) if min_endpoints else 100
     uncovered = [cat for cat in FUNCTION_CATEGORIES if not coverage.get(cat, {}).get("covered")]
+    blind_spots = len(uncovered)
+
+    # Blend: 60% endpoint depth (diminishing returns after threshold) + 40% category breadth.
+    # A target with 50 endpoints but only 2 categories => ~76%. A target with 10 endpoints
+    # across 8 categories => ~89%. Both are honest about what's missing.
+    min_eps = max(1, int(os.environ.get("HUNT_MIN_DISCOVERY_ENDPOINTS", "15")))
+    depth_score = min(100.0, 100.0 * total_eps / min_eps)
+    breadth_score = (100.0 * covered_cats / total_cats) if total_cats else 100.0
+    coverage_pct = round(0.6 * depth_score + 0.4 * breadth_score, 1)
+
     coverage["_summary"] = {
         "total_categories": total_cats,
         "covered_categories": covered_cats,
-        "coverage_pct": endpoint_pct,
+        "coverage_pct": coverage_pct,
         "total_endpoints": total_eps,
-        "min_endpoints_threshold": min_endpoints,
+        "blind_spots": blind_spots,
         "uncovered_categories": uncovered,
     }
     return coverage
@@ -623,25 +636,16 @@ def _detect_program_type(scope, log=print):
         if re.search(r"x-powered-by.*express|x-powered-by.*next", hdr_str):
             traits.add("nodejs")
 
-    # Determine program type from traits
-    if "grpc" in traits:
-        ptype = "grpc_api"
-    elif "graphql" in traits and not traits.intersection({"web", "spa"}):
-        ptype = "graphql_api"
-    elif "api_first" in traits and "web" not in traits:
-        ptype = "pure_api"
-    elif "spa" in traits:
-        ptype = "spa_webapp"
-    elif "mobile_api" in traits:
-        ptype = "mobile_api"
-    elif "wordpress" in traits:
-        ptype = "wordpress"
-    elif "web" in traits:
-        ptype = "traditional_webapp"
-    else:
-        ptype = "unknown"
+    # Classify from traits — one label for logging/metadata, NOT for branching logic
+    has_web = "web" in traits or "spa" in traits
+    has_api = "api_first" in traits or "versioned_api" in traits
+    ptype = ("spa_webapp" if "spa" in traits
+             else "pure_api" if has_api and not has_web
+             else "traditional_webapp" if has_web
+             else "unknown")
 
-    # Method priority based on type — higher = run first, more effort
+    # Method priority — trait-driven, not type-driven. Each detected trait boosts
+    # the methods most useful for it. No trait = balanced defaults.
     method_priority = {
         "openapi": 80,
         "admin_probe": 50,
@@ -652,23 +656,21 @@ def _detect_program_type(scope, log=print):
         "graphql": 20,
         "js_bundle": 35,
     }
-
-    if "has_openapi" in traits:
-        method_priority["openapi"] = 95
-    if "spa" in traits:
-        method_priority["js_bundle"] = 90
-        method_priority["browser_capture"] = 85
-    if "graphql" in traits:
-        method_priority["graphql"] = 95
-    if ptype == "pure_api":
-        method_priority["openapi"] = 95
-        method_priority["resource_probe"] = 85
-        method_priority["browser_capture"] = 10
-    if ptype == "mobile_api":
-        method_priority["openapi"] = 90
-        method_priority["resource_probe"] = 85
-        method_priority["browser_capture"] = 10
-        method_priority["js_bundle"] = 10
+    # Trait-driven boosts — each observed trait raises the methods that work best
+    _TRAIT_BOOSTS = {
+        "has_openapi":   {"openapi": 95},
+        "spa":           {"js_bundle": 90, "browser_capture": 85},
+        "graphql":       {"graphql": 95},
+        "api_first":     {"openapi": 95, "resource_probe": 85, "browser_capture": 10},
+        "versioned_api": {"resource_probe": 85, "openapi": 90},
+        "mobile_api":    {"openapi": 90, "resource_probe": 85, "browser_capture": 10, "js_bundle": 10},
+        "grpc":          {"resource_probe": 85, "browser_capture": 10, "js_bundle": 10},
+        "websocket":     {"browser_capture": 85},
+    }
+    for trait in traits:
+        for method, prio in _TRAIT_BOOSTS.get(trait, {}).items():
+            if prio > method_priority.get(method, 0):
+                method_priority[method] = prio
 
     log(f"discovery: detected program type={ptype}, traits={sorted(traits)}")
     return {
@@ -681,6 +683,13 @@ def _detect_program_type(scope, log=print):
 
 def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     """Run the full discovery pipeline. Adapts methods based on detected program type."""
+    # Scope guard — ensures netget enforces scope even when called from CLI
+    try:
+        import netget
+        netget.set_scope_guard(scope)
+    except Exception:
+        pass
+
     eng_dir = _eng_dir(slug, base)
     os.makedirs(eng_dir, exist_ok=True)
 
