@@ -1697,7 +1697,7 @@ class Engine:
                 fbt = int(os.environ.get("HUNT_FAILOVER_TIMEOUT", "900"))
                 self.eng.log(f"hunt: timeout on {it.get('vuln_class')}@{it['url']} (model {f.get('model')}) "
                              f"— failover to {alt} ({fbt}s)")
-                f = self._hunt_agent(it, model=alt, timeout=fbt)
+                f = self._scheduled_hunt(it, model=alt, timeout=fbt)
                 if f and f.get("error") == "timeout":
                     self.eng.mark_skipped(it, "double_timeout")
                     self.eng.log(f"hunt: INCONCLUSIVE (double-timeout) {it.get('vuln_class')}@{it['url']} "
@@ -1714,7 +1714,7 @@ class Engine:
                     self.eng.log(f"hunt: rate-limited on {it.get('vuln_class')}@{it['url']} "
                                  f"— backing off {backoff}s then retrying")
                     time.sleep(backoff)
-                    f = self._hunt_agent(it)
+                    f = self._scheduled_hunt(it)
                     if f and f.get("error"):
                         self.eng.log(f"hunt: still failing after backoff ({f['error']}) — skipping")
                         continue
@@ -1728,7 +1728,7 @@ class Engine:
                             if rel.get("ok"):
                                 self._auth_session = _AS.load(self.scope.name, self.base)
                                 self.eng.log("hunt: session refreshed, retrying")
-                                f = self._hunt_agent(it)
+                                f = self._scheduled_hunt(it)
                                 if f and not f.get("error"):
                                     pass  # fall through to normal processing
                                 else:
@@ -2109,7 +2109,11 @@ class Engine:
         return random.choice(alts) if alts else None
 
     def _scheduled_hunt(self, it, model=None, timeout=None):
-        """Scheduler-aware wrapper around _hunt_agent. Claims work, runs the agent, marks complete/fail."""
+        """Scheduler-aware wrapper around _hunt_agent.
+        Claims work before the agent call. Completion is evidence-gated:
+        only results with execution evidence (request text or confirmed vulnerable)
+        are marked completed. Skipped/no-evidence results are marked failed so
+        the scheduler can retry them in a future round."""
         _sched = self.scheduler
         if not _sched:
             return self._hunt_agent(it, model, timeout)
@@ -2130,8 +2134,12 @@ class Engine:
             f = self._hunt_agent(it, model, timeout)
             if f and f.get("error"):
                 _sched.fail(case_id, worker_id, error=f["error"])
-            else:
+            elif f and f.get("skipped"):
+                _sched.fail(case_id, worker_id, error=f"skipped: {f['skipped']}")
+            elif f and (f.get("request") or f.get("vulnerable")):
                 _sched.complete(case_id, worker_id)
+            else:
+                _sched.fail(case_id, worker_id, error="no execution evidence recorded")
             return f
         except Exception as exc:
             _sched.fail(case_id, worker_id, error=str(exc))

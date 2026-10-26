@@ -1,8 +1,8 @@
 {
-  "harness_version": "10.2",
-  "generated": "2026-10-26T16:00:00Z",
+  "harness_version": "10.3",
+  "generated": "2026-10-26T17:00:00Z",
   "baseline_tag": "baseline-pre-release",
-  "head_commit": "bf1a627+wip",
+  "head_commit": "pending",
   "selftest_modules": {
     "passed": 63,
     "failed": 0,
@@ -164,9 +164,11 @@
         "egress.py: EgressPolicy class with default-deny, prohibited method enforcement",
         "egress.py: required header injection, OSINT allowlist, audit trail",
         "egress.py: check_egress() decision point wired into netget.py::get()",
-        "egress.py: fail-closed when policy unavailable",
+        "egress.py: fail-closed when policy unavailable AND on broker exception",
+        "netget.py: egress broker exception returns error (fail-closed), not silent pass-through",
         "egress.py: non-intrusive mode blocks POST/PUT/DELETE/PATCH on target scope at transport level",
         "netget.py: set_scope_guard(scope, allow_intrusive) passes mode to EgressPolicy",
+        "netget.py: _load_scope_for_cli() propagates HUNT_INTRUSIVE env var to egress policy",
         "engine.py: passes allow_intrusive flag to netget.set_scope_guard()",
         "egress.py selftest: PASS (21 test scenarios — 8 new non-intrusive mode tests)"
       ]
@@ -195,6 +197,9 @@
         "scheduler.py: concurrent claim test — exactly 1 winner from 10 threads",
         "scheduler.py selftest: PASS",
         "engine.py: scheduler integrated into hunt loop via _scheduled_hunt() wrapper",
+        "engine.py: _scheduled_hunt() evidence-gated — complete() only when request/vulnerable present",
+        "engine.py: skipped/no-evidence results → scheduler fail() (retryable), not complete()",
+        "engine.py: all retry paths (timeout failover, 429 backoff, auth refresh) go through _scheduled_hunt()",
         "engine.py: recover_expired() called before each hunt round for crash recovery",
         "engine.py: scheduler filters already-completed/exhausted items from todo list",
         "engine.py: scheduler metrics logged after each hunt round"
@@ -279,5 +284,5 @@
     }
   },
   "gate_verdict": "PASS",
-  "gate_notes": "v10.2: All audit-2 fixes applied. Scheduler integrated into engine.py hunt loop (claim/complete/fail/recover). Non-intrusive mode enforced at egress transport layer (POST/PUT/DELETE/PATCH blocked unless allow_intrusive=True). Reproduction status tracked separately from LLM validation (reproduced vs plausible vs inconclusive). Plus all v10.1 P0 fixes: evidence-gate bypass, case-ID race, wildcard port scope, deterministic A/B auth, egress broker, false reproduction removed. 110/110 tests pass. Zero OOS requests."
+  "gate_notes": "v10.3: Audit-3 fixes. Scheduler evidence-gated (complete only with request/vulnerable, else fail+retryable). Egress broker fail-closed on exception. All retries go through scheduler. CLI propagates HUNT_INTRUSIVE to egress policy. Plus v10.2: scheduler integration, non-intrusive mode, reproduction status. Plus v10.1: evidence-gate, case-ID race, wildcard scope, A/B auth, false reproduction. 110/110 tests pass. Zero OOS requests."
 }

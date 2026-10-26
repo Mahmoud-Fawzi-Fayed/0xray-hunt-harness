@@ -231,16 +231,15 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
     if timeout is None:
         timeout = _DEFAULT_TIMEOUT
-    # Egress policy check (prohibited methods, scope, audit)
+    # Egress policy check (prohibited methods, scope, audit) — fail-closed on broker error
     if _EGRESS_POLICY:
         try:
-            import egress as _EG
             decision = _EGRESS_POLICY.check_egress(method, url, headers)
             _EGRESS_POLICY.record_decision(method, url, decision)
             if not decision.allowed:
                 return 0, "", {"_error": f"egress denied: {decision.reason}"}
-        except Exception:
-            pass
+        except Exception as _egress_err:
+            return 0, "", {"_error": f"egress broker error (fail-closed): {_egress_err}"}
     # Scope guard (defense-in-depth, also covers case where egress policy not loaded)
     if _SCOPE_GUARD:
         reason = _SCOPE_GUARD.reject_reason(url)
@@ -337,6 +336,7 @@ def _load_scope_for_cli(scope_file=None, slug=None):
     except ImportError:
         print("ERROR: scope.py not importable — cannot enforce policy", file=sys.stderr)
         return False
+    intrusive = os.environ.get("HUNT_INTRUSIVE") == "1"
     # Explicit --scope-file takes priority
     if scope_file:
         if not os.path.isfile(scope_file):
@@ -344,7 +344,7 @@ def _load_scope_for_cli(scope_file=None, slug=None):
             return False
         try:
             sc = Scope.load(scope_file)
-            set_scope_guard(sc)
+            set_scope_guard(sc, allow_intrusive=intrusive)
             return True
         except Exception as e:
             print(f"ERROR: invalid scope file {scope_file}: {e}", file=sys.stderr)
@@ -359,7 +359,7 @@ def _load_scope_for_cli(scope_file=None, slug=None):
             if os.path.isfile(candidate):
                 try:
                     sc = Scope.load(candidate)
-                    set_scope_guard(sc)
+                    set_scope_guard(sc, allow_intrusive=intrusive)
                     return True
                 except Exception:
                     continue
