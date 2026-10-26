@@ -924,20 +924,21 @@ class Engine:
             self.eng.save()
 
     def _record_evidence_attempt(self, it, outcome="TESTED"):
-        """Link transport-recorded observations to the test case. Returns True if evidence validates."""
+        """Link transport-recorded observations to the test case. Returns True if evidence validates.
+        Uses method, URL, and identity for precise matching — no URL-path fallback."""
         try:
             import evidence as EV
             edir = self.eng.evidence_path("")
             case_key = self.eng._key(it)
+            method = (it.get("method") or "GET").upper()
+            url = it.get("url", "")
             obs = EV.get_observations(edir, case_id=case_key)
-            if not obs:
-                obs = EV.get_observations(edir)
-                obs = [o for o in obs if o.get("url", "").split("?")[0] == it.get("url", "").split("?")[0]]
             if obs:
                 EV.record_attempt(edir, case_id=case_key,
                                   observation_ids=[o["id"] for o in obs[-10:]],
                                   outcome=outcome)
-                valid, _reason = EV.validate_evidence(edir, case_key)
+                valid, _reason = EV.validate_evidence(
+                    edir, case_key, method=method, url=url)
                 return valid
             return False
         except Exception:  # noqa: BLE001
@@ -1500,7 +1501,7 @@ class Engine:
             self.eng.state["hunt_blocked"] = "empty_surface"
             self.eng.save()
             return
-        cov_pct = disc.get("coverage_pct", 100)
+        cov_pct = disc.get("coverage_pct", 0)
         if cov_pct < 80 and not os.environ.get("HUNT_SKIP_COVERAGE_GATE"):
             self.eng.log(f"hunt: BLOCKED — discovery coverage {cov_pct}% < 80% threshold. "
                          "Fill gaps before hunting (set HUNT_SKIP_COVERAGE_GATE=1 to override).")
@@ -2110,7 +2111,8 @@ class Engine:
 
     def _scheduled_hunt(self, it, model=None, timeout=None):
         """Scheduler-aware wrapper around _hunt_agent.
-        Claims work before the agent call. Completion is evidence-gated:
+        Claims work before the agent call. Sends periodic heartbeats to renew
+        the lease during long-running hunts. Completion is evidence-gated:
         only results with execution evidence (request text or confirmed vulnerable)
         are marked completed. Skipped/no-evidence results are marked failed so
         the scheduler can retry them in a future round."""
@@ -2121,8 +2123,9 @@ class Engine:
         worker_id = f"pid-{os.getpid()}"
         method = it.get("method") or "GET"
         is_read = method.upper() in ("GET", "HEAD", "OPTIONS")
+        lease_sec = int(os.environ.get("HUNT_LEASE_SEC", "600"))
         claim = _sched.claim_work(
-            case_id, worker_id, lease_sec=int(os.environ.get("HUNT_LEASE_SEC", "600")),
+            case_id, worker_id, lease_sec=lease_sec,
             method=method, url=it.get("url"),
             owner_identity=it.get("owner"), accessor_identity=it.get("accessor"),
             idempotent=is_read)
@@ -2130,6 +2133,15 @@ class Engine:
             cs = _sched.status(case_id)
             self.eng.log(f"hunt: scheduler skip {it.get('url','?')[:60]} (status={cs.get('status') if cs else '?'})")
             return {"skipped": "scheduler: already claimed or exhausted"}
+        # Background heartbeat thread keeps the lease alive during long agent runs
+        import threading as _th
+        _hb_stop = _th.Event()
+        hb_interval = max(lease_sec // 3, 10)
+        def _heartbeat_loop():
+            while not _hb_stop.wait(hb_interval):
+                _sched.heartbeat(case_id, worker_id)
+        _hb_thread = _th.Thread(target=_heartbeat_loop, daemon=True)
+        _hb_thread.start()
         try:
             f = self._hunt_agent(it, model, timeout)
             if f and f.get("error"):
@@ -2144,6 +2156,9 @@ class Engine:
         except Exception as exc:
             _sched.fail(case_id, worker_id, error=str(exc))
             raise
+        finally:
+            _hb_stop.set()
+            _hb_thread.join(timeout=2)
 
     def _hunt_agent(self, it, model=None, timeout=None):
         if self.mock:

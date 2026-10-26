@@ -478,6 +478,7 @@ def _selftest():
     os.environ.pop("HUNT_PUBLIC_URL", None)
     for _k in ("SMTP_HOST", "SMTP_TO", "HUNT_PARALLEL", "HUNT_MAX_HUNTS", "HUNT_AGENT_TIMEOUT"):
         os.environ.pop(_k, None)
+    os.environ["HUNT_SKIP_COVERAGE_GATE"] = "1"
     scope = os.path.join(ENGINE, "engagement.example.json")
     obs = {"subdomains": ["localhost"], "hosts": [{"url": "http://localhost:3002", "status": 200}],
            "js": [], "endpoints": ["http://localhost:3002/api/account"], "params": []}

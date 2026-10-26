@@ -53,7 +53,8 @@ def clear_current_case():
     _CURRENT_CASE_ID.value = None
 
 
-def _record_obs(method, url, req_headers, resp_status, resp_body, ident):
+def _record_obs(method, url, req_headers, resp_status, resp_body, ident,
+                req_body=None, resp_headers=None):
     edir = _EVIDENCE_DIR
     if not edir or resp_status <= 0:
         return
@@ -62,7 +63,8 @@ def _record_obs(method, url, req_headers, resp_status, resp_body, ident):
         case_id = getattr(_CURRENT_CASE_ID, "value", None)
         EV.record_observation(
             edir, method.upper(), url,
-            req_headers=req_headers, resp_status=resp_status, resp_body=resp_body,
+            req_headers=req_headers, req_body=req_body,
+            resp_status=resp_status, resp_headers=resp_headers, resp_body=resp_body,
             identity=ident, case_id=case_id,
             policy_id=getattr(_SCOPE_GUARD, "name", None))
     except Exception:  # noqa: BLE001
@@ -167,16 +169,64 @@ _DEFAULT_TIMEOUT = int(os.environ.get("HUNT_REQUEST_TIMEOUT", "30") or 30)
 
 _MAX_REQUESTS = int(os.environ.get("HUNT_MAX_REQUESTS", "5000") or 5000)
 _request_count = 0
+_BUDGET_FILE = None
+_BUDGET_LOCK = threading.Lock()
 
 class BudgetExhausted(Exception):
     pass
 
+def _shared_budget_path():
+    """Return path to the shared budget counter file, or None if no evidence dir."""
+    edir = _EVIDENCE_DIR
+    if not edir:
+        return None
+    return os.path.join(edir, ".request_budget")
+
+def _increment_shared_budget():
+    """Atomically increment the cross-process request counter. Returns the new total."""
+    path = _shared_budget_path()
+    if not path:
+        return None
+    try:
+        import fcntl
+        with _BUDGET_LOCK:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                raw = os.read(fd, 32).strip()
+                count = int(raw) if raw else 0
+                count += 1
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.ftruncate(fd, 0)
+                os.write(fd, str(count).encode())
+                return count
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+    except Exception:
+        return None
+
 def request_count():
+    """Return the shared budget count if available, else process-local."""
+    path = _shared_budget_path()
+    if path and os.path.isfile(path):
+        try:
+            with open(path) as f:
+                return int(f.read().strip() or "0")
+        except Exception:
+            pass
     return _request_count
 
 def reset_request_count():
     global _request_count
     _request_count = 0
+    path = _shared_budget_path()
+    if path:
+        try:
+            with open(path, "w") as f:
+                f.write("0")
+        except Exception:
+            pass
 
 
 def _is_localhost(url):
@@ -249,8 +299,10 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         return 0, "", {"_error": "no scope guard set — refusing non-localhost request (call set_scope_guard first)"}
     global _request_count
     _request_count += 1
-    if _request_count > _MAX_REQUESTS:
-        return 0, "", {"_error": f"request budget exhausted ({_MAX_REQUESTS})"}
+    shared = _increment_shared_budget()
+    effective_count = shared if shared is not None else _request_count
+    if effective_count > _MAX_REQUESTS:
+        return 0, "", {"_error": f"request budget exhausted ({effective_count}/{_MAX_REQUESTS})"}
     ua, imp, proxy, proxy_list = _cfg()
     h = dict(headers or {})
     if ua:
@@ -296,7 +348,8 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
                 if reason:
                     rh["_redirect_blocked"] = reason
-        _record_obs(method, url, h, r.status_code, r.text, ident)
+        _record_obs(method, url, h, r.status_code, r.text, ident,
+                    req_body=data, resp_headers=rh)
         return r.status_code, r.text, rh
     except ImportError:
         pass
@@ -320,7 +373,8 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
                 if reason:
                     rh["_redirect_blocked"] = reason
-        _record_obs(method, url, h, r.status_code, r.text, ident)
+        _record_obs(method, url, h, r.status_code, r.text, ident,
+                    req_body=data, resp_headers=rh)
         return r.status_code, r.text, rh
     except ImportError:
         return 0, "", {"_error": "neither curl_cffi nor requests available"}
@@ -445,8 +499,10 @@ def _selftest():
     assert "no scope guard" not in h_lo.get("_error", ""), f"localhost should not be blocked: {h_lo}"
 
     # budget tracking (use localhost — scope guard not needed)
-    global _request_count, _MAX_REQUESTS
+    global _request_count, _MAX_REQUESTS, _EVIDENCE_DIR
     saved_count, saved_max = _request_count, _MAX_REQUESTS
+    saved_edir = _EVIDENCE_DIR
+    _EVIDENCE_DIR = None
     _request_count = 0
     _MAX_REQUESTS = 2
     assert request_count() == 0
@@ -456,6 +512,22 @@ def _selftest():
     code3, _, h3 = get("http://127.0.0.1:1/status/200", timeout=1)
     assert code3 == 0 and "budget" in h3.get("_error", ""), f"expected budget block: {code3} {h3}"
     _request_count, _MAX_REQUESTS = saved_count, saved_max
+    _EVIDENCE_DIR = saved_edir
+
+    # shared budget (cross-process counter)
+    import tempfile as _tb
+    _td = _tb.mkdtemp()
+    _EVIDENCE_DIR = _td
+    reset_request_count()
+    assert request_count() == 0, "shared budget should be 0 after reset"
+    _cnt = _increment_shared_budget()
+    assert _cnt == 1, f"shared budget should be 1 after increment: {_cnt}"
+    _cnt = _increment_shared_budget()
+    assert _cnt == 2, f"shared budget should be 2: {_cnt}"
+    assert request_count() == 2, f"request_count should read shared: {request_count()}"
+    reset_request_count()
+    assert request_count() == 0, "shared budget should be 0 after reset"
+    _EVIDENCE_DIR = saved_edir
 
     # rate limiter state structure
     assert isinstance(_RL_STATE, dict)
@@ -491,7 +563,6 @@ def _selftest():
     set_scope_guard(None)
 
     # Evidence auto-recording: set evidence dir, make a localhost request, verify observation stored
-    global _EVIDENCE_DIR
     saved_edir = _EVIDENCE_DIR
     ev_dir = os.path.join(td, "evidence-test")
     os.makedirs(ev_dir, exist_ok=True)

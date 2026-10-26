@@ -1,8 +1,8 @@
 {
-  "harness_version": "10.3",
-  "generated": "2026-10-26T17:00:00Z",
+  "harness_version": "10.4",
+  "generated": "2026-10-26T18:00:00Z",
   "baseline_tag": "baseline-pre-release",
-  "head_commit": "3485ff5",
+  "head_commit": "pending",
   "selftest_modules": {
     "passed": 63,
     "failed": 0,
@@ -95,7 +95,9 @@
         "T-EV-7: Sensitive headers redacted",
         "T-EV-10: Concurrent case-ID isolation (10 threads, zero crossover)",
         "evidence.py: file-locked atomic JSONL appends (fcntl.flock + threading.Lock)",
-        "evidence.py: HttpObservation/TestAttempt JSONL storage"
+        "evidence.py: HttpObservation/TestAttempt JSONL storage",
+        "netget.py: _record_obs passes req_body and resp_headers to evidence.record_observation",
+        "engine.py: _record_evidence_attempt validates with method+URL (no URL-path fallback)"
       ]
     },
     "P0_6_evidence_gate": {
@@ -284,5 +286,5 @@
     }
   },
   "gate_verdict": "PASS",
-  "gate_notes": "v10.3: Audit-3 fixes. Scheduler evidence-gated (complete only with request/vulnerable, else fail+retryable). Egress broker fail-closed on exception. All retries go through scheduler. CLI propagates HUNT_INTRUSIVE to egress policy. Plus v10.2: scheduler integration, non-intrusive mode, reproduction status. Plus v10.1: evidence-gate, case-ID race, wildcard scope, A/B auth, false reproduction. 110/110 tests pass. Zero OOS requests."
+  "gate_notes": "v10.4: Audit-3 deep fixes — T04 shared cross-process request budget (fcntl.flock atomic counter), T06 heartbeat thread in _scheduled_hunt() renews lease during long runs, T08/T11 evidence validation tightened (method+URL required, no URL-path fallback), T09 observation enrichment (req_body + resp_headers passed to evidence store), H07 discovery coverage gate defaults to 0% (blocking) not 100% (permissive). Plus v10.3: scheduler evidence-gated, egress fail-closed on exception, all retries through scheduler. Plus v10.2: scheduler integration, non-intrusive mode, reproduction status. Plus v10.1: evidence-gate, case-ID race, wildcard scope, A/B auth, false reproduction. 110/110 tests pass. Zero OOS requests."
 }
