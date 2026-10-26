@@ -77,15 +77,36 @@ _FETCH_CALL = re.compile(
     re.I,
 )
 
+# CDN hosts where reading public JS bundles is safe (read-only, no auth, no state change).
+# Matches cdn. prefix (subdomain boundary), known CDN apex/suffixes only.
+_CDN_PATTERNS = re.compile(
+    r"(^|\.)cdn\d*\.|\.cloudfront\.net$|\.cloudflare\.com$|\.akamaized\.net$|"
+    r"\.fastly\.net$|\.googleapis\.com$|\.gstatic\.com$|^unpkg\.com$|"
+    r"^cdn\.jsdelivr\.net$|\.shopifycdn\.net$|\.shopifysvc\.com$",
+    re.I,
+)
 
-def discover_bundles(url):
+
+def _is_safe_cdn(hostname):
+    """True if hostname is a public CDN where reading JS is safe."""
+    h = (hostname or "").lower()
+    if h.startswith("cdn.") or ".cdn." in h:
+        return True
+    return bool(_CDN_PATTERNS.search(h))
+
+
+def discover_bundles(url, scope=None):
     """Fetch HTML at *url*, extract <script src> URLs, filter out vendor/framework.
+
+    *scope* — a Scope object (optional). When set, bundle URLs on out-of-scope hosts
+    that are NOT public CDNs are skipped (safety: don't send requests to random hosts).
+    The seed page itself is always fetched through the scope guard (no bypass).
 
     Returns list of absolute URLs to app-specific JS bundles.
     """
     import netget
 
-    status, html, _hdrs = netget.get(url, headers={"Accept": "text/html"}, _bypass_scope=True)
+    status, html, _hdrs = netget.get(url, headers={"Accept": "text/html"})
     if status == 0 or not html:
         return []
 
@@ -95,10 +116,14 @@ def discover_bundles(url):
     bundles = []
     for src in all_srcs:
         abs_url = urljoin(url, src)
-        basename = os.path.basename(urlparse(abs_url).path)
+        parsed = urlparse(abs_url)
+        basename = os.path.basename(parsed.path)
         if _VENDOR_PATTERNS.search(basename):
             continue
         if not basename.endswith(".js"):
+            continue
+        host = (parsed.hostname or "").lower()
+        if scope and not scope.in_scope_host(abs_url) and not _is_safe_cdn(host):
             continue
         bundles.append(abs_url)
     return bundles
@@ -170,25 +195,37 @@ def mine_content(js_text):
     return result
 
 
-def mine_bundle(url_or_path):
-    """Mine a single JS bundle (URL or local file path). Returns mine_content() dict."""
+def mine_bundle(url_or_path, scope=None):
+    """Mine a single JS bundle (URL or local file path). Returns mine_content() dict.
+
+    *scope* — a Scope object (optional). Bundle URLs on in-scope hosts are fetched
+    normally. CDN-hosted bundles bypass the scope guard (public, read-only). Other
+    out-of-scope hosts are refused.
+    """
     if os.path.isfile(url_or_path):
         with open(url_or_path) as f:
             return mine_content(f.read())
 
     import netget
-    status, text, _hdrs = netget.get(url_or_path, _bypass_scope=True)
+    host = (urlparse(url_or_path).hostname or "").lower()
+    if scope and not scope.in_scope_host(url_or_path) and not _is_safe_cdn(host):
+        return mine_content("")
+    bypass = _is_safe_cdn(host)
+    status, text, _hdrs = netget.get(url_or_path, _bypass_scope=bypass)
     if status == 0 or not text:
         return mine_content("")
     return mine_content(text)
 
 
-def mine_all(seed_url):
+def mine_all(seed_url, scope=None):
     """Discover bundles at *seed_url*, mine each, return merged results.
+
+    *scope* — a Scope object (optional). Passed through to discover_bundles and
+    mine_bundle so the scope guard controls which hosts are contacted.
 
     Returns dict with keys matching mine_content() plus 'bundles_found'.
     """
-    bundles = discover_bundles(seed_url)
+    bundles = discover_bundles(seed_url, scope=scope)
 
     merged = {
         "seed_url": seed_url,
@@ -205,7 +242,7 @@ def mine_all(seed_url):
     }
 
     for burl in bundles:
-        result = mine_bundle(burl)
+        result = mine_bundle(burl, scope=scope)
         for key in ("api_paths", "graphql_ops", "auth_patterns", "routes",
                      "hidden_endpoints", "interesting_urls", "tokens", "fetch_calls"):
             for item in result.get(key, []):

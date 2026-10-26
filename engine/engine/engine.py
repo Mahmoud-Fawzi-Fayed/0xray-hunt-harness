@@ -1068,7 +1068,8 @@ class Engine:
         total_added = 0
         try:
             import discovery as DISC
-            result = DISC.discover(self.scope.name, self.scope, base=self.base, log=self.eng.log)
+            result = DISC.discover(self.scope.name, self.scope, base=self.base, log=self.eng.log,
+                                   allow_intrusive=self.allow_intrusive)
             surface_items = DISC.inventory_to_surface(result)
             if surface_items:
                 total_added += self.eng.add_surface(_deepen(surface_items))
@@ -1085,12 +1086,14 @@ class Engine:
         # Browser capture — SPA apps expose their real API surface at runtime via JS
         try:
             import browser
+            from urllib.parse import urlparse
             for seed in self.scope.seeds[:3]:
                 host = seed.rstrip("/")
                 if "://" not in host:
                     host = "https://" + host
-                caps = browser.capture(host, slug=self.scope.name, scope_host=self.scope.seeds[0],
-                                       ident="A", base=self.base, log=self.eng.log)
+                caps = browser.capture(host, slug=self.scope.name,
+                                       scope_hosts=[urlparse(self.scope.seeds[0]).hostname],
+                                       ident="A")
                 browser_items = []
                 for it in (caps or []):
                     url = it.get("url") or ""
@@ -1119,31 +1122,31 @@ class Engine:
         # GraphQL introspection — catches full query/mutation surface
         try:
             import recon as R
-            for seed in self.scope.seeds[:3]:
-                host = seed.rstrip("/")
-                if "://" not in host:
-                    host = "https://" + host
-                gql = R.graphql_recon(host, log=self.eng.log)
-                gql_items = []
-                for ep in (gql or []):
-                    url = ep.get("url") or host + "/graphql"
-                    args = [a.get("name", "") for a in (ep.get("args") or []) if a.get("name")]
-                    gql_items.append({
-                        "url": url, "method": "POST",
-                        "vuln_class": "deep", "source": "discovery/graphql",
-                        "priority": 70,
-                        "param": ep.get("name", ""),
-                        "params": args[:10] if args else [ep.get("name", "")],
-                        "auth_required": True,
-                        "confidence": "observed",
-                        "tech": ["graphql"],
-                        "tags": [ep.get("type", "query")],
-                        "note": f"GraphQL {ep.get('type', 'query')}: {ep.get('name', '')}",
-                    })
-                if gql_items:
-                    added = self.eng.add_surface(_deepen(gql_items))
-                    total_added += added
-                    self.eng.log(f"discover: GraphQL introspection → {added} operation(s)")
+            gql = R.graphql_recon(self.scope, slug=self.scope.name, log=self.eng.log)
+            gql_items = []
+            seed_host = ""
+            if self.scope.seeds:
+                s = self.scope.seeds[0].rstrip("/")
+                seed_host = s if "://" in s else "https://" + s
+            for ep in (gql or []):
+                url = ep.get("url") or (seed_host + "/graphql") if seed_host else "/graphql"
+                args = [a.get("name", "") for a in (ep.get("args") or []) if a.get("name")]
+                gql_items.append({
+                    "url": url, "method": "POST",
+                    "vuln_class": "deep", "source": "discovery/graphql",
+                    "priority": 70,
+                    "param": ep.get("name", ""),
+                    "params": args[:10] if args else [ep.get("name", "")],
+                    "auth_required": True,
+                    "confidence": "observed",
+                    "tech": ["graphql"],
+                    "tags": [ep.get("type", "query")],
+                    "note": f"GraphQL {ep.get('type', 'query')}: {ep.get('name', '')}",
+                })
+            if gql_items:
+                added = self.eng.add_surface(_deepen(gql_items))
+                total_added += added
+                self.eng.log(f"discover: GraphQL introspection → {added} operation(s)")
         except Exception as e:
             self.eng.log(f"discover: GraphQL introspection unavailable ({type(e).__name__}: {e})")
 
@@ -1460,11 +1463,15 @@ class Engine:
         disc = self.eng.state.get("discovery") or {}
         if not surface:
             self.eng.log("hunt: BLOCKED — surface is empty. Run discovery first.")
+            self.eng.state["hunt_blocked"] = "empty_surface"
+            self.eng.save()
             return
         cov_pct = disc.get("coverage_pct", 100)
         if cov_pct < 80 and not os.environ.get("HUNT_SKIP_COVERAGE_GATE"):
             self.eng.log(f"hunt: BLOCKED — discovery coverage {cov_pct}% < 80% threshold. "
                          "Fill gaps before hunting (set HUNT_SKIP_COVERAGE_GATE=1 to override).")
+            self.eng.state["hunt_blocked"] = "coverage_gate"
+            self.eng.save()
             return
         # --- GATE: auth check — refuse to hunt when majority needs auth and no session exists ---
         auth_walled = sum(1 for s in surface if s.get("auth_required"))
@@ -1475,14 +1482,15 @@ class Engine:
             if _AS:
                 sess = _AS.load(self.scope.name, self.base)
                 has_session = bool(sess and _AS.valid(sess))
-            if not has_session and os.environ.get("HUNT_AUTH") == "1":
-                has_session = True
             if not has_session:
                 self.eng.log(f"hunt: BLOCKED — {auth_walled}/{len(surface)} endpoints ({auth_pct:.0f}%) "
                              "need auth but no session exists. Provision accounts first "
                              "(set HUNT_SKIP_AUTH_GATE=1 to override).")
+                self.eng.state["hunt_blocked"] = "auth_gate"
+                self.eng.save()
                 return
         self._honor_heals()
+        self.eng.state.pop("hunt_blocked", None)
         # start OOB callback server for blind vuln testing (best-effort)
         self._oob = None
         try:
@@ -1715,18 +1723,17 @@ class Engine:
                 else:
                     self.eng.add_candidate(cand)
                     self.eng.record_hypothesis(confirmed=True)
-                    self.eng.record_finding_verified()
                     self._remember(it, cand.get("evidence") or "", [cand.get("vuln_class")],
                                    result="candidate", finding=f)
                     self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
                                   f"host(s): {', '.join(oos)} (flagged)") if oos
                                  else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
                 # Candidate awaits validate phase — mark tested only with execution proof
-                if f.get("request") or f.get("tool_calls"):
+                if f.get("request"):
                     self.eng.mark_tested(it)
                     _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
                 else:
-                    self.eng.log(f"hunt: candidate at {it['url']} lacks request/tool evidence — not marking tested")
+                    self.eng.log(f"hunt: candidate at {it['url']} lacks request evidence — not marking tested")
                     _plan_status = ("blocked", "candidate found but no execution evidence recorded")
             elif f and f.get("skipped"):
                 self.eng.log(f"hunt: skipped {it.get('vuln_class')}@{it['url']} — {f['skipped']}")
@@ -1754,7 +1761,7 @@ class Engine:
                         continue
                     analysis = (str(analysis) + "\n" + line).strip()
                 has_execution_evidence = bool(
-                    isinstance(f, dict) and (f.get("request") or f.get("tool_calls"))
+                    isinstance(f, dict) and f.get("request")
                 )
                 self.eng.record_hypothesis(confirmed=False)
                 if analysis and has_execution_evidence:
@@ -2335,6 +2342,7 @@ class Engine:
             if v.get("severity"):
                 c["severity"] = v["severity"]     # use the validator's CALIBRATED severity, not the hunt's
             self.eng.confirm(c, v)
+            self.eng.record_finding_verified()
             reproduced = repro["status"] == "reproduced"
             tag = ("✅ CONFIRMED REAL (reproduced)" if reproduced
                    else "⚠ CONFIRMED — LLM-validated but NOT independently reproduced; verify before submit")
@@ -2590,6 +2598,13 @@ class Engine:
         finally:
             signal.signal(signal.SIGINT, _prev_int)
             signal.signal(signal.SIGTERM, _prev_term)
+        blocked = self.eng.state.get("hunt_blocked")
+        if blocked:
+            self.eng.set_phase("blocked")
+            self.eng.save()
+            self.eng.log(f"engine BLOCKED — hunt gate '{blocked}' prevented testing | {self.eng.summary()}")
+            return {"status": "blocked", "blocked_by": blocked, "failed_phases": failed_phases,
+                    "phase_timings": phase_timings}
         if failed_phases:
             self.eng.set_phase("partial")
             self.eng.state["failed_phases"] = failed_phases

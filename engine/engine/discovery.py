@@ -256,7 +256,7 @@ def _discover_admin_internal(scope, log=print):
     found = []
     for seed in scope.seeds:
         u = urlparse(seed if "://" in seed else "https://" + seed)
-        base = f"{u.scheme or 'https'}://{u.hostname}"
+        base = f"{u.scheme or 'https'}://{u.hostname}" + (f":{u.port}" if u.port else "")
         for path in ADMIN_PROBE_PATHS:
             code, body, headers = _probe(base + path)
             if code and 200 <= code < 400 and code != 404:
@@ -283,7 +283,7 @@ def _discover_api_resources(scope, log=print):
     found = []
     for seed in scope.seeds:
         u = urlparse(seed if "://" in seed else "https://" + seed)
-        base = f"{u.scheme or 'https'}://{u.hostname}"
+        base = f"{u.scheme or 'https'}://{u.hostname}" + (f":{u.port}" if u.port else "")
         probed = 0
         for prefix in API_PREFIXES:
             for resource in RESOURCE_PATHS:
@@ -321,17 +321,22 @@ def _discover_api_resources(scope, log=print):
     return found
 
 
-def _discover_error_based(scope, found_endpoints, log=print):
-    """Use error responses to discover hidden methods and parameters."""
+def _discover_error_based(scope, found_endpoints, log=print, allow_intrusive=False):
+    """Use error responses to discover hidden methods and parameters.
+
+    When allow_intrusive is False (default), only safe/read-only methods (OPTIONS, HEAD)
+    are probed. State-changing methods (POST, PUT, PATCH, DELETE) require explicit opt-in.
+    """
     new_findings = []
-    # For each found endpoint, try other HTTP methods
+    safe_methods = ["OPTIONS", "HEAD"]
+    intrusive_methods = ["POST", "PUT", "PATCH", "DELETE"]
+    probe_methods = safe_methods + (intrusive_methods if allow_intrusive else [])
     sampled = found_endpoints[:30]
     for ep in sampled:
         url = ep.get("url", "")
         if not url:
             continue
-        # Try methods not yet known
-        for method in ["POST", "PUT", "PATCH", "DELETE"]:
+        for method in probe_methods:
             if method == ep.get("method"):
                 continue
             code, body, _ = _probe(url, method=method)
@@ -394,8 +399,7 @@ def _discover_browser_capture(scope, slug, base, log=print):
             try:
                 caps = browser.capture(
                     url=host, slug=slug, ident=ident,
-                    scope_host=urlparse(host).hostname,
-                    base=base, log=log)
+                    scope_hosts=[urlparse(host).hostname])
                 for item in (caps or []):
                     url = item.get("url", "")
                     if not url or not scope.in_scope_host(url):
@@ -429,29 +433,29 @@ def _discover_graphql(scope, log=print):
     except ImportError:
         log("discovery/graphql: recon module not available — skipping GraphQL")
         return found
-    for seed in scope.seeds:
-        host = seed.rstrip("/")
-        if "://" not in host:
-            host = "https://" + host
-        try:
-            gql_result = recon.graphql_recon(host, scope=scope, log=log)
-            for item in (gql_result or []):
-                url = item.get("url", "")
-                if not url:
-                    url = host + "/graphql"
-                found.append({
-                    "url": url,
-                    "method": item.get("method", "POST"),
-                    "source": "graphql-introspection",
-                    "category": "api_endpoints",
-                    "params": item.get("params", []),
-                    "note": item.get("name", "") or item.get("summary", ""),
-                    "auth_required": item.get("auth_required", False),
-                    "tags": ["graphql"],
-                })
-            log(f"discovery/graphql: introspection found {len(gql_result or [])} operations on {host}")
-        except Exception as e:
-            log(f"discovery/graphql: introspection failed on {host} ({type(e).__name__}: {e})")
+    try:
+        gql_result = recon.graphql_recon(scope, log=log)
+        for item in (gql_result or []):
+            url = item.get("url", "")
+            if not url:
+                seed = (getattr(scope, "seeds", None) or [""])[0]
+                host = seed.rstrip("/") if seed else ""
+                if host and "://" not in host:
+                    host = "https://" + host
+                url = (host + "/graphql") if host else "/graphql"
+            found.append({
+                "url": url,
+                "method": item.get("method", "POST"),
+                "source": "graphql-introspection",
+                "category": "api_endpoints",
+                "params": item.get("params", []),
+                "note": item.get("name", "") or item.get("summary", ""),
+                "auth_required": item.get("auth_required", False),
+                "tags": ["graphql"],
+            })
+        log(f"discovery/graphql: introspection found {len(gql_result or [])} operations")
+    except Exception as e:
+        log(f"discovery/graphql: introspection failed ({type(e).__name__}: {e})")
     return found
 
 
@@ -497,12 +501,12 @@ def _discover_js_bundles(scope, log=print):
         log("discovery: jsminer not available — skipping JS bundle mining")
         return endpoints
 
-    seeds = scope.get("seeds", [])
+    seeds = getattr(scope, "seeds", []) or []
     for seed in seeds[:5]:
         url = seed if seed.startswith("http") else f"https://{seed}"
         log(f"discovery: mining JS bundles from {url}")
         try:
-            result = jsminer.mine_all(url)
+            result = jsminer.mine_all(url, scope=scope)
         except Exception as exc:
             log(f"discovery: jsminer error on {url}: {exc}")
             continue
@@ -536,7 +540,14 @@ def _discover_js_bundles(scope, log=print):
 
 
 def _compute_coverage(inventory):
-    """Compute discovery coverage per category."""
+    """Compute discovery coverage based on endpoint count and category breadth.
+
+    Coverage is primarily endpoint-count-driven: finding at least 10 endpoints means
+    the target has been meaningfully explored. Category breakdown is informational —
+    not every target has billing or sharing features, so missing categories don't
+    penalize coverage.
+    """
+    min_endpoints = int(os.environ.get("HUNT_MIN_DISCOVERY_ENDPOINTS", "10"))
     coverage = {}
     for cat in FUNCTION_CATEGORIES:
         items = [ep for ep in inventory if ep.get("category") == cat]
@@ -545,13 +556,18 @@ def _compute_coverage(inventory):
             "endpoints": [ep.get("url", "") for ep in items[:10]],
             "covered": len(items) > 0,
         }
-    total = len(FUNCTION_CATEGORIES)
-    covered = sum(1 for c in coverage.values() if c["covered"])
+    total_cats = len(FUNCTION_CATEGORIES)
+    covered_cats = sum(1 for c in coverage.values() if c["covered"])
+    total_eps = len(inventory)
+    endpoint_pct = min(100, round(100 * total_eps / min_endpoints, 1)) if min_endpoints else 100
+    uncovered = [cat for cat in FUNCTION_CATEGORIES if not coverage.get(cat, {}).get("covered")]
     coverage["_summary"] = {
-        "total_categories": total,
-        "covered_categories": covered,
-        "coverage_pct": round(100 * covered / total, 1) if total else 0,
-        "total_endpoints": len(inventory),
+        "total_categories": total_cats,
+        "covered_categories": covered_cats,
+        "coverage_pct": endpoint_pct,
+        "total_endpoints": total_eps,
+        "min_endpoints_threshold": min_endpoints,
+        "uncovered_categories": uncovered,
     }
     return coverage
 
@@ -663,7 +679,7 @@ def _detect_program_type(scope, log=print):
     }
 
 
-def discover(slug, scope, base=DEFAULT_BASE, log=print):
+def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     """Run the full discovery pipeline. Adapts methods based on detected program type."""
     eng_dir = _eng_dir(slug, base)
     os.makedirs(eng_dir, exist_ok=True)
@@ -708,7 +724,7 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print):
 
     # Always run error-based and response-mining as they build on earlier results
     try:
-        error_eps = _discover_error_based(scope, inventory, log=log)
+        error_eps = _discover_error_based(scope, inventory, log=log, allow_intrusive=allow_intrusive)
         inventory.extend(error_eps)
         source_counts["error_discovery"] = len(error_eps)
     except Exception as e:

@@ -217,15 +217,15 @@ class Engagement:
                 continue
             ep = -self._eff_priority(s)
             last = tmap.get(k)
-            if last is None and k in notes:
-                # A hunt_note is coverage. Relogin used to wipe `tested` and re-queue the same URL.
-                ts = (notes[k] or {}).get("ts") if isinstance(notes[k], dict) else 0
-                last = _as_epoch(ts) or now
+            # hunt_note records WHY an endpoint was "nothing" but does NOT count as
+            # tested coverage — only mark_tested() (which requires execution evidence)
+            # puts an item into tmap.  A note without mark_tested leaves the item
+            # eligible so auth-wall and insufficient-evidence looks are retried.
             if last is None:
                 ranked.append((0, ep, 0.0, s))                          # never tested -> cover it first
             elif ttl > 0 and (now - last) >= ttl:
                 ranked.append((1, ep, last, s))                         # stale -> re-hunt, oldest first
-            # else: tested / noted within the window -> not eligible this pass
+            # else: tested within the retest window -> not eligible this pass
         ranked.sort(key=lambda t: (t[0], t[1], -(1 if t[3].get("param") else 0), t[2]))
         return [t[3] for t in ranked]
 
@@ -442,7 +442,7 @@ def _selftest():
         kept_key = e3._key(kept)
         e3.state["tested"] = {}
         e3.save()
-        assert all(e3._key(s) != kept_key for s in e3.worklist()), "a hunt_note is coverage — do not re-queue"
+        assert any(e3._key(s) == kept_key for s in e3.worklist()), "hunt_note alone is NOT coverage — item must re-queue without mark_tested"
         e.mark_rejected({"url": "http://t/a", "vuln_class": "idor"}, "false positive")
         assert "http://t/a|idor" in e.rejected_keys()
         print("state.py self-test: PASS")
