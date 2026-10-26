@@ -2,7 +2,7 @@
   "harness_version": "10.4",
   "generated": "2026-10-26T18:00:00Z",
   "baseline_tag": "baseline-pre-release",
-  "head_commit": "pending",
+  "head_commit": "eefd775",
   "selftest_modules": {
     "passed": 63,
     "failed": 0,
