@@ -1,8 +1,8 @@
 {
   "harness_version": "10.0",
-  "generated": "2026-10-26T14:30:00Z",
+  "generated": "2026-10-26T15:30:00Z",
   "baseline_tag": "baseline-pre-release",
-  "head_commit": "7d5af11",
+  "head_commit": "53e34ea",
   "selftest_modules": {"passed": 63, "failed": 0, "total": 63},
   "e2e_comprehensive": {"passed": 27, "failed": 0, "blocked": 0, "total": 27},
   "policy_egress": {"passed": 10, "failed": 0, "total": 10},

@@ -31,7 +31,7 @@ if os.path.isdir(_gobin) and _gobin not in os.environ.get("PATH", "").split(os.p
     os.environ["PATH"] = _gobin + os.pathsep + os.environ.get("PATH", "")
 
 from scope import Scope            # noqa: E402
-from state import Engagement       # noqa: E402
+from state import Engagement, PHASE_RUNNING, PHASE_PASS, PHASE_BLOCKED, PHASE_FAILED  # noqa: E402
 import agent as A                  # noqa: E402
 import modelroute as MR            # noqa: E402
 
@@ -227,6 +227,14 @@ class Engine:
         try:
             import netget
             netget.set_scope_guard(self.scope)
+        except Exception:
+            pass
+        # Wire evidence pipeline so every HTTP exchange is auto-recorded
+        try:
+            import netget as _ng
+            edir = self.eng.evidence_path("")
+            os.makedirs(edir, exist_ok=True)
+            _ng.set_evidence_dir(edir)
         except Exception:
             pass
         # Ensure _targets/slug.json exists so guardrails can load scope for this program
@@ -909,6 +917,23 @@ class Engine:
             t.pop(modern, None)
             self.eng.save()
 
+    def _record_evidence_attempt(self, it, outcome="TESTED"):
+        """Link transport-recorded observations to the test case in the evidence pipeline."""
+        try:
+            import evidence as EV
+            edir = self.eng.evidence_path("")
+            case_key = self.eng._key(it)
+            obs = EV.get_observations(edir, case_id=case_key)
+            if not obs:
+                obs = EV.get_observations(edir)
+                obs = [o for o in obs if o.get("url", "").split("?")[0] == it.get("url", "").split("?")[0]]
+            if obs:
+                EV.record_attempt(edir, case_id=case_key,
+                                  observation_ids=[o["id"] for o in obs[-10:]],
+                                  outcome=outcome)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _needs_authz_gate(self, url):
         """True when a deep nothing on this URL would be a guess: A and B are live and the URL
         is an in-scope endpoint worth an object-level diff. Health/logout checks are not."""
@@ -1409,10 +1434,10 @@ class Engine:
                 pass
         if not fmap.get("endpoints"):
             import featuremap as FM
-            fmap = FM.build_feature_map(self.eng.scope.name, eng_dir=self.eng.dir, state=self.eng.state)
+            fmap = FM.build_feature_map(self.scope.name, eng_dir=self.eng.dir, state=self.eng.state)
         result = TP.build_test_plan(fmap, state=self.eng.state,
-                                    scope={"in_scope": self.eng.scope.in_scope,
-                                           "out_of_scope": self.eng.scope.out_of_scope})
+                                    scope={"in_scope": self.scope.in_scope,
+                                           "out_of_scope": self.scope.out_of_scope})
         existing_plan = self.eng.state.get("test_plan") or []
         if existing_plan:
             existing_statuses = {}
@@ -1731,6 +1756,7 @@ class Engine:
                 # Candidate awaits validate phase — mark tested only with execution proof
                 if f.get("request"):
                     self.eng.mark_tested(it)
+                    self._record_evidence_attempt(it, outcome="CONFIRMED")
                     _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
                 else:
                     self.eng.log(f"hunt: candidate at {it['url']} lacks request evidence — not marking tested")
@@ -1769,6 +1795,7 @@ class Engine:
                 self.eng.record_hypothesis(confirmed=False)
                 if analysis and has_execution_evidence:
                     self.eng.mark_tested(it)
+                    self._record_evidence_attempt(it, outcome="TESTED")
                     _plan_status = ("tested", analysis[:300])
                 else:
                     self.eng.log(f"hunt: insufficient execution evidence for {it.get('vuln_class')}@{it['url']} — left untested")
@@ -2600,6 +2627,7 @@ class Engine:
 
     def run(self, phases):
         self._drop_own_session_oauth()
+        self.eng.reconcile_stale_running()
         failed_phases = []
         phase_timings = {}
         _eng_timeout = int(os.environ.get("HUNT_ENGAGEMENT_TIMEOUT", "3600") or 3600)
@@ -2621,13 +2649,25 @@ class Engine:
                         failed_phases.extend(p for p in ALL_PHASES if p in phases and p not in failed_phases
                                              and ALL_PHASES.index(p) >= ALL_PHASES.index(ph))
                         break
+                    blocked = [b for b in self.eng.blocked_dependencies(ph)
+                               if b[0] in phases]
+                    if blocked:
+                        cause = f"blocked by: {', '.join(b[0] for b in blocked)}"
+                        self.eng.set_phase_status(ph, PHASE_BLOCKED, cause=cause)
+                        self.eng.log(f"phase {ph}: BLOCKED — {cause}")
+                        failed_phases.append({"phase": ph, "error": cause})
+                        continue
+                    self.eng.set_phase_status(ph, PHASE_RUNNING)
                     _ph_start = time.time()
                     try:
                         getattr(self, ph)()
+                        self.eng.set_phase_status(ph, PHASE_PASS)
                     except Exception as e:
+                        self.eng.set_phase_status(ph, PHASE_FAILED, cause=f"{type(e).__name__}: {e}")
                         failed_phases.append({"phase": ph, "error": f"{type(e).__name__}: {e}"})
                         self.eng.log(f"phase {ph} error (continuing with partial state): {type(e).__name__}: {e}")
                     phase_timings[ph] = round(time.time() - _ph_start, 1)
+                    self.eng.record_phase_time(ph, phase_timings[ph])
                     self.eng.save()
         finally:
             signal.signal(signal.SIGINT, _prev_int)

@@ -32,6 +32,29 @@ _RL_MIN_DELAY = 1.0 / max(0.1, float(os.environ.get("HUNT_REQUESTS_PER_SECOND", 
 # Defense-in-depth scope guard — set by engine init via set_scope_guard()
 _SCOPE_GUARD = None  # Scope instance or None (disabled)
 
+# Evidence pipeline — auto-record HTTP observations when an engagement dir is set
+_EVIDENCE_DIR = None
+
+
+def set_evidence_dir(path):
+    global _EVIDENCE_DIR
+    _EVIDENCE_DIR = path
+
+
+def _record_obs(method, url, req_headers, resp_status, resp_body, ident):
+    if not _EVIDENCE_DIR or resp_status <= 0:
+        return
+    try:
+        import evidence as EV
+        EV.record_observation(
+            _EVIDENCE_DIR, method.upper(), url,
+            req_headers=req_headers, resp_status=resp_status, resp_body=resp_body,
+            identity=ident,
+            policy_id=getattr(_SCOPE_GUARD, "name", None))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # Connection pooling — reuse TCP connections across requests
 _RQ_SESSION = None
 _RQ_LOCK = threading.Lock()
@@ -235,6 +258,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
                 if reason:
                     rh["_redirect_blocked"] = reason
+        _record_obs(method, url, h, r.status_code, r.text, ident)
         return r.status_code, r.text, rh
     except ImportError:
         pass
@@ -258,6 +282,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
                 if reason:
                     rh["_redirect_blocked"] = reason
+        _record_obs(method, url, h, r.status_code, r.text, ident)
         return r.status_code, r.text, rh
     except ImportError:
         return 0, "", {"_error": "neither curl_cffi nor requests available"}
@@ -418,6 +443,23 @@ def _selftest():
     assert not _load_scope_for_cli(slug="nonexistent-prog"), "missing slug should fail"
     os.environ.pop("BUGHUNTER_BASE", None)
     set_scope_guard(None)
+
+    # Evidence auto-recording: set evidence dir, make a localhost request, verify observation stored
+    global _EVIDENCE_DIR
+    saved_edir = _EVIDENCE_DIR
+    ev_dir = os.path.join(td, "evidence-test")
+    os.makedirs(ev_dir, exist_ok=True)
+    _EVIDENCE_DIR = ev_dir
+    set_scope_guard(None)  # localhost doesn't need scope
+    get("http://127.0.0.1:1/evidence-selftest", timeout=1)
+    # Even a failed connection should not crash — _record_obs only fires for status > 0
+    obs_file = os.path.join(ev_dir, "observations.jsonl")
+    # transport error = status 0, so no observation should be written
+    if os.path.exists(obs_file):
+        with open(obs_file) as _of:
+            lines = [l.strip() for l in _of if l.strip()]
+            assert len(lines) == 0, f"transport error should not record observation, got {len(lines)}"
+    _EVIDENCE_DIR = saved_edir
 
     print("netget.py self-test: PASS")
     return 0

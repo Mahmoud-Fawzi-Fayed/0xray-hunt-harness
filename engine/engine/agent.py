@@ -43,8 +43,8 @@ def _claude_code_dispatch(task, timeout=600):
     prompt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, dir="/tmp")
     prompt_file.write(task)
     prompt_file.close()
-    cmd = [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
-           "--max-turns", "25"]
+    cmd = [CLAUDE_BIN, "--print", "--max-turns", "25",
+           "--permission-mode", "default"]
     try:
         proc = subprocess.run(cmd, input=task, capture_output=True, text=True,
                               timeout=timeout, cwd=os.path.dirname(ENGINE))
