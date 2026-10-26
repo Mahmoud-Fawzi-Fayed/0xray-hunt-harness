@@ -130,6 +130,89 @@ python3 engine/tests/test_evidence_pipeline.py
 python3 engine/engine/<module>.py selftest
 ```
 
+## CLI Reference
+
+### netget.py — HTTP client
+```bash
+python3 engine/engine/netget.py GET "https://host/path" --scope-file scope.json
+python3 engine/engine/netget.py POST "https://host/path" '{"k":"v"}' --slug <target>
+python3 engine/engine/netget.py selftest
+```
+
+### browser.py — headless browser capture
+```bash
+python3 engine/engine/browser.py --url "https://host" --slug <target>
+python3 engine/engine/browser.py --url "https://host" --scope host1 host2
+```
+
+### engine.py — orchestrator
+```bash
+python3 engine/engine/engine.py --scope engagement.json
+python3 engine/engine/engine.py --scope engagement.json --phases hunt,validate,report
+```
+
+### discovery.py — surface mapping
+```bash
+python3 engine/engine/discovery.py discover --slug <target>
+```
+
+### verify.py — finding verification
+```bash
+python3 engine/engine/verify.py check --file finding.json --program <slug>
+python3 engine/engine/verify.py check --file finding.json --program <slug> --deep
+```
+
+### dedup.py — duplicate checking
+```bash
+python3 engine/engine/dedup.py check --program <slug> --class <c> --url <u> --title "..."
+python3 engine/engine/dedup.py ingest --program <slug>
+python3 engine/engine/dedup.py stats --program <slug>
+```
+
+### coverage.py — coverage tracking
+```bash
+python3 engine/engine/coverage.py show --slug <target>
+python3 engine/engine/coverage.py show --slug <target> --json
+python3 engine/engine/coverage.py all
+```
+
+### learn.py — self-learning
+```bash
+python3 engine/engine/learn.py auto --kind tech --name "X" --context "why"
+python3 engine/engine/learn.py evolve --name "X"
+python3 engine/engine/learn.py gaps
+python3 engine/engine/learn.py diagnose
+```
+
+### evidence.py — evidence pipeline
+```bash
+python3 engine/engine/evidence.py show --slug <target>
+python3 engine/engine/evidence.py show --slug <target> --case <case_id>
+```
+
+## Safety Mechanisms
+
+- **Scope guard** — fail-closed in `netget.py` and `browser.py`, re-checked per redirect hop
+- **Rate limiter** — per-host adaptive backoff, 5-min pause after 5 consecutive 403s
+- **Request budget** — `HUNT_MAX_REQUESTS` (default 5000) hard cap per engagement
+- **Account cap** — `HUNT_MAX_ACCOUNTS` (default 3) per program
+- **Brute-force refusal** — password-spray, OTP-brute, credential-stuffing refused outright
+- **Audit trail** — every guardrails decision logged to audit file
+- **Submission gate** — pipeline always stops at draft, no auto-submit
+
+## Doctor Check
+
+Before running an engagement, verify:
+
+1. **Scope loaded**: `python3 engine/engine/targets.py show --program <slug>` returns scope data
+2. **Selftests pass**: `python3 engine/scripts/selfcheck.py` — expect 44+ PASS
+3. **Auth ready** (if needed): `python3 engine/engine/authsession.py show --program <slug>`
+4. **Dedup corpus current**: `python3 engine/engine/dedup.py stats --program <slug>`
+5. **Burp MCP** (if needed): `python3 engine/engine/burp.py setup` — check connectivity
+6. **Go tools** (for recon): `which subfinder httpx gau katana` — all found in PATH
+7. **Browser**: `python3 -m playwright install chromium` — installed
+8. **Environment**: `HUNT_USER_AGENT` is set to your H1 username identifier
+
 ## Troubleshooting
 
 ### "ERROR: scope file not found" (netget.py CLI)
