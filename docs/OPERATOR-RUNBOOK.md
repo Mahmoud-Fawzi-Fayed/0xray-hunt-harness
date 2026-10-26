@@ -21,7 +21,7 @@ cat ~/.bughunter-engagements/<slug>/report.md
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.11+
 - `pip install requests playwright`
 - `python3 -m playwright install chromium`
 - Optional: Burp Suite Pro with MCP BApp (port 9876)

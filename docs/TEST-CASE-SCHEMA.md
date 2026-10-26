@@ -80,13 +80,13 @@ Properties:
 
 ## State Key Format
 
-### Current (5-field pipe-delimited)
+### Current (7-field pipe-delimited)
 
 ```
-METHOD|URL|PARAMS|CATEGORY|ROLE
+METHOD|URL|PARAMS|CATEGORY|ROLE|OWNER|ACCESSOR
 ```
 
-Example: `GET|/api/users|id|idor|user_b`
+Example: `GET|/api/users|id|idor|user_b|A|B`
 
 ### Legacy (4-field, backward compatible)
 

@@ -56,6 +56,7 @@ File: `evidence/observations.jsonl`
 | `resp_status` | int | HTTP response status code (0 = transport error) |
 | `resp_headers` | object | Response headers |
 | `resp_body_hash` | string? | SHA-256 of first 64KB of response body |
+| `resp_body_length` | int | Length of response body in bytes (0 if empty) |
 | `identity` | string? | Identity used (A, B, or null) |
 | `case_id` | string? | Test case ID this observation belongs to |
 | `policy_id` | string? | Scope policy identifier |
