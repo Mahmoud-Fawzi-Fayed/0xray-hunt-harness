@@ -961,7 +961,7 @@ class Engine:
             import authz
             import netget
             slug = authn._slug(self.scope.name)
-            d = authz.diff_one(method, url, body, self.scope.name)
+            d = authz.diff_one(method, url, body, self.scope.name, owner=owner, accessor=accessor)
             sb, _tb, _h = netget.get(url, method=method, data=body, ident=accessor, slug=slug)
         except Exception:  # noqa: BLE001
             return ""
@@ -1756,16 +1756,15 @@ class Engine:
                     self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
                                   f"host(s): {', '.join(oos)} (flagged)") if oos
                                  else f"hunt: CANDIDATE {cand['vuln_class']} @ {it['url']}")
-                # Candidate awaits validate phase — mark tested only with transport-verified evidence
+                # Candidate awaits validate phase — mark tested ONLY with transport-verified evidence
                 if f.get("request"):
                     ev_valid = self._record_evidence_attempt(it, outcome="CONFIRMED")
                     if ev_valid or self.mock:
                         self.eng.mark_tested(it)
                         _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
                     else:
-                        self.eng.mark_tested(it)
-                        self.eng.log(f"hunt: candidate at {it['url']} has request text but no transport-verified observation")
-                        _plan_status = ("tested", "request text present, transport evidence pending")
+                        self.eng.log(f"hunt: candidate at {it['url']} has request text but no transport-verified observation — NOT marking tested")
+                        _plan_status = ("inconclusive", "candidate found, request text present but no transport evidence")
                 else:
                     self.eng.log(f"hunt: candidate at {it['url']} lacks request evidence — not marking tested")
                     _plan_status = ("blocked", "candidate found but no execution evidence recorded")
@@ -1807,8 +1806,8 @@ class Engine:
                         self.eng.mark_tested(it)
                         _plan_status = ("tested", analysis[:300])
                     else:
-                        self.eng.mark_tested(it)
-                        _plan_status = ("tested", "request text present, transport evidence pending")
+                        self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} has request text but no transport evidence — NOT marking tested")
+                        _plan_status = ("inconclusive", "agent ran but no transport-verified observation recorded")
                 else:
                     self.eng.log(f"hunt: insufficient execution evidence for {it.get('vuln_class')}@{it['url']} — left untested")
                 self.eng.note_hunt(it, analysis, classes)
@@ -1903,14 +1902,19 @@ class Engine:
         import skill_map as SM
         # Set case context so transport-level observations are tagged with this case
         case_key = self.eng._key(it)
+        edir = self.eng.evidence_path("")
         try:
             import netget as _ng
             _ng.set_current_case(case_key)
-            edir = self.eng.evidence_path("")
-            os.environ["HUNT_EVIDENCE_DIR"] = edir
-            os.environ["HUNT_CASE_ID"] = case_key
         except Exception:
             pass
+        # Per-task env for subprocess agents — never mutate os.environ (concurrent race)
+        # Include scope slug so netget.py subprocess can load the egress policy
+        _task_env = {
+            "HUNT_EVIDENCE_DIR": edir,
+            "HUNT_CASE_ID": case_key,
+            "HUNT_TARGET_SLUG": self.scope.name,
+        }
         url = it["url"]
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
         p, e = self.scope.name, ENGINE_DIR
@@ -2020,7 +2024,7 @@ class Engine:
         dt = timeout or int(os.environ.get("HUNT_DEEP_TIMEOUT", "600"))
         mt = int(os.environ.get("HUNT_DEEP_TURNS", "40"))
         self.eng.log(f"hunt: deep-pentest {url} (analysis-driven) model={model or 'pool'} budget={dt}s/{mt}turns")
-        r = A.run_agent(task, context=self.scope.name, max_turns=mt, timeout=dt, model=model)
+        r = A.run_agent(task, context=self.scope.name, max_turns=mt, timeout=dt, model=model, env_extra=_task_env)
         if r.get("error"):
             return {"error": r["error"], "model": r.get("model")}
         f = A.extract_json(r.get("result", "")) or {"vulnerable": False}
@@ -2288,18 +2292,20 @@ class Engine:
         if not isinstance(tested, dict):
             tested = {}
         n = 0
+        collapsed = self.eng.state.setdefault("collapsed", {})
+        now = time.time()
         for it in list(self.eng.state.get("surface") or []):
             url = it.get("url") or ""
             if not (_skip_static_url(url) or (skip_junk and _REVIEW_JUNK.search(url))):
                 continue
             key = self.eng._key(it)
-            if key in tested:
+            if key in tested or key in collapsed:
                 continue
-            self.eng.mark_tested(it)
-            tested = self.eng.state.get("tested") or tested
+            collapsed[key] = now
             n += 1
         if n:
-            self.eng.log(f"review: skipped {n} marketing/static url(s) — the round stays on APIs")
+            self.eng.save()
+            self.eng.log(f"review: collapsed {n} marketing/static url(s) — not counted as tested coverage")
         return n
 
     def _review_directive(self):
@@ -2496,24 +2502,32 @@ class Engine:
         except Exception as e:  # noqa: BLE001
             note = f"live unavailable: {e}"
         if cls in ("idor", "bola") and str(c.get("url") or "").startswith("http"):
-            try:                                       # 2) two-account cross-account diff (needs identity B)
+            try:                                       # 2) two-account cross-account diff (needs planned identities)
                 import authz as _AZ
                 import authn as _AN
-                if "B" in _AN.identities(self.scope.name, self.base):
-                    d = _AZ.diff_one("GET", c["url"], None, self.scope.name)
+                _owner = c.get("owner", "A")
+                _accessor = c.get("accessor", "B")
+                if _accessor in _AN.identities(self.scope.name, self.base):
+                    d = _AZ.diff_one("GET", c["url"], None, self.scope.name,
+                                     owner=_owner, accessor=_accessor)
                     if d.get("bola_suspect"):
                         return {"status": "reproduced", "method": "two-account-diff",
-                                "signal": f"B's request to A's object returned matching data (sim={d.get('similarity')})"}
+                                "signal": f"{_accessor}'s request to {_owner}'s object returned matching data (sim={d.get('similarity')})"}
                     return {"status": "disproved", "method": "two-account-diff",
-                            "signal": "two-account diff shows proper isolation — B cannot read A's object"}
+                            "signal": f"two-account diff shows proper isolation — {_accessor} cannot read {_owner}'s object"}
             except Exception:  # noqa: BLE001
                 pass
-        try:                                           # 3) concrete demonstrated impact already in the evidence
-            import disposition as _DP
-            blob = (str(c.get("evidence", "")) + " " + str((v or {}).get("reason", ""))).lower()
-            if _DP._PROOF_SHOWN.search(blob):
-                return {"status": "reproduced", "method": "proof-in-evidence",
-                        "signal": "concrete demonstrated impact shown in the evidence"}
+        # Step 3 removed: regex match on agent-written evidence text is not independent
+        # reproduction. Only live-retest and two-account-diff count as reproduced.
+        # Check transport evidence exists for this case as a minimum bar for "plausible"
+        try:
+            import evidence as _EV
+            edir = self.eng.evidence_path("")
+            case_key = self.eng._key(c)
+            valid, _reason = _EV.validate_evidence(edir, case_key)
+            if valid:
+                return {"status": "plausible", "method": "transport-evidence-present",
+                        "signal": "transport observations exist but independent replay did not confirm — needs manual verification"}
         except Exception:  # noqa: BLE001
             pass
         return {"status": "inconclusive", "method": "none",

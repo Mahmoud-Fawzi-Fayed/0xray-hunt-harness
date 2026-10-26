@@ -232,6 +232,50 @@ def run_tests():
     except Exception as e:
         _record("T-EV-9", "Transport error (status 0) does not validate", "FAIL", str(e))
 
+    # T-EV-10: Concurrent case-ID isolation via thread-local
+    try:
+        import threading
+        import netget as _ng
+        td = tempfile.mkdtemp(prefix="ev_conc_")
+        _ng.set_evidence_dir(td)
+        NUM_CASES = 10
+        errors = []
+
+        def _worker(case_num):
+            cid = f"concurrent-case-{case_num}"
+            _ng.set_current_case(cid)
+            time.sleep(0.01)  # force interleaving
+            EV.record_observation(
+                td, "GET", f"https://target.com/api/{case_num}",
+                resp_status=200, resp_body=f"body-{case_num}",
+                identity=f"ident-{case_num}", case_id=cid)
+            time.sleep(0.01)
+            actual = getattr(_ng._CURRENT_CASE_ID, "value", None)
+            if actual != cid:
+                errors.append(f"thread {case_num}: expected {cid}, got {actual}")
+            _ng.clear_current_case()
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(NUM_CASES)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        crossover = 0
+        for i in range(NUM_CASES):
+            cid = f"concurrent-case-{i}"
+            obs = EV.get_observations(td, case_id=cid)
+            for o in obs:
+                if f"/api/{i}" not in o.get("url", ""):
+                    crossover += 1
+                    errors.append(f"case {cid} has wrong-URL obs: {o.get('url')}")
+
+        assert crossover == 0 and not errors, f"crossover={crossover}, errors={errors}"
+        _record("T-EV-10", "Concurrent case-ID isolation (10 threads, zero crossover)", "PASS")
+        _ng.set_evidence_dir(None)
+    except Exception as e:
+        _record("T-EV-10", "Concurrent case-ID isolation (10 threads, zero crossover)", "FAIL", str(e))
+
     print(f"\n{'='*70}")
     print(f"  EVIDENCE PIPELINE TEST RESULTS")
     print(f"  PASS={PASS}  FAIL={FAIL}")

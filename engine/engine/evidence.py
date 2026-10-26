@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 
@@ -98,9 +99,24 @@ def _evidence_dir(engagement_dir):
     return d
 
 
+_WRITE_LOCK = threading.Lock()
+
+
 def _append_jsonl(path, record):
-    with open(path, "a") as f:
-        f.write(json.dumps(record, default=str) + "\n")
+    line = json.dumps(record, default=str) + "\n"
+    with _WRITE_LOCK:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except ImportError:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
 
 
 def _read_jsonl(path):

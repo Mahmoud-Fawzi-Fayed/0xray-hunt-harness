@@ -36,7 +36,7 @@ def _is_claude_code_available():
     return bool(_which(CLAUDE_BIN))
 
 
-def _claude_code_dispatch(task, timeout=600):
+def _claude_code_dispatch(task, timeout=600, env_extra=None):
     """Run a hunt task via Claude Code CLI (headless, non-interactive).
     Returns the same {result, error, model, session_id, ...} shape as _run_once."""
     import tempfile
@@ -45,9 +45,12 @@ def _claude_code_dispatch(task, timeout=600):
     prompt_file.close()
     cmd = [CLAUDE_BIN, "--print", "--max-turns", "25",
            "--permission-mode", "default"]
+    sub_env = None
+    if env_extra:
+        sub_env = {**os.environ, **{k: str(v) for k, v in env_extra.items()}}
     try:
         proc = subprocess.run(cmd, input=task, capture_output=True, text=True,
-                              timeout=timeout, cwd=os.path.dirname(ENGINE))
+                              timeout=timeout, cwd=os.path.dirname(ENGINE), env=sub_env)
         stdout = proc.stdout or ""
         result_json = extract_json(stdout)
         return {"result": stdout if not result_json else json.dumps(result_json),
@@ -267,12 +270,17 @@ def _parse_opencode_json(stdout):
     return out
 
 
-def _run_once(cmd, m, timeout):
+def _run_once(cmd, m, timeout, env_extra=None):
     t0 = time.time()
     is_oc = _is_opencode_model(m) or any(str(x).startswith("ses_") for x in (cmd or []))
+    # Per-task env: copy parent env and merge extras (never mutate os.environ — concurrent race)
+    sub_env = None
+    if env_extra:
+        sub_env = {**os.environ, **{k: str(v) for k, v in env_extra.items()}}
     try:
         # own process group so a timeout can kill the agent AND its worker children (no orphans)
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             start_new_session=True, env=sub_env)
     except FileNotFoundError:
         bin_name = OPENCODE_BIN if is_oc else CURSOR_BIN
         return {"result": "", "error": f"{bin_name} not found (is the agent CLI installed?)",
@@ -614,7 +622,7 @@ def _cmd(task, model, resume_id=None):
 
 
 def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, timeout=600, attempts=2,
-              resume_id=None, scope_file=None):
+              resume_id=None, scope_file=None, env_extra=None):
     """Run a headless hunting agent (opencode OR cursor runtime by model prefix),
     REUSING a pooled session for `context` (far fewer chat sessions, far
     less rate-limiting). A fresh session opens only on first use, error/limit, or after
@@ -622,6 +630,7 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
     resume_id => one-shot run resuming THAT session (used by the verify fix-chat; no pool involved).
     `max_turns` is retained for caller compatibility but neither supported CLI enforces it; timeout is
     the execution bound.  scope_file => path inserted into the task preamble so the sub-agent can load it.
+    env_extra => per-task env vars merged into the subprocess env (never mutates parent os.environ).
     Returns {result, error, model, session_id, reused, ...}."""
     if scope_file:
         task = f"[scope-file: {scope_file}] — load this scope before acting.\n\n{task}"
@@ -644,7 +653,7 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
         except ValueError as e:
             return {"result": str(e), "error": "resume-runtime-mismatch", "model": m or model,
                     "session_id": resume_id, "reused": True, "duration_s": 0.0}
-        r = _run_once(cmd, m, timeout)
+        r = _run_once(cmd, m, timeout, env_extra=env_extra)
         r.setdefault("model", m)
         r["reused"] = True
         _register_created(r.get("session_id") or resume_id)   # harness-owned: safe to auto-prune later
@@ -679,7 +688,7 @@ def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, tim
             cmd = _cmd(task, m)
         r = {}
         for attempt in range(1, max(1, attempts) + 1):
-            r = _run_once(cmd, m, timeout)
+            r = _run_once(cmd, m, timeout, env_extra=env_extra)
             if r.get("session_id"):
                 if sl.get("id") and sl["id"] != r["session_id"]:
                     orphans.append(sl["id"])

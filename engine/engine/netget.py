@@ -32,6 +32,9 @@ _RL_MIN_DELAY = 1.0 / max(0.1, float(os.environ.get("HUNT_REQUESTS_PER_SECOND", 
 # Defense-in-depth scope guard — set by engine init via set_scope_guard()
 _SCOPE_GUARD = None  # Scope instance or None (disabled)
 
+# Egress policy broker — enforces prohibited methods, required headers, audit trail
+_EGRESS_POLICY = None
+
 # Evidence pipeline — auto-record HTTP observations when an engagement dir is set
 _EVIDENCE_DIR = None
 _CURRENT_CASE_ID = threading.local()
@@ -51,7 +54,7 @@ def clear_current_case():
 
 
 def _record_obs(method, url, req_headers, resp_status, resp_body, ident):
-    edir = _EVIDENCE_DIR or os.environ.get("HUNT_EVIDENCE_DIR")
+    edir = _EVIDENCE_DIR
     if not edir or resp_status <= 0:
         return
     try:
@@ -83,8 +86,16 @@ def _get_session():
 
 def set_scope_guard(scope):
     """Set the module-level scope guard. Called by engine at init."""
-    global _SCOPE_GUARD
+    global _SCOPE_GUARD, _EGRESS_POLICY
     _SCOPE_GUARD = scope
+    # Also set up egress policy broker from scope
+    if scope:
+        try:
+            import egress as _EG
+            _EGRESS_POLICY = _EG.EgressPolicy(scope=scope)
+            _EG.set_egress_policy(_EGRESS_POLICY)
+        except Exception:
+            _EGRESS_POLICY = None
 
 
 class ScopeViolation(Exception):
@@ -220,6 +231,17 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
     if timeout is None:
         timeout = _DEFAULT_TIMEOUT
+    # Egress policy check (prohibited methods, scope, audit)
+    if _EGRESS_POLICY:
+        try:
+            import egress as _EG
+            decision = _EGRESS_POLICY.check_egress(method, url, headers)
+            _EGRESS_POLICY.record_decision(method, url, decision)
+            if not decision.allowed:
+                return 0, "", {"_error": f"egress denied: {decision.reason}"}
+        except Exception:
+            pass
+    # Scope guard (defense-in-depth, also covers case where egress policy not loaded)
     if _SCOPE_GUARD:
         reason = _SCOPE_GUARD.reject_reason(url)
         if reason:
@@ -234,6 +256,12 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
     h = dict(headers or {})
     if ua:
         h.setdefault("User-Agent", ua)
+    # Inject required headers from egress policy
+    if _EGRESS_POLICY:
+        try:
+            h = _EGRESS_POLICY.inject_required_headers(h)
+        except Exception:
+            pass
     if ident:
         try:
             import authn
@@ -402,9 +430,11 @@ def _selftest():
     sg = S.Scope(["example.com"], ["admin.example.com"])
     set_scope_guard(sg)
     code, _, h = get("https://evil.com/test")
-    assert code == 0 and "scope violation" in h.get("_error", ""), f"expected scope block: {code} {h}"
+    err = h.get("_error", "")
+    assert code == 0 and ("scope violation" in err or "egress denied" in err or "scope:" in err), f"expected scope block: {code} {h}"
     code2, _, h2 = get("https://admin.example.com/x")
-    assert code2 == 0 and "scope violation" in h2.get("_error", ""), f"expected out-of-scope block: {code2} {h2}"
+    err2 = h2.get("_error", "")
+    assert code2 == 0 and ("scope violation" in err2 or "egress denied" in err2 or "scope:" in err2), f"expected out-of-scope block: {code2} {h2}"
     set_scope_guard(None)
 
     # fail-closed: no scope guard + non-localhost = blocked

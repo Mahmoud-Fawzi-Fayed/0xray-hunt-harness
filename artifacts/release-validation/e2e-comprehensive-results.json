@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-26T12:07:11Z",
+  "timestamp": "2026-10-26T13:05:25Z",
   "pass": 27,
   "fail": 0,
   "blocked": 0,
@@ -151,9 +151,9 @@
     },
     {
       "id": "T8.2",
-      "name": "Browser scope enforcement",
+      "name": "Browser scope enforcement (production blocker)",
       "status": "PASS",
-      "detail": "OOS attempted=True, blocked=1, sink_hits=0"
+      "detail": "sink_hits=0 (using browser._install_scope_blocker)"
     },
     {
       "id": "T9.1",

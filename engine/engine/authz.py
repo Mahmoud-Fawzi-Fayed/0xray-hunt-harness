@@ -34,21 +34,22 @@ def _similar(a, b):
     return difflib.SequenceMatcher(None, a[:4000], b[:4000]).ratio()
 
 
-def diff_one(method, url, body, slug, _get=None):
+def diff_one(method, url, body, slug, _get=None, owner="A", accessor="B"):
     g = _get or netget.get
-    sa, ta, _ = g(url, method=method, data=body, ident="A", slug=slug)
-    sb, tb, _ = g(url, method=method, data=body, ident="B", slug=slug)
+    sa, ta, _ = g(url, method=method, data=body, ident=owner, slug=slug)
+    sb, tb, _ = g(url, method=method, data=body, ident=accessor, slug=slug)
     sim = round(_similar(ta or "", tb or ""), 3)
     has_id = bool(ID_SEG.search(url))
-    # B reaching the same 2xx content as A on an id-bearing request => likely missing object-level authz
     flag = (200 <= (sb or 0) < 300) and (200 <= (sa or 0) < 300) and sim >= 0.9 and has_id
-    return {"url": url, "method": method, "A_status": sa, "B_status": sb,
+    return {"url": url, "method": method, "owner": owner, "accessor": accessor,
+            "A_status": sa, "B_status": sb,
             "A_len": len(ta or ""), "B_len": len(tb or ""), "similarity": sim,
             "id_bearing": has_id, "bola_suspect": flag}
 
 
-def diff(reqs, slug, _get=None):
-    out = [diff_one(r.get("method", "GET"), r["url"], r.get("body"), slug, _get=_get)
+def diff(reqs, slug, _get=None, owner="A", accessor="B"):
+    out = [diff_one(r.get("method", "GET"), r["url"], r.get("body"), slug, _get=_get,
+                    owner=r.get("owner", owner), accessor=r.get("accessor", accessor))
            for r in reqs if r.get("url")]
     out.sort(key=lambda r: (not r["bola_suspect"], -r["similarity"]))
     return out
@@ -104,13 +105,13 @@ def _object_urls(base_url, ids):
     return res[:20]
 
 
-def id_oracle(base_url, slug, _get=None):
-    """IDOR ID-ORACLE — the primitive a plain A-vs-B diff misses on list/self endpoints. As A, read
-    base_url, harvest A's object ids, then try to read A's objects AS B. A bola_suspect means B read
-    A-owned data => IDOR/BOLA candidate. Read-only, bounded. Returns suspect diffs (may be empty)."""
+def id_oracle(base_url, slug, _get=None, owner="A", accessor="B"):
+    """IDOR ID-ORACLE — the primitive a plain A-vs-B diff misses on list/self endpoints. As owner, read
+    base_url, harvest owner's object ids, then try to read owner's objects AS accessor. A bola_suspect
+    means accessor read owner-owned data => IDOR/BOLA candidate. Read-only, bounded."""
     g = _get or netget.get
     try:
-        sa, ta, _ = g(base_url, method="GET", ident="A", slug=slug)
+        sa, ta, _ = g(base_url, method="GET", ident=owner, slug=slug)
     except Exception:  # noqa: BLE001
         return []
     if not (200 <= (sa or 0) < 300) or not ta:
@@ -118,7 +119,7 @@ def id_oracle(base_url, slug, _get=None):
     suspects = []
     for ou in _object_urls(base_url, _extract_ids(ta)):
         try:
-            d = diff_one("GET", ou, None, slug, _get=g)
+            d = diff_one("GET", ou, None, slug, _get=g, owner=owner, accessor=accessor)
         except Exception:  # noqa: BLE001
             continue
         if d.get("bola_suspect"):
@@ -164,6 +165,30 @@ def _selftest():
     assert r["bola_suspect"] is True, r
     r2 = diff_one("GET", "https://x/profile", None, "t", _get=fake)
     assert r2["bola_suspect"] is False, r2
+    # Verify owner/accessor parameters are honored (not hardcoded A/B)
+    calls = []
+    def tracking_fake(url, method="GET", data=None, ident=None, slug=None, **k):
+        calls.append(ident)
+        return 200, "same content for all............................", {}
+    r3 = diff_one("GET", "https://x/api/items/456", None, "t", _get=tracking_fake,
+                  owner="admin", accessor="viewer")
+    assert calls == ["admin", "viewer"], f"expected owner/accessor used, got {calls}"
+    assert r3["owner"] == "admin" and r3["accessor"] == "viewer", r3
+    # Verify diff() passes per-request owner/accessor
+    calls.clear()
+    diff([{"url": "https://x/api/items/1", "owner": "X", "accessor": "Y"}], "t",
+         _get=tracking_fake)
+    assert calls == ["X", "Y"], f"diff per-request owner/accessor not passed: {calls}"
+    # Verify id_oracle uses planned identities
+    calls.clear()
+    def oracle_fake(url, method="GET", data=None, ident=None, slug=None, **k):
+        calls.append(ident)
+        if ident == "owner1":
+            return 200, '{"items": [{"id": "obj-42"}]}', {}
+        return 200, '{"items": [{"id": "obj-42"}]}', {}
+    id_oracle("https://x/api/items", "t", _get=oracle_fake, owner="owner1", accessor="reader1")
+    assert calls[0] == "owner1", f"id_oracle first call should use owner, got {calls}"
+    assert all(c in ("owner1", "reader1") for c in calls), f"unexpected idents: {calls}"
     print("authz.py self-test: PASS")
     return 0
 

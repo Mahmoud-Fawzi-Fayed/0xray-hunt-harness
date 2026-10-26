@@ -227,14 +227,12 @@ class Engagement:
         return added
 
     def collapse_patterns(self):
-        """Mark extra concrete URLs of the same pattern tested, leaving one representative huntable."""
+        """Mark extra concrete URLs of the same pattern as COLLAPSED, leaving one representative huntable.
+        Collapsed items are excluded from the hunt worklist but NOT counted as tested coverage."""
         groups = {}
         for s in self.state["surface"]:
             groups.setdefault(self._pat_key(s), []).append(s)
-        tested = self.state.get("tested")
-        if not isinstance(tested, dict):
-            tested = {str(k): 0.0 for k in (tested or [])}
-            self.state["tested"] = tested
+        collapsed = self.state.setdefault("collapsed", {})
         now = time.time()
         n = 0
         for items in groups.values():
@@ -245,8 +243,8 @@ class Engagement:
                 if s is keep:
                     continue
                 k = self._key(s)
-                if k not in tested:
-                    tested[k] = now
+                if k not in collapsed:
+                    collapsed[k] = now
                     n += 1
         if n:
             self.save()
@@ -313,12 +311,13 @@ class Engagement:
         tmap = self._tested_map()
         notes = self.state.get("hunt_notes") if isinstance(self.state.get("hunt_notes"), dict) else {}
         skipped = set((self.state.get("skipped") or {}).keys())
+        collapsed = set((self.state.get("collapsed") or {}).keys())
         now = time.time()
         ttl = RETEST_HOURS * 3600
         ranked = []                                # (group, -eff_priority, last_tested): sorts untested first
         for s in self.state["surface"]:
             k = self._key(s)
-            if k in skipped:
+            if k in skipped or k in collapsed:
                 continue
             ep = -self._eff_priority(s)
             last = tmap.get(k)

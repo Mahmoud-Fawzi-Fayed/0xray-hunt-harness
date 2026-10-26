@@ -92,14 +92,21 @@ class Scope:
         self.out_path_restrictions = out_path_restrictions or {}  # {host: ["/excluded/path"]} path-specific exclusions
         self.policy = {}  # program-level policy: rate_limit, prohibited_actions, required_headers, auth_restrictions
         # Port enforcement: scope entries with explicit ports restrict that host to those ports only
-        self._allowed_ports = {}  # {host: set(ports)}
+        self._allowed_ports = {}       # {exact_host: set(ports)}
+        self._wildcard_ports = {}      # {base_domain: set(ports)} for *.domain:port entries
         for p in self.in_scope:
             stripped = p.strip().lower()
             if ":" in stripped and not stripped.startswith("re:") and "/" not in stripped:
                 parts = stripped.rsplit(":", 1)
                 if parts[1].rstrip(".").isdigit():
-                    host = parts[0].lstrip("=").rstrip(".").lstrip("*.")
-                    self._allowed_ports.setdefault(host, set()).add(int(parts[1]))
+                    port = int(parts[1])
+                    host_part = parts[0].rstrip(".")
+                    if host_part.startswith("*."):
+                        base = host_part[2:].rstrip(".")
+                        self._wildcard_ports.setdefault(base, set()).add(port)
+                    else:
+                        host = host_part.lstrip("=").rstrip(".")
+                        self._allowed_ports.setdefault(host, set()).add(port)
 
     @classmethod
     def load(cls, path):
@@ -153,6 +160,16 @@ class Scope:
             for pfx in prefixes
         )
 
+    def _resolve_allowed_ports(self, host):
+        """Return the set of allowed ports for a host, or None if no port restriction applies.
+        Checks exact-host entries first, then wildcard entries for subdomain matches."""
+        if host in self._allowed_ports:
+            return self._allowed_ports[host]
+        for base, ports in self._wildcard_ports.items():
+            if host == base or host.endswith("." + base):
+                return ports
+        return None
+
     def in_scope_host(self, target):
         host = _host_of(target)
         if not host:
@@ -162,7 +179,8 @@ class Scope:
         if not any(_match(p, host) for p in self.in_scope):
             return False
         # Port enforcement: if scope entries specified ports for this host, only those are allowed
-        if host in self._allowed_ports:
+        allowed = self._resolve_allowed_ports(host)
+        if allowed is not None:
             port = _port_of(target)
             if port is None:
                 try:
@@ -170,7 +188,7 @@ class Scope:
                 except Exception:
                     scheme = "https"
                 port = 443 if scheme == "https" else 80
-            if port not in self._allowed_ports[host]:
+            if port not in allowed:
                 return False
         try:
             path = urlparse(target).path or "/"
@@ -193,7 +211,8 @@ class Scope:
             return f"{host} matches an out-of-scope rule"
         if not any(_match(p, host) for p in self.in_scope):
             return f"{host} matches no in-scope rule (default deny)"
-        if host in self._allowed_ports:
+        allowed = self._resolve_allowed_ports(host)
+        if allowed is not None:
             port = _port_of(target)
             if port is None:
                 try:
@@ -201,8 +220,8 @@ class Scope:
                 except Exception:
                     scheme = "https"
                 port = 443 if scheme == "https" else 80
-            if port not in self._allowed_ports[host]:
-                return f"port {port} not in allowed ports {self._allowed_ports[host]} for {host}"
+            if port not in allowed:
+                return f"port {port} not in allowed ports {allowed} for {host}"
         try:
             path = urlparse(target).path or "/"
         except Exception:
@@ -294,6 +313,19 @@ def _selftest():
     # reject_reason includes port info
     assert "port" in (s_port.reject_reason("http://127.0.0.1:9090/") or "")
     assert s_port.reject_reason("http://127.0.0.1:8080/") is None
+    # Wildcard port enforcement: *.example.com:8443 must restrict subdomains to port 8443
+    s_wport = Scope(in_scope=["*.example.com:8443"])
+    assert s_wport.in_scope_host("https://api.example.com:8443/"), "subdomain on correct port must be allowed"
+    assert s_wport.in_scope_host("https://example.com:8443/"), "apex on correct port must be allowed"
+    assert not s_wport.in_scope_host("https://api.example.com:443/"), "subdomain on wrong port must be denied"
+    assert not s_wport.in_scope_host("https://api.example.com/"), "subdomain on default port must be denied"
+    assert not s_wport.in_scope_host("https://example.com/"), "apex on default port must be denied"
+    assert "port" in (s_wport.reject_reason("https://api.example.com:443/") or "")
+    # Mixed: exact host port + wildcard port
+    s_mix = Scope(in_scope=["*.corp.io:8443", "=api.corp.io:9090"])
+    assert s_mix.in_scope_host("https://api.corp.io:9090/"), "exact host override"
+    assert s_mix.in_scope_host("https://web.corp.io:8443/"), "wildcard subdomain correct port"
+    assert not s_mix.in_scope_host("https://web.corp.io:9090/"), "wildcard subdomain wrong port"
     print("scope.py self-test: PASS")
 
 
