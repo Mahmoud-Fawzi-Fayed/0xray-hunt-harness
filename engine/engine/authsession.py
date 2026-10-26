@@ -387,9 +387,19 @@ def _mirror_to_authn(program, session, base, ident="A"):
         pass
 
 
+SESSION_MAX_AGE_SEC = int(os.environ.get("SESSION_MAX_AGE_SEC", "3600"))
+
+
 def valid(session):
-    """A session is usable if it carries at least one cookie or an auth header."""
+    """A session is usable if it carries at least one cookie or an auth header AND has not expired.
+
+    Expiry: if the session has a ``ts`` field and it is older than SESSION_MAX_AGE_SEC (env-tunable,
+    default 3600 s), the session is stale and must be refreshed via relogin() or a fresh paste.
+    """
     if not isinstance(session, dict) or not session.get("success"):
+        return False
+    ts = session.get("ts")
+    if isinstance(ts, (int, float)) and (time.time() - ts) > SESSION_MAX_AGE_SEC:
         return False
     return bool(session.get("cookies")) or bool(session.get("headers"))
 
@@ -1029,6 +1039,51 @@ def _cmd_selftest(_a):
     assert load_creds("acme", base)["B"]["method"] == "GET"
     raw = _request("https://example.com/x", headers={"X-Auth-Token": "abc"})
     assert raw.headers.get("X-Auth-Token") == "abc"
+
+    # --- P1§9: expired session detection ---
+    # A session with ts=0 (epoch) must be detected as expired by valid()
+    old_env = os.environ.get("SESSION_MAX_AGE_SEC")
+    try:
+        os.environ["SESSION_MAX_AGE_SEC"] = "3600"                     # ensure default
+        global SESSION_MAX_AGE_SEC                                     # noqa: PLW0603
+        SESSION_MAX_AGE_SEC = 3600
+        expired_sess = {"success": True, "cookies": {"sid": "old"}, "ts": 0}
+        assert not valid(expired_sess), "session with ts=0 should be expired"
+        # A session with a RECENT ts must still be valid
+        fresh_sess = {"success": True, "cookies": {"sid": "new"}, "ts": time.time()}
+        assert valid(fresh_sess), "session with fresh ts should be valid"
+        # A session with NO ts at all should still pass (legacy records)
+        no_ts_sess = {"success": True, "cookies": {"sid": "legacy"}}
+        assert valid(no_ts_sess), "session without ts should be valid (legacy)"
+    finally:
+        if old_env is None:
+            os.environ.pop("SESSION_MAX_AGE_SEC", None)
+        else:
+            os.environ["SESSION_MAX_AGE_SEC"] = old_env
+        SESSION_MAX_AGE_SEC = int(os.environ.get("SESSION_MAX_AGE_SEC", "3600"))
+
+    # --- P1§9: identity isolation (A/B store no cross-contamination) ---
+    sess_a = {"success": True, "host": "a.acme.com", "program": "acme",
+              "cookies": {"sid": "AAAA"}, "headers": {}, "user": "user-a",
+              "source": "manual", "ts": time.time()}
+    sess_b = {"success": True, "host": "b.acme.com", "program": "acme",
+              "cookies": {"sid": "BBBB"}, "headers": {}, "user": "user-b",
+              "source": "manual", "ts": time.time()}
+    # Save A then B under different program slugs to test isolation
+    save("acme-a-iso", sess_a, base=base)
+    save("acme-b-iso", sess_b, base=base)
+    loaded_a = load("acme-a-iso", base)
+    loaded_b = load("acme-b-iso", base)
+    assert loaded_a is not None and loaded_b is not None
+    assert loaded_a["cookies"]["sid"] == "AAAA", f"A leaked: {loaded_a['cookies']}"
+    assert loaded_b["cookies"]["sid"] == "BBBB", f"B leaked: {loaded_b['cookies']}"
+    assert loaded_a["user"] == "user-a" and loaded_b["user"] == "user-b"
+    # Overwriting B must not affect A
+    sess_b2 = dict(sess_b, cookies={"sid": "BBBB2"}, user="user-b2")
+    save("acme-b-iso", sess_b2, base=base)
+    assert load("acme-a-iso", base)["cookies"]["sid"] == "AAAA", "saving B clobbered A"
+    assert load("acme-b-iso", base)["cookies"]["sid"] == "BBBB2"
+
     print("authsession.py self-test: PASS")
     return 0
 

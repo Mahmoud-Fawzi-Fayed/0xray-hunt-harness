@@ -144,6 +144,43 @@ def _is_localhost(url):
         return False
 
 
+_MAX_REDIRECT_HOPS = int(os.environ.get("HUNT_MAX_REDIRECTS", "5") or 5)
+
+
+def follow_redirects(url, method="GET", data=None, headers=None, timeout=None,
+                     ident=None, slug=None, max_hops=None):
+    """Follow redirects safely — each hop re-authorized against scope, credentials stripped on origin change."""
+    from urllib.parse import urlparse, urljoin
+    hops = max_hops or _MAX_REDIRECT_HOPS
+    current_url = url
+    current_headers = dict(headers or {})
+    prev_origin = None
+    for _ in range(hops):
+        code, text, rh = get(current_url, method=method, data=data, headers=current_headers,
+                             timeout=timeout, ident=ident, slug=slug)
+        if code not in (301, 302, 303, 307, 308):
+            return code, text, rh
+        loc = rh.get("location", "")
+        if not loc:
+            return code, text, rh
+        if rh.get("_redirect_blocked"):
+            return 0, "", {"_error": f"redirect to out-of-scope: {loc}", "_redirect_blocked": rh["_redirect_blocked"]}
+        next_url = urljoin(current_url, loc)
+        cur_parsed = urlparse(current_url)
+        next_parsed = urlparse(next_url)
+        cur_origin = f"{cur_parsed.scheme}://{cur_parsed.netloc}"
+        next_origin = f"{next_parsed.scheme}://{next_parsed.netloc}"
+        if cur_origin != next_origin:
+            for k in list(current_headers):
+                if k.lower() in ("authorization", "cookie", "x-api-key"):
+                    del current_headers[k]
+        if code == 303:
+            method = "GET"
+            data = None
+        current_url = next_url
+    return 0, "", {"_error": f"too many redirects ({hops} hops)"}
+
+
 def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, slug=None, allow_redirects=False):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
@@ -188,7 +225,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         kw = {"impersonate": imp, "timeout": timeout, "headers": h, "verify": _verify}
         if chosen_proxy:
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
-        r = cr.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
+        r = cr.request(method.upper(), url, data=data, allow_redirects=False, **kw)
         _rate_limit(host, r.status_code)
         rh = {k.lower(): v for k, v in r.headers.items()}
         # Validate redirect destination against scope
@@ -212,7 +249,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         kw = {"timeout": timeout, "headers": h, "verify": _verify}
         if chosen_proxy:
             kw["proxies"] = {"http": chosen_proxy, "https": chosen_proxy}
-        r = sess.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
+        r = sess.request(method.upper(), url, data=data, allow_redirects=False, **kw)
         _rate_limit(host, r.status_code)
         rh = {k.lower(): v for k, v in r.headers.items()}
         if _SCOPE_GUARD and r.status_code in (301, 302, 303, 307, 308):
@@ -229,8 +266,50 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         return 0, "", {"_error": str(e)}
 
 
+def _load_scope_for_cli(scope_file=None, slug=None):
+    """Resolve and install scope guard for CLI/subprocess use. Returns True on success."""
+    try:
+        from scope import Scope
+    except ImportError:
+        print("ERROR: scope.py not importable — cannot enforce policy", file=sys.stderr)
+        return False
+    # Explicit --scope-file takes priority
+    if scope_file:
+        if not os.path.isfile(scope_file):
+            print(f"ERROR: scope file not found: {scope_file}", file=sys.stderr)
+            return False
+        try:
+            sc = Scope.load(scope_file)
+            set_scope_guard(sc)
+            return True
+        except Exception as e:
+            print(f"ERROR: invalid scope file {scope_file}: {e}", file=sys.stderr)
+            return False
+    # Resolve from --slug via engagement directory
+    if slug:
+        base = os.path.expanduser(os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements"))
+        for candidate in [
+            os.path.join(base, "_targets", slug + ".json"),
+            os.path.join(base, slug, "scope.json"),
+        ]:
+            if os.path.isfile(candidate):
+                try:
+                    sc = Scope.load(candidate)
+                    set_scope_guard(sc)
+                    return True
+                except Exception:
+                    continue
+        print(f"ERROR: no scope file found for slug '{slug}'", file=sys.stderr)
+        return False
+    return False
+
+
 def _main(argv):
-    ident = slug = None
+    if not argv or "--help" in argv or "-h" in argv:
+        print("usage: netget.py <METHOD> <URL> [body] [--as A|B] [--slug <target>] [--scope-file <path>]",
+              file=sys.stderr)
+        return 0
+    ident = slug = scope_file = None
     pos = []
     i = 0
     while i < len(argv):
@@ -239,14 +318,23 @@ def _main(argv):
             ident = argv[i + 1]; i += 2; continue
         if a == "--slug" and i + 1 < len(argv):
             slug = argv[i + 1]; i += 2; continue
+        if a == "--scope-file" and i + 1 < len(argv):
+            scope_file = argv[i + 1]; i += 2; continue
         pos.append(a); i += 1
     if not pos:
-        print("usage: netget.py <METHOD> <URL> [body] [--as A|B] [--slug <target>]", file=sys.stderr)
-        return 2
+        print("usage: netget.py <METHOD> <URL> [body] [--as A|B] [--slug <target>] [--scope-file <path>]",
+              file=sys.stderr)
+        return 0
     if len(pos) == 1:
         method, url, body = "GET", pos[0], None
     else:
         method, url, body = pos[0], pos[1], (pos[2] if len(pos) > 2 else None)
+    # Load scope guard before any request — fail-closed for non-localhost
+    if not _is_localhost(url):
+        if not _load_scope_for_cli(scope_file=scope_file, slug=slug):
+            print(f"ERROR: no valid scope policy — refusing request to {url}", file=sys.stderr)
+            print("Provide --scope-file <path> or --slug <target> to authorize requests.", file=sys.stderr)
+            return 1
     hdrs = {}
     if body:
         try:
@@ -301,6 +389,35 @@ def _selftest():
     # rate limiter state structure
     assert isinstance(_RL_STATE, dict)
     assert _RL_MIN_DELAY > 0
+
+    # CLI scope loading — _load_scope_for_cli
+    import tempfile
+    td = tempfile.mkdtemp()
+    scope_path = os.path.join(td, "test-scope.json")
+    with open(scope_path, "w") as f:
+        json.dump({"name": "cli-test", "in_scope": ["example.com"], "out_of_scope": []}, f)
+    set_scope_guard(None)
+    assert _load_scope_for_cli(scope_file=scope_path), "should load from --scope-file"
+    assert _SCOPE_GUARD is not None, "scope guard should be set after CLI load"
+    # Now example.com should be in-scope
+    code_cli, _, h_cli = get("https://example.com/test", timeout=3)
+    assert "no scope guard" not in h_cli.get("_error", ""), "example.com should pass scope after CLI load"
+    set_scope_guard(None)
+    # Missing scope file should fail
+    assert not _load_scope_for_cli(scope_file="/nonexistent/scope.json"), "missing file should fail"
+    # Slug resolution
+    tgt_dir = os.path.join(td, "_targets")
+    os.makedirs(tgt_dir, exist_ok=True)
+    with open(os.path.join(tgt_dir, "test-prog.json"), "w") as f:
+        json.dump({"name": "test-prog", "in_scope": ["httpbin.org"], "out_of_scope": []}, f)
+    os.environ["BUGHUNTER_BASE"] = td
+    set_scope_guard(None)
+    assert _load_scope_for_cli(slug="test-prog"), "should load from slug"
+    assert _SCOPE_GUARD is not None, "scope guard should be set from slug"
+    set_scope_guard(None)
+    assert not _load_scope_for_cli(slug="nonexistent-prog"), "missing slug should fail"
+    os.environ.pop("BUGHUNTER_BASE", None)
+    set_scope_guard(None)
 
     print("netget.py self-test: PASS")
     return 0

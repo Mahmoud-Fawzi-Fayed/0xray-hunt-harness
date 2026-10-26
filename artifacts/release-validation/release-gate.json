@@ -1,0 +1,198 @@
+{
+  "harness_version": "10.0",
+  "generated": "2026-10-26T14:30:00Z",
+  "baseline_tag": "baseline-pre-release",
+  "head_commit": "7d5af11",
+  "selftest_modules": {"passed": 63, "failed": 0, "total": 63},
+  "e2e_comprehensive": {"passed": 27, "failed": 0, "blocked": 0, "total": 27},
+  "policy_egress": {"passed": 10, "failed": 0, "total": 10},
+  "evidence_pipeline": {"passed": 9, "failed": 0, "total": 9},
+  "oos_requests_total": 0,
+
+  "requirements": {
+    "P0_1_cli_policy_enforcement": {
+      "section": "§1",
+      "title": "Standalone CLI tools load a policy before any request",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "T-PE-1: netget --scope-file in-scope succeeds",
+        "T-PE-2: netget no-scope blocks remote request",
+        "T-PE-3: scope-file blocks OOS target",
+        "T-PE-4: --slug resolves from _targets/",
+        "T-PE-6: malformed scope file rejected",
+        "T-PE-7: nonexistent slug rejected",
+        "netget.py:_load_scope_for_cli() fail-closed implementation",
+        "netget.py:_main() exits 1 for non-localhost without scope"
+      ]
+    },
+    "P0_2_browser_cli_policy": {
+      "section": "§2",
+      "title": "browser.py CLI requires scope policy, exits nonzero without it",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "T-PE-8: browser CLI exits nonzero without scope",
+        "T8.2: browser scope enforcement blocks OOS, 0 sink hits",
+        "browser.py:_main() returns 1 on missing scope"
+      ]
+    },
+    "P0_3_safe_redirects": {
+      "section": "§3",
+      "title": "Safe redirect following with per-hop scope re-authorization",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "T-PE-9: Redirect to OOS sink produces 0 sink hits",
+        "T3.3: Zero OOS sink requests after netget",
+        "netget.py: allow_redirects=False hardcoded in both transports",
+        "netget.py:follow_redirects() re-authorizes each hop, strips creds on origin change",
+        "netget.py:_MAX_REDIRECT_HOPS=5 loop guard"
+      ]
+    },
+    "P0_4_deterministic_ab_auth": {
+      "section": "§4",
+      "title": "Deterministic A/B authorization from test plan",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "T5.5: Auth A/B cases with both directions (6 cases, 2 unique pairs)",
+        "T6.3: Method isolation in coverage",
+        "engine.py:_authz_closeout() accepts owner/accessor/role/method/body",
+        "engine.py:_hunt_deep() passes planned parameters",
+        "testplan.py: body dict for write-method cases"
+      ]
+    },
+    "P0_5_evidence_pipeline": {
+      "section": "§5",
+      "title": "Transport-recorded evidence pipeline with append-only storage",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "T-EV-1: record_observation stores valid observation",
+        "T-EV-2: record_attempt links observations to case",
+        "T-EV-3: validate_evidence rejects no-observation case",
+        "T-EV-5: Fake LLM payload rejected",
+        "T-EV-6: coverage derived from observations only",
+        "T-EV-7: Sensitive headers redacted",
+        "evidence.py: HttpObservation/TestAttempt JSONL storage"
+      ]
+    },
+    "P0_6_phase_states": {
+      "section": "§6",
+      "title": "Explicit phase statuses with dependency checking and failure propagation",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "state.py: PHASE_NOT_STARTED/RUNNING/PASS/BLOCKED/FAILED/CANCELLED/PARTIAL",
+        "state.py: set_phase_status/get_phase_status/phase_can_proceed/blocked_dependencies",
+        "state.py: checkpoint() with atomic writes (tmp + os.replace)",
+        "state.py: reconcile_stale_running() cleans orphaned RUNNING states",
+        "state.py selftest PASS (63/63)"
+      ]
+    },
+    "P1_7_discovery_reliability": {
+      "section": "§7",
+      "title": "Discovery coverage metric and source provenance",
+      "priority": "P1",
+      "status": "PASS",
+      "evidence": [
+        "T4.1: Explorer analyzes surface (5 pages, 3 APIs)",
+        "discovery.py: endpoint depth score replaces category gate",
+        "discovery.py: source provenance (documented, observed, inferred, guessed, confirmed)",
+        "coverage.py: per-class, per-role, per-operation coverage reporting"
+      ]
+    },
+    "P1_8_runtime_permissions": {
+      "section": "§8",
+      "title": "Runtime capability and permission correctness",
+      "priority": "P1",
+      "status": "PASS",
+      "evidence": [
+        "engine.py: agent subprocess invocation with scope inheritance",
+        "guardrails.py: write-action scope enforcement",
+        "T2.1: Guardrails scope on all URL actions",
+        "T2.2: Guardrails fail-closed on empty scope"
+      ]
+    },
+    "P1_9_auth_lifecycle": {
+      "section": "§9",
+      "title": "Authorization, authentication and identity lifecycle",
+      "priority": "P1",
+      "status": "PASS",
+      "evidence": [
+        "authsession.py: session validation and refresh",
+        "authn.py: per-identity session isolation",
+        "T-PE-5: netget --as A --slug loads identity",
+        "identity.py: disposable account creation with guardrail cap"
+      ]
+    },
+    "P1_10_detection_quality": {
+      "section": "§10",
+      "title": "Detection, triage and anti-duplicate quality",
+      "priority": "P1",
+      "status": "PASS",
+      "evidence": [
+        "T7.1: Dedup gate functional",
+        "T9.1: Verify rejects weak finding",
+        "dedup.py: corpus-based duplicate detection",
+        "verify.py: per-class PoC minimum enforcement",
+        "disposition.py: finding triage lifecycle"
+      ]
+    },
+    "P1_11_ci_quality": {
+      "section": "§11",
+      "title": "CI pipeline with comprehensive test suites",
+      "priority": "P1",
+      "status": "PASS",
+      "evidence": [
+        "ci.yml: push/PR triggers on engine/** and workflow changes",
+        "ci.yml: secret-scan, skills-lint, selfcheck, e2e, e2e-comprehensive, policy-egress, evidence-pipeline jobs",
+        "63/63 selftests pass",
+        "27/27 comprehensive E2E pass",
+        "10/10 policy egress pass",
+        "9/9 evidence pipeline pass"
+      ]
+    },
+    "P2_12_usability_docs": {
+      "section": "§12",
+      "title": "Usability, observability, documentation, performance",
+      "priority": "P2",
+      "status": "PASS",
+      "evidence": [
+        "CLAUDE.md: comprehensive module reference and pipeline docs",
+        "docs/architecture-and-threat-model.md: component map and trust boundaries",
+        "docs/authorized-testing-runbook.md: operational guide",
+        "docs/operation-and-test-schemas.md: test case and evidence schemas",
+        "coverage.py show: visual coverage matrix with blind spot detection",
+        "learn.py: self-learning system with gap detection"
+      ]
+    },
+    "safety_oos_zero": {
+      "section": "§SAFETY",
+      "title": "Zero out-of-scope requests in adversarial test suite",
+      "priority": "P0",
+      "status": "PASS",
+      "evidence": [
+        "T10.1: Total OOS sink requests = 0",
+        "T-PE-F: Total OOS requests across all policy tests = 0",
+        "OOS sink monitored on APP_PORT+1 for every test run"
+      ]
+    }
+  },
+
+  "deliverables": {
+    "release_contract": {"file": "docs/RELEASE-CONTRACT.md", "status": "COMPLETE"},
+    "threat_model": {"file": "docs/THREAT-MODEL.md", "status": "COMPLETE"},
+    "test_case_schema": {"file": "docs/TEST-CASE-SCHEMA.md", "status": "COMPLETE"},
+    "evidence_schema": {"file": "docs/EVIDENCE-SCHEMA.md", "status": "COMPLETE"},
+    "operator_runbook": {"file": "docs/OPERATOR-RUNBOOK.md", "status": "COMPLETE"},
+    "release_gate_json": {"file": "artifacts/release-validation/release-gate.json", "status": "COMPLETE"},
+    "e2e_results": {"file": "artifacts/release-validation/e2e-comprehensive-results.json", "status": "COMPLETE"},
+    "policy_egress_results": {"file": "artifacts/release-validation/policy-egress-results.json", "status": "COMPLETE"},
+    "evidence_pipeline_results": {"file": "artifacts/release-validation/evidence-pipeline-results.json", "status": "COMPLETE"}
+  },
+
+  "gate_verdict": "PASS",
+  "gate_notes": "All P0 safety fixes verified. All P1 quality gates pass. Zero OOS requests across all test suites. 63/63 selftests, 46/46 integration tests. LIKELY_DUP hard gate enforced in report(). netget.py --help UX fixed. All deliverable docs complete."
+}

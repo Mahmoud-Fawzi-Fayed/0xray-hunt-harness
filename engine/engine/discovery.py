@@ -242,6 +242,8 @@ def _discover_openapi(scope, log=print):
                         "tags": tags,
                         "summary": summary[:200],
                         "source": "openapi",
+                        "confidence": "high",
+                        "provenance": "documented",
                         "category": _categorize_endpoint(path, method, tags, summary),
                     })
 
@@ -270,6 +272,8 @@ def _discover_admin_internal(scope, log=print):
                     "method": "GET",
                     "status": code,
                     "source": "admin-probe",
+                    "confidence": "low",
+                    "provenance": "guessed_common_path",
                     "category": "admin_endpoints",
                     "content_type": content_type[:100],
                 })
@@ -302,6 +306,8 @@ def _discover_api_resources(scope, log=print):
                     "method": "GET",
                     "status": code,
                     "source": "resource-probe",
+                    "confidence": "low",
+                    "provenance": "guessed_common_path",
                     "category": _categorize_resource(resource),
                     "content_type": content_type[:100],
                     "has_data": bool(body and len(body) > 2 and body.strip() not in ("[]", "{}", "null", "")),
@@ -314,6 +320,8 @@ def _discover_api_resources(scope, log=print):
                                 "url": linked,
                                 "method": "GET",
                                 "source": "response-mining",
+                                "confidence": "high",
+                                "provenance": "observed_in_live_traffic",
                                 "category": _categorize_endpoint(urlparse(linked).path, "get", [], ""),
                             })
         log(f"discovery/resources: probed {probed} resource paths on {base}, "
@@ -346,6 +354,8 @@ def _discover_error_based(scope, found_endpoints, log=print, allow_intrusive=Fal
                     "method": method,
                     "status": code,
                     "source": "error-discovery",
+                    "confidence": "high",
+                    "provenance": "confirmed_live",
                     "category": ep.get("category", "api_endpoints"),
                     "note": f"method {method} returns {code} (not 405)",
                 })
@@ -376,6 +386,8 @@ def _discover_from_responses(scope, found_endpoints, log=print):
             "url": url,
             "method": "GET",
             "source": "response-mining-deep",
+            "confidence": "high",
+            "provenance": "observed_in_live_traffic",
             "category": _categorize_endpoint(urlparse(url).path, "get", [], ""),
         })
     if results:
@@ -410,6 +422,8 @@ def _discover_browser_capture(scope, slug, base, log=print):
                         "url": url,
                         "method": method,
                         "source": f"browser-capture/{ident}",
+                        "confidence": "high",
+                        "provenance": "observed_in_live_traffic",
                         "category": _categorize_endpoint(urlparse(url).path, method.lower(), [], ""),
                         "params": item.get("params", []),
                         "body_params": item.get("inputs", []),
@@ -448,6 +462,8 @@ def _discover_graphql(scope, log=print):
                 "url": url,
                 "method": item.get("method", "POST"),
                 "source": "graphql-introspection",
+                "confidence": "high",
+                "provenance": "documented",
                 "category": "api_endpoints",
                 "params": item.get("params", []),
                 "note": item.get("name", "") or item.get("summary", ""),
@@ -520,6 +536,8 @@ def _discover_js_bundles(scope, log=print):
                 "url": full_url,
                 "method": "GET",
                 "source": "js_bundle",
+                "confidence": "medium",
+                "provenance": "inferred_from_js",
                 "auth_required": False,
                 "params": [],
                 "tags": ["js-mined"],
@@ -532,6 +550,8 @@ def _discover_js_bundles(scope, log=print):
                 "url": full_url,
                 "method": "GET",
                 "source": "js_bundle",
+                "confidence": "medium",
+                "provenance": "inferred_from_js",
                 "auth_required": False,
                 "params": [],
                 "tags": ["js-mined", "route"],
@@ -543,14 +563,15 @@ def _discover_js_bundles(scope, log=print):
 
 
 def _compute_coverage(inventory):
-    """Compute discovery coverage from endpoint count and observed category breadth.
+    """Compute discovery coverage from endpoint depth, with category breadth as a bonus.
 
-    Blends two signals:
-      - endpoint depth: enough endpoints to justify hunting (tunable threshold)
-      - category breadth: what fraction of observable function areas were found
+    The primary signal is endpoint depth — how many distinct endpoints were found
+    relative to the minimum threshold. Category breadth adds up to 10% bonus to
+    reward diverse discovery, but a pure API with 300 endpoints and only 2 categories
+    is NOT penalized.
 
-    Missing categories are reported as blind spots but don't automatically fail
-    the gate — a pure-API target without a UI legitimately has no ui_features.
+    When fewer than 5 endpoints exist and fewer than 2 categories, coverage is
+    reported as unknown rather than a fictional percentage.
     """
     coverage = {}
     for cat in FUNCTION_CATEGORIES:
@@ -566,21 +587,39 @@ def _compute_coverage(inventory):
     uncovered = [cat for cat in FUNCTION_CATEGORIES if not coverage.get(cat, {}).get("covered")]
     blind_spots = len(uncovered)
 
-    # Blend: 60% endpoint depth (diminishing returns after threshold) + 40% category breadth.
-    # A target with 50 endpoints but only 2 categories => ~76%. A target with 10 endpoints
-    # across 8 categories => ~89%. Both are honest about what's missing.
+    # Source provenance breakdown
+    sources = {}
+    for ep in inventory:
+        src = ep.get("source", "unknown")
+        sources[src] = sources.get(src, 0) + 1
+
+    # Confidence breakdown
+    confidence_counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    for ep in inventory:
+        c = ep.get("confidence", "unknown")
+        confidence_counts[c] = confidence_counts.get(c, 0) + 1
+
+    # Coverage formula: endpoint depth is primary (90%), category breadth is bonus (10%)
     min_eps = max(1, int(os.environ.get("HUNT_MIN_DISCOVERY_ENDPOINTS", "15")))
-    depth_score = min(100.0, 100.0 * total_eps / min_eps)
-    breadth_score = (100.0 * covered_cats / total_cats) if total_cats else 100.0
-    coverage_pct = round(0.6 * depth_score + 0.4 * breadth_score, 1)
+    coverage_unknown = total_eps < 5 and covered_cats < 2
+
+    if coverage_unknown:
+        coverage_pct = 0.0
+    else:
+        depth_score = min(100.0, 100.0 * total_eps / min_eps)
+        breadth_bonus = 10.0 * (covered_cats / total_cats) if total_cats else 0.0
+        coverage_pct = round(min(100.0, 0.9 * depth_score + breadth_bonus), 1)
 
     coverage["_summary"] = {
         "total_categories": total_cats,
         "covered_categories": covered_cats,
         "coverage_pct": coverage_pct,
+        "coverage_unknown": coverage_unknown,
         "total_endpoints": total_eps,
         "blind_spots": blind_spots,
         "uncovered_categories": uncovered,
+        "coverage_sources": sources,
+        "confidence_breakdown": confidence_counts,
     }
     return coverage
 
@@ -931,6 +970,10 @@ def inventory_to_surface(inventory_data):
             item["note"] = note[:200]
         if ep.get("category"):
             item["category"] = ep["category"]
+        if ep.get("confidence"):
+            item["confidence"] = ep["confidence"]
+        if ep.get("provenance"):
+            item["provenance"] = ep["provenance"]
         items.append(item)
     return items
 
@@ -1005,15 +1048,32 @@ def _cmd_selftest(_a):
 
     # Test coverage computation
     test_inv = [
-        {"url": "/admin", "category": "admin_endpoints"},
-        {"url": "/login", "category": "auth_mechanisms"},
-        {"url": "/orgs", "category": "org_boundaries"},
+        {"url": "/admin", "category": "admin_endpoints", "source": "admin-probe", "confidence": "low"},
+        {"url": "/login", "category": "auth_mechanisms", "source": "openapi", "confidence": "high"},
+        {"url": "/orgs", "category": "org_boundaries", "source": "browser-capture", "confidence": "high"},
     ]
     cov = _compute_coverage(test_inv)
     assert cov["_summary"]["covered_categories"] == 3
     assert cov["_summary"]["total_categories"] == len(FUNCTION_CATEGORIES)
     assert cov["admin_endpoints"]["count"] == 1
     assert not cov["billing_flows"]["covered"]
+    assert "coverage_sources" in cov["_summary"]
+    assert "confidence_breakdown" in cov["_summary"]
+    assert cov["_summary"]["confidence_breakdown"]["high"] == 2
+    assert cov["_summary"]["confidence_breakdown"]["low"] == 1
+
+    # A pure API with many endpoints but few categories should NOT be penalized
+    big_api = [{"url": f"/api/v1/resource{i}", "category": "api_endpoints",
+                "source": "openapi", "confidence": "high"} for i in range(50)]
+    big_cov = _compute_coverage(big_api)
+    assert big_cov["_summary"]["coverage_pct"] >= 80, (
+        f"50-endpoint pure API should pass 80% gate, got {big_cov['_summary']['coverage_pct']}")
+    assert big_cov["_summary"]["covered_categories"] == 1
+
+    # Unknown coverage for very sparse results
+    tiny_inv = [{"url": "/x", "category": "api_endpoints"}]
+    tiny_cov = _compute_coverage(tiny_inv)
+    assert tiny_cov["_summary"]["coverage_unknown"] is True
 
     # Test priority
     high_ep = {"category": "credential_management", "auth_required": True, "method": "POST", "body_params": [{"name": "x"}]}

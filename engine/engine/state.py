@@ -17,6 +17,42 @@ import re
 import time
 from datetime import datetime, timezone
 
+DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
+
+# Phase status constants — explicit states for every pipeline phase.
+PHASE_NOT_STARTED = "NOT_STARTED"
+PHASE_RUNNING = "RUNNING"
+PHASE_PASS = "PASS"
+PHASE_BLOCKED = "BLOCKED"
+PHASE_FAILED = "FAILED"
+PHASE_CANCELLED = "CANCELLED"
+PHASE_PARTIAL = "PARTIAL"
+
+_VALID_PHASE_STATUSES = frozenset({
+    PHASE_NOT_STARTED, PHASE_RUNNING, PHASE_PASS,
+    PHASE_BLOCKED, PHASE_FAILED, PHASE_CANCELLED, PHASE_PARTIAL,
+})
+
+# Phases that allow a dependent phase to proceed
+_PROCEED_OK = frozenset({PHASE_PASS, PHASE_PARTIAL})
+
+# Pipeline phase order and dependencies
+PIPELINE_PHASES = ["recon", "discover", "explore", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
+PHASE_DEPENDENCIES = {
+    "discover": ["recon"],
+    "explore": ["discover"],
+    "rank": ["discover"],
+    "map": ["discover"],
+    "plan": ["discover"],
+    "hunt": ["discover", "plan"],
+    "validate": ["hunt"],
+    "chain": ["validate"],
+    "report": ["validate"],
+}
+
+# Schema version for state migration
+STATE_SCHEMA_VERSION = 2
+
 # Re-hunt window: a surface item tested >this-many-hours ago becomes eligible again (fresh model
 # rotation gets another shot — an LLM "nothing" from one pass is low-confidence, not terminal).
 # 0 or negative => never re-test (legacy "test once" behavior). Tune via HUNT_RETEST_HOURS.
@@ -104,6 +140,75 @@ class Engagement:
     # ---- phase ----
     def set_phase(self, phase):
         self.state["phase"] = phase
+        self.save()
+
+    @classmethod
+    def _migrate_state(cls, data):
+        """Ensure old state files get new keys without losing data."""
+        if "phases" not in data:
+            data["phases"] = {}
+        if "schema_version" not in data:
+            data["schema_version"] = 1
+        if data["schema_version"] < STATE_SCHEMA_VERSION:
+            if isinstance(data.get("tested"), list):
+                old = data["tested"]
+                data["tested"] = {str(i): _now() for i, _ in enumerate(old)} if old else {}
+            data["schema_version"] = STATE_SCHEMA_VERSION
+        return data
+
+    def set_phase_status(self, phase, status, cause="", evidence_path=""):
+        """Set the status of a pipeline phase with cause and evidence tracking."""
+        if status not in _VALID_PHASE_STATUSES:
+            raise ValueError(f"invalid phase status: {status!r}")
+        self._migrate_state(self.state)
+        self.state["phases"][phase] = {
+            "status": status,
+            "cause": cause,
+            "evidence": evidence_path,
+            "timestamp": _now(),
+        }
+        self.state["phase"] = phase
+        self.save()
+
+    def get_phase_status(self, phase):
+        """Return the stored phase dict or a NOT_STARTED default."""
+        self._migrate_state(self.state)
+        return self.state["phases"].get(phase, {"status": PHASE_NOT_STARTED})
+
+    def phase_can_proceed(self, phase, depends_on=None):
+        """True only if all dependency phases have status PASS or PARTIAL."""
+        if depends_on is None:
+            depends_on = PHASE_DEPENDENCIES.get(phase, [])
+        for dep in depends_on:
+            dep_status = self.get_phase_status(dep).get("status", PHASE_NOT_STARTED)
+            if dep_status not in _PROCEED_OK:
+                return False
+        return True
+
+    def blocked_dependencies(self, phase, depends_on=None):
+        """Return list of (phase, status, cause) for dependencies that block proceeding."""
+        if depends_on is None:
+            depends_on = PHASE_DEPENDENCIES.get(phase, [])
+        blocked = []
+        for dep in depends_on:
+            info = self.get_phase_status(dep)
+            dep_status = info.get("status", PHASE_NOT_STARTED)
+            if dep_status not in _PROCEED_OK:
+                blocked.append((dep, dep_status, info.get("cause", "")))
+        return blocked
+
+    def checkpoint(self):
+        """Alias for save() — atomic write to disk."""
+        self.save()
+
+    def reconcile_stale_running(self):
+        """After a crash, mark any RUNNING phases as FAILED with cause."""
+        self._migrate_state(self.state)
+        for phase, info in self.state.get("phases", {}).items():
+            if info.get("status") == PHASE_RUNNING:
+                info["status"] = PHASE_FAILED
+                info["cause"] = "stale RUNNING after crash/restart"
+                info["timestamp"] = _now()
         self.save()
 
     # ---- surface (discovered, scope-checked endpoints/params) ----
@@ -445,23 +550,98 @@ def _selftest():
         assert any(e3._key(s) == kept_key for s in e3.worklist()), "hunt_note alone is NOT coverage — item must re-queue without mark_tested"
         e.mark_rejected({"url": "http://t/a", "vuln_class": "idor"}, "false positive")
         assert "http://t/a|idor" in e.rejected_keys()
+
+        # Phase state machine
+        e4 = Engagement(d, "phase-test")
+        assert e4.get_phase_status("discover")["status"] == PHASE_NOT_STARTED
+        e4.set_phase_status("recon", PHASE_RUNNING)
+        assert e4.get_phase_status("recon")["status"] == PHASE_RUNNING
+        assert not e4.phase_can_proceed("discover")  # recon is RUNNING, not PASS
+        e4.set_phase_status("recon", PHASE_PASS)
+        assert e4.phase_can_proceed("discover")  # recon PASS -> discover can go
+        e4.set_phase_status("discover", PHASE_FAILED, cause="timeout")
+        assert not e4.phase_can_proceed("hunt")  # discover FAILED blocks hunt
+        blocked = e4.blocked_dependencies("hunt")
+        assert any(b[0] == "discover" for b in blocked), f"discover should be blocked: {blocked}"
+        e4.set_phase_status("discover", PHASE_PARTIAL, cause="low coverage")
+        assert e4.phase_can_proceed("explore")  # PARTIAL allows dependent phases
+
+        # Crash recovery: RUNNING -> FAILED
+        e4.set_phase_status("hunt", PHASE_RUNNING)
+        e4.reconcile_stale_running()
+        assert e4.get_phase_status("hunt")["status"] == PHASE_FAILED
+        assert "crash" in e4.get_phase_status("hunt")["cause"]
+
+        # Migration: old state without phases key
+        e5 = Engagement(d, "migrate-test")
+        assert "phases" not in e5.state
+        e5._migrate_state(e5.state)
+        assert "phases" in e5.state
+        assert e5.state["schema_version"] == STATE_SCHEMA_VERSION
+
+        # Persistence: reload sees phases
+        e4_reload = Engagement(d, "phase-test")
+        assert e4_reload.get_phase_status("recon")["status"] == PHASE_PASS
+
+        # Invalid status raises
+        try:
+            e4.set_phase_status("recon", "BOGUS")
+            assert False, "should have raised ValueError"
+        except ValueError:
+            pass
+
         print("state.py self-test: PASS")
     finally:
         shutil.rmtree(d)
 
 
-if __name__ == "__main__":
+def _main():
     import sys as _sys
-    if len(_sys.argv) > 1 and _sys.argv[1] == "metrics":
-        import argparse
-        p = argparse.ArgumentParser()
-        p.add_argument("cmd")
-        p.add_argument("--slug", required=True)
-        p.add_argument("--base", default=DEFAULT_BASE)
-        a = p.parse_args()
-        eng = Engagement(a.base, a.slug)
+    import argparse
+    if len(_sys.argv) < 2 or _sys.argv[1] == "selftest":
+        return _selftest()
+    p = argparse.ArgumentParser(description="engagement state & phase inspector")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    m_p = sub.add_parser("metrics")
+    m_p.add_argument("--slug", required=True)
+    m_p.add_argument("--base", default=DEFAULT_BASE)
+    s_p = sub.add_parser("status")
+    s_p.add_argument("--slug", required=True)
+    s_p.add_argument("--base", default=DEFAULT_BASE)
+    s_p.add_argument("--json", action="store_true")
+    sub.add_parser("selftest")
+    a = p.parse_args()
+    if a.cmd == "selftest":
+        return _selftest()
+    eng = Engagement(a.base, a.slug)
+    if a.cmd == "metrics":
         m = eng.metrics()
         s = eng.summary()
         print(json.dumps({**s, "metrics": m}, indent=2))
-    else:
-        _selftest()
+    elif a.cmd == "status":
+        phases = {}
+        for ph in PIPELINE_PHASES:
+            phases[ph] = eng.get_phase_status(ph)
+        out = {"slug": a.slug, "phase": eng.state.get("phase", "init"), "phases": phases,
+               "summary": eng.summary()}
+        if a.json:
+            print(json.dumps(out, indent=2))
+        else:
+            print(f"Engagement: {a.slug}  (current phase: {out['phase']})")
+            for ph in PIPELINE_PHASES:
+                info = phases[ph]
+                st = info.get("status", "NOT_STARTED")
+                cause = info.get("cause", "")
+                sym = {"PASS": "+", "RUNNING": "~", "BLOCKED": "!", "FAILED": "X",
+                       "CANCELLED": "-", "PARTIAL": "~", "NOT_STARTED": " "}.get(st, "?")
+                line = f"  [{sym}] {ph:12s} {st}"
+                if cause:
+                    line += f"  ({cause})"
+                print(line)
+            s = out["summary"]
+            print(f"\n  surface={s['surface']}  tested={s['tested']}  "
+                  f"candidates={s['candidates']}  confirmed={s['confirmed']}")
+
+
+if __name__ == "__main__":
+    _main()

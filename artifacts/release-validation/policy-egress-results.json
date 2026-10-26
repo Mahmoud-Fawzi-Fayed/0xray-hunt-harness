@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-10-26T11:25:33Z",
+  "pass": 10,
+  "fail": 0,
+  "blocked": 0,
+  "results": [
+    {
+      "id": "T-PE-1",
+      "name": "netget --scope-file in-scope request succeeds",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-2",
+      "name": "netget no-scope blocks remote request",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-3",
+      "name": "netget scope-file blocks OOS target",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-4",
+      "name": "netget --slug resolves policy from _targets/",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-5",
+      "name": "netget --as A --slug loads identity",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-6",
+      "name": "netget rejects malformed scope file",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-7",
+      "name": "netget rejects nonexistent slug",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-8",
+      "name": "browser CLI exits nonzero without scope",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-PE-9",
+      "name": "Redirect to OOS sink produces zero sink hits",
+      "status": "PASS",
+      "detail": "rc=0, 302 returned safely"
+    },
+    {
+      "id": "T-PE-F",
+      "name": "Total OOS requests across all policy tests",
+      "status": "PASS",
+      "detail": "0 prohibited requests"
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "timestamp": "2026-10-26T11:25:33Z",
+  "pass": 9,
+  "fail": 0,
+  "results": [
+    {
+      "id": "T-EV-1",
+      "name": "record_observation stores valid observation",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-2",
+      "name": "record_attempt links observations to case",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-3",
+      "name": "validate_evidence rejects case with no observations",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-4",
+      "name": "validate_evidence accepts case with real observation",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-5",
+      "name": "Fake LLM payload (no real observation) rejected",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-6",
+      "name": "coverage_from_evidence derives from observations only",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-7",
+      "name": "Sensitive headers redacted in stored observations",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-8",
+      "name": "get_observations filters by case_id and identity",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "id": "T-EV-9",
+      "name": "Transport error (status 0) does not validate",
+      "status": "PASS",
+      "detail": ""
+    }
+  ]
+}

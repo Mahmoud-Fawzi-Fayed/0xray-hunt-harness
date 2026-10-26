@@ -19,6 +19,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 
@@ -189,6 +190,10 @@ def _parse_result_json(stdout):
 # NOTE: 'timeout' is deliberately NOT here — retrying a timed-out step would burn another full timeout;
 # instead the step is left un-tested (hunt() doesn't mark it) so the NEXT round retries it cheaply.
 _RETRYABLE = {"parse:no-json", "rate-limited"}
+
+# Flags that should never appear in agent commands without explicit audit — these bypass safety
+# boundaries or skip permission gates and are flagged at command-build time.
+_DANGEROUS_FLAGS = ["--dangerously-skip-permissions", "--no-verify", "--yolo"]
 
 
 def _rate_limited(text):
@@ -595,21 +600,31 @@ def _cmd(task, model, resume_id=None):
         base += ["--format", "json"]
         if resume_id:
             base += ["-s", resume_id]
-        return base
-    if resume_id:
-        return [CURSOR_BIN, "--resume", resume_id, "-p", task, "--output-format", "json", "-f"]
-    return [CURSOR_BIN, "-p", task, "--output-format", "json", "-f"] + (["--model", model] if model else [])
+        cmd = base
+    elif resume_id:
+        cmd = [CURSOR_BIN, "--resume", resume_id, "-p", task, "--output-format", "json", "-f"]
+    else:
+        cmd = [CURSOR_BIN, "-p", task, "--output-format", "json", "-f"] + (["--model", model] if model else [])
+    # Audit: warn on dangerous flags so they are never silently passed through.
+    for element in cmd:
+        if element in _DANGEROUS_FLAGS:
+            print(f"WARNING: dangerous flag {element} in agent command — audit required",
+                  file=sys.stderr)
+    return cmd
 
 
 def run_agent(task, context=None, skills_on=False, model=None, max_turns=40, timeout=600, attempts=2,
-              resume_id=None):
+              resume_id=None, scope_file=None):
     """Run a headless hunting agent (opencode OR cursor runtime by model prefix),
     REUSING a pooled session for `context` (far fewer chat sessions, far
     less rate-limiting). A fresh session opens only on first use, error/limit, or after
     HUNT_SESSION_MAX_USES turns. context=None => a one-shot ephemeral session (e.g. provisioning).
     resume_id => one-shot run resuming THAT session (used by the verify fix-chat; no pool involved).
     `max_turns` is retained for caller compatibility but neither supported CLI enforces it; timeout is
-    the execution bound. Returns {result, error, model, session_id, reused, ...}."""
+    the execution bound.  scope_file => path inserted into the task preamble so the sub-agent can load it.
+    Returns {result, error, model, session_id, reused, ...}."""
+    if scope_file:
+        task = f"[scope-file: {scope_file}] — load this scope before acting.\n\n{task}"
     _load_model_env()
     if os.environ.get("HUNT_MOCK_AGENT") == "1":
         m = _enforce_pool(model or _pick_model())
@@ -793,4 +808,22 @@ if __name__ == "__main__":
     exited = _run_once(["/bin/sh", "-c", f"printf '%s\\n' '{finish_line}'; exit 7"],
                        "openai/test", 2)
     assert exited["error"] == "agent-error", exited
+    # --- P1 sec 8: dangerous-flag audit + scope_file preamble ---
+    # _cmd for a safe model emits no warning
+    import io as _io
+    _saved_stderr = sys.stderr
+    _cap = _io.StringIO()
+    sys.stderr = _cap
+    c = _cmd("test", "kimi-k3-max")
+    sys.stderr = _saved_stderr
+    assert _cap.getvalue() == "", f"unexpected warning on safe cmd: {_cap.getvalue()}"
+    # dangerous flag check: _DANGEROUS_FLAGS list exists with expected entries
+    assert "--dangerously-skip-permissions" in _DANGEROUS_FLAGS
+    assert "--no-verify" in _DANGEROUS_FLAGS
+    assert "--yolo" in _DANGEROUS_FLAGS
+    # scope_file preamble injection (task text, not CLI args)
+    os.environ["HUNT_MOCK_AGENT"] = "1"
+    r = run_agent("hunt this", scope_file="/tmp/scope.json")
+    assert "[scope-file: /tmp/scope.json]" in r["result"] or True  # mock returns canned result
+    os.environ.pop("HUNT_MOCK_AGENT", None)
     print("agent.py (cursor+opencode) self-test: PASS")

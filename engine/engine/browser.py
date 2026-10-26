@@ -381,9 +381,15 @@ def _main(argv=None):
         except Exception:
             pass
     if not _scope_obj and a.scope:
-        _scope_obj = {"in_scope": a.scope}
+        try:
+            from scope import Scope as _Scope2
+            _scope_obj = _Scope2(a.scope)
+        except Exception:
+            _scope_obj = {"in_scope": a.scope}
     if not _scope_obj and not a.scope:
-        print("WARNING: no --scope or --slug — browser requests are NOT scope-enforced", file=sys.stderr)
+        print("ERROR: no --scope or --slug — browser capture requires a scope policy.", file=sys.stderr)
+        print("Provide --slug <target> or --scope <host> to authorize requests.", file=sys.stderr)
+        return 1
     reqs = capture(a.url, slug=a.slug, ident=a.ident, scope_hosts=a.scope or None,
                    wait=a.wait, scope=_scope_obj)
     xhr = [r for r in reqs if r.get("type") in ("xhr", "fetch")]

@@ -392,6 +392,68 @@ function loadSettings() { fetch("/api/v1/user-settings"); }
                              "amount": job["amount"]})
             return
 
+        # --- OpenAPI spec (documented discovery source) ---
+        if path in ("/openapi.json", "/api-docs"):
+            spec = {
+                "openapi": "3.0.3",
+                "info": {"title": "VulnApp API", "version": "1.0.0"},
+                "paths": {
+                    "/api/users/{id}": {
+                        "get": {"parameters": [{"name": "id", "in": "path", "schema": {"type": "string"}}]},
+                        "patch": {"parameters": [{"name": "id", "in": "path", "schema": {"type": "string"}}],
+                                  "requestBody": {"content": {"application/json": {"schema": {
+                                      "properties": {"name": {"type": "string"}, "email": {"type": "string"}}}}}}},
+                        "delete": {"parameters": [{"name": "id", "in": "path", "schema": {"type": "string"}}]},
+                    },
+                    "/api/search": {"get": {"parameters": [{"name": "q", "in": "query", "schema": {"type": "string"}}]}},
+                    "/api/transfer": {"post": {}},
+                    "/api/admin/users": {"get": {}},
+                    "/api/admin/config": {"post": {}},
+                    "/api/v1/notifications": {"get": {}},
+                    "/api/roles/promote": {"post": {"description": "Promote user role"}},
+                },
+            }
+            self._json(200, spec)
+            return
+
+        # --- GraphQL endpoint ---
+        if path == "/graphql" and self.command == "GET":
+            q = qs.get("query", [""])[0]
+            if "IntrospectionQuery" in q or "__schema" in q:
+                schema = {"data": {"__schema": {"types": [
+                    {"name": "Query", "fields": [
+                        {"name": "user", "args": [{"name": "id"}]},
+                        {"name": "users", "args": []},
+                        {"name": "me", "args": []},
+                    ]},
+                    {"name": "Mutation", "fields": [
+                        {"name": "updateUser", "args": [{"name": "id"}, {"name": "name"}]},
+                        {"name": "deleteUser", "args": [{"name": "id"}]},
+                        {"name": "transferFunds", "args": [{"name": "to"}, {"name": "amount"}]},
+                    ]},
+                ]}}}
+                self._json(200, schema)
+                return
+            self._json(200, {"data": {"message": "GraphQL query processed"}})
+            return
+
+        # --- Role escalation: promote endpoint (VULN: no admin check) ---
+        if path == "/api/roles/promote":
+            user = self._current_user()
+            if not user:
+                self._json(401, {"error": "auth required"})
+                return
+            self._json(200, {"status": "promoted", "user": user["id"], "new_role": "admin"})
+            return
+
+        # --- Redirect to OOS sink (tests redirect scope enforcement) ---
+        if path == "/api/redirect-oos":
+            oos_port = int(self.server.server_address[1]) + OOS_SINK_PORT_OFFSET
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{oos_port}/redirected-oos")
+            self.end_headers()
+            return
+
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -469,6 +531,35 @@ function loadSettings() { fetch("/api/v1/user-settings"); }
                 self._json(403, {"error": "invalid or missing CSRF token"})
                 return
             self._json(200, {"status": "config updated", "by": user["id"]})
+            return
+
+        # --- GraphQL POST ---
+        if path == "/graphql":
+            data = self._parse_body(raw)
+            query = data.get("query", "")
+            if "__schema" in query or "IntrospectionQuery" in query:
+                self._json(200, {"data": {"__schema": {"types": [{"name": "Query"}, {"name": "Mutation"}]}}})
+                return
+            user = self._current_user()
+            if "user(" in query and user:
+                self._json(200, {"data": {"user": USERS.get(user["id"], {})}})
+                return
+            self._json(200, {"data": None, "errors": [{"message": "auth required"}]})
+            return
+
+        # --- Role escalation POST (VULN: any user can promote themselves) ---
+        if path == "/api/roles/promote":
+            user = self._current_user()
+            if user == "EXPIRED":
+                self._json(401, {"error": "session expired"})
+                return
+            if not user:
+                self._json(401, {"error": "auth required"})
+                return
+            data = self._parse_body(raw)
+            target_role = data.get("role", "admin")
+            self._json(200, {"status": "promoted", "user_id": user["id"],
+                             "old_role": user["role"], "new_role": target_role})
             return
 
         self._json(404, {"error": "not found"})

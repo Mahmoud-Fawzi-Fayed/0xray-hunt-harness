@@ -209,7 +209,7 @@ def generate_test_cases(endpoints, tested_checks=None):
 
         test_instruction = _build_test_instruction(profile)
 
-        cases.append({
+        case = {
             "endpoint": url,
             "method": method,
             "category": "dynamic",
@@ -225,7 +225,12 @@ def generate_test_cases(endpoints, tested_checks=None):
             "recommended_skills": profile.get("recommended_skills", []),
             "roles": ["user_a", "user_b"] if profile["is_write"] and profile["auth_required"] else [],
             "status": "tested" if already_tested else "pending",
-        })
+        }
+        if profile["is_write"] and profile["params"]:
+            case["body"] = {p: f"<{p}>" for p in profile["params"][:10]}
+        if ep.get("body_params"):
+            case["body_params"] = ep["body_params"]
+        cases.append(case)
 
     cases.sort(key=lambda c: -c["priority_score"])
     return cases
@@ -444,7 +449,7 @@ def generate_auth_tests(endpoints, identities):
 
         if ep.get("auth_required") or _SIGNAL_PATTERNS["elevated_privilege"].search(url):
             for owner, accessor in id_pairs:
-                cases.append({
+                ac = {
                     "endpoint": url, "method": method, "category": "bac",
                     "category_name": "Broken Access Control",
                     "test": f"Access as {accessor['ident']} (role={roles.get(accessor['ident'],'user')}) "
@@ -455,7 +460,10 @@ def generate_auth_tests(endpoints, identities):
                     "roles": [owner["ident"], accessor["ident"]],
                     "owner": owner["ident"], "accessor": accessor["ident"],
                     "status": "pending",
-                })
+                }
+                if method in ("POST", "PUT", "PATCH", "DELETE") and params:
+                    ac["body"] = {p: f"<{p}>" for p in params[:10]}
+                cases.append(ac)
 
         if id_params:
             for owner, accessor in id_pairs:

@@ -925,21 +925,21 @@ class Engine:
             return False
         return "A" in ids and "B" in ids
 
-    def _authz_closeout(self, url, method="GET"):
-        """Read-only authz.py diff plus netget as B. Logs `authz:` only from that run.
-        Returns the log line, or '' if the commands were not run (caller must refuse nothing)."""
+    def _authz_closeout(self, url, method="GET", body=None, owner="A", accessor="B"):
+        """Deterministic authz diff: request as owner (positive control), then as accessor (negative control).
+        Logs `authz:` line. Returns the log line, or '' if not run (caller must refuse nothing)."""
         try:
             import authn
             import authz
             import netget
             slug = authn._slug(self.scope.name)
-            d = authz.diff_one(method, url, None, self.scope.name)
-            sb, _tb, _h = netget.get(url, method=method, ident="B", slug=slug)
+            d = authz.diff_one(method, url, body, self.scope.name)
+            sb, _tb, _h = netget.get(url, method=method, data=body, ident=accessor, slug=slug)
         except Exception:  # noqa: BLE001
             return ""
-        line = (f"authz: diff A={d.get('A_status')} B={d.get('B_status')} "
+        line = (f"authz: diff {owner}={d.get('A_status')} {accessor}={d.get('B_status')} "
                 f"sim={d.get('similarity')} bola={bool(d.get('bola_suspect'))} "
-                f"netget_B={sb} {str(url)[:120]}")
+                f"netget_{accessor}={sb} method={method} {str(url)[:120]}")
         self.eng.log(line)
         return line
 
@@ -1754,7 +1754,10 @@ class Engine:
                 # netget --as B have actually run. The log line is the proof authz_logged reads.
                 if ((it.get("vuln_class") or "").lower() == "deep"
                         and self._needs_authz_gate(it.get("url"))):
-                    line = self._authz_closeout(it.get("url"), method=it.get("method", "GET"))
+                    line = self._authz_closeout(
+                        it.get("url"), method=it.get("method", "GET"),
+                        body=it.get("body"), owner=it.get("owner", "A"),
+                        accessor=it.get("accessor", "B"))
                     if not line:
                         self.eng.log(f"hunt: refused nothing on {it.get('vuln_class')}@{it['url']} "
                                      "— authz.py diff and netget --as B were not run")
@@ -1915,6 +1918,21 @@ class Engine:
             if it.get("role"):
                 id_parts.append(f"TEST ROLE: {it['role']}")
             identity_block = "PLANNED IDENTITIES:\n  " + "\n  ".join(id_parts) + "\n"
+        # Deterministic test specification — executable commands, not just hints
+        test_spec = ""
+        if it.get("owner") and it.get("accessor"):
+            _m = it.get("method", "GET")
+            test_spec = (
+                f"DETERMINISTIC TEST SPECIFICATION:\n"
+                f"  Step 1: As {it['owner']}, confirm access to {url} via {_m} (positive control)\n"
+                f"  Step 2: As {it['accessor']}, attempt same request (negative control)\n"
+                f"  Step 3: Compare responses — body diff, not just status code\n"
+                f"  Required: `python3 {ENGINE_DIR}/netget.py {_m} \"{url}\" --as {it['owner']} --slug $SLUG`\n"
+                f"           Then `python3 {ENGINE_DIR}/netget.py {_m} \"{url}\" --as {it['accessor']} --slug $SLUG`\n")
+            if it.get("body"):
+                import json as _json
+                test_spec += f"  Body: '{_json.dumps(it['body'])[:200]}'\n"
+            test_spec += "\n"
         # Related endpoints — sibling operations on the same resource
         siblings = self._related_endpoints(url, it.get("method", "GET"))
         related_block = ""
@@ -1933,7 +1951,7 @@ class Engine:
                 + lead + memory +
                 f"URL: {url}   method: {it.get('method','GET')}   known param(s): {', '.join(it.get('params') or []) or it.get('param','')}   "
                 f"tech: {', '.join(tech) or 'unknown'}\n"
-                + metadata_line + identity_block
+                + metadata_line + identity_block + test_spec
                 + f"Signals: {', '.join(endpoint_profile.get('signals', [])) or 'general'}   "
                 f"Priority: {endpoint_profile.get('priority', 'medium')}\n"
                 + knowledge_block + related_block + round_block
@@ -2493,6 +2511,11 @@ class Engine:
             D.annotate(self.scope.name, c, base=self.base)
         except Exception as e:
             self.eng.log(f"report: dedup annotate skipped ({e})")
+        # LIKELY_DUP hard gate: never draft findings the dedup oracle flagged as known
+        dup_dropped = [f for f in c if (f.get("dedup") or {}).get("verdict") == "LIKELY_DUP"]
+        if dup_dropped:
+            self.eng.log(f"report: LIKELY_DUP gate dropped {len(dup_dropped)} finding(s) from draft")
+        c = [f for f in c if (f.get("dedup") or {}).get("verdict") != "LIKELY_DUP"]
         s = self.eng.summary()
         try:
             import report as RPT

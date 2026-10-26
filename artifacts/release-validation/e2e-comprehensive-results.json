@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-25T11:36:50Z",
+  "timestamp": "2026-10-26T11:26:00Z",
   "pass": 27,
   "fail": 0,
   "blocked": 0,
@@ -87,7 +87,7 @@
       "id": "T5.1",
       "name": "Test plan generates cases",
       "status": "PASS",
-      "detail": "22 cases"
+      "detail": "12 cases"
     },
     {
       "id": "T5.2",
@@ -99,7 +99,7 @@
       "id": "T5.3",
       "name": "Multi-param cases in plan",
       "status": "PASS",
-      "detail": "8 multi-param cases"
+      "detail": "3 multi-param cases"
     },
     {
       "id": "T5.4",

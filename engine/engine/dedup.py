@@ -168,7 +168,7 @@ def path_tokens(url):
         seg = seg.strip().lower()
         if not seg:
             continue
-        if seg.isdigit() or _UUID.match(seg) or _HEX.match(seg) or re.search(r"\d", seg):
+        if seg.isdigit() or _UUID.match(seg) or _HEX.match(seg):
             out.add("{id}")
         else:
             out.add(seg)
@@ -440,6 +440,27 @@ def _cmd_selftest(_):
     finds = [{"vuln_class": "xss", "url": "https://acme.test/search?q=1", "title": "XSS in q param"}]
     annotate("acme", finds, base=base)
     assert finds[0]["dedup"]["verdict"] == "LIKELY_DUP", finds[0]["dedup"]
+
+    # 6) same class, completely different endpoint -> NOT LIKELY_DUP
+    r6 = cp.check({"vuln_class": "idor",
+                    "url": "https://acme.test/admin/settings/permissions",
+                    "title": "IDOR on admin permissions panel"})
+    assert r6["verdict"] != "LIKELY_DUP", f"same class + different endpoint must not be LIKELY_DUP: {r6}"
+
+    # 7) same endpoint, different vuln class -> NOT LIKELY_DUP
+    r7 = cp.check({"vuln_class": "sqli",
+                    "url": "https://acme.test/api/v2/users/5/orders",
+                    "title": "SQL injection in orders endpoint user_id parameter"})
+    assert r7["verdict"] != "LIKELY_DUP", f"different class at same endpoint must not be LIKELY_DUP: {r7}"
+
+    # 8) same endpoint but different query params should reduce path similarity
+    sig_a = signature({"url": "https://acme.test/search?q=x"})
+    sig_b = signature({"url": "https://acme.test/search?q=x&category=books"})
+    sig_c = signature({"url": "https://acme.test/search?type=all"})
+    sim_ab = _jaccard(sig_a["path"], sig_b["path"])
+    sim_ac = _jaccard(sig_a["path"], sig_c["path"])
+    assert sim_ab > sim_ac, f"overlapping params must score higher than disjoint: ab={sim_ab} ac={sim_ac}"
+
     print("dedup.py self-test: PASS")
     return 0
 
