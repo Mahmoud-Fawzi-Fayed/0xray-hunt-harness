@@ -192,16 +192,19 @@ def report(slug, base=DEFAULT_BASE):
 
     unique_tested = len(tested_records)
 
-    # Class-level blind spot detection: vuln classes with hunt skills but zero test coverage
-    _EXPECTED_CLASSES = {
-        "idor", "xss", "sqli", "ssrf", "csrf", "cors", "open-redirect", "ssti",
-        "xxe", "lfi", "rce", "race-condition", "http-smuggling", "auth-bypass",
-        "business-logic", "file-upload", "prototype-pollution", "cache-poisoning",
-        "deserialization", "jwt", "oauth", "mass-assignment", "privilege-escalation",
-    }
+    # Class-level blind spot detection: vuln classes with hunt skills but zero test coverage.
+    # Derived dynamically from installed hunt-* skills on disk — no static list.
+    _expected_classes = set()
+    try:
+        import skill_map as _sm
+        for name in _sm.installed():
+            if name.startswith("hunt-"):
+                _expected_classes.add(name[len("hunt-"):])
+    except Exception:  # noqa: BLE001
+        pass
     tested_classes = {c for c in by_class if by_class[c]["tested"] > 0}
     observed_classes = set(by_class.keys())
-    blind_spots = sorted(_EXPECTED_CLASSES - tested_classes)
+    blind_spots = sorted(_expected_classes - tested_classes)
 
     return {"program": slug, "phase": d.get("phase"),
             "surface": len(surface), "tested": unique_tested,

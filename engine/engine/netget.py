@@ -134,19 +134,18 @@ def reset_request_count():
     _request_count = 0
 
 
-def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, slug=None, allow_redirects=False,
-        _bypass_scope=False):
+def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, slug=None, allow_redirects=False):
     """Return (status_code:int, text:str, headers:dict). status 0 on transport error (see headers['_error']).
     ident 'A'/'B' loads that stored session (cookie/bearer/headers) for authenticated + cross-account tests."""
     if timeout is None:
         timeout = _DEFAULT_TIMEOUT
-    if _SCOPE_GUARD and not _bypass_scope:
+    if _SCOPE_GUARD:
         reason = _SCOPE_GUARD.reject_reason(url)
         if reason:
             return 0, "", {"_error": f"scope violation: {reason}"}
     global _request_count
     _request_count += 1
-    if _request_count > _MAX_REQUESTS and not _bypass_scope:
+    if _request_count > _MAX_REQUESTS:
         return 0, "", {"_error": f"request budget exhausted ({_MAX_REQUESTS})"}
     ua, imp, proxy, proxy_list = _cfg()
     h = dict(headers or {})
@@ -181,7 +180,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         _rate_limit(host, r.status_code)
         rh = {k.lower(): v for k, v in r.headers.items()}
         # Validate redirect destination against scope
-        if _SCOPE_GUARD and not _bypass_scope and r.status_code in (301, 302, 303, 307, 308):
+        if _SCOPE_GUARD and r.status_code in (301, 302, 303, 307, 308):
             loc = rh.get("location", "")
             if loc:
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
@@ -204,7 +203,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
         r = sess.request(method.upper(), url, data=data, allow_redirects=allow_redirects, **kw)
         _rate_limit(host, r.status_code)
         rh = {k.lower(): v for k, v in r.headers.items()}
-        if _SCOPE_GUARD and not _bypass_scope and r.status_code in (301, 302, 303, 307, 308):
+        if _SCOPE_GUARD and r.status_code in (301, 302, 303, 307, 308):
             loc = rh.get("location", "")
             if loc:
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
@@ -261,9 +260,9 @@ def _selftest():
     # scope guard blocks out-of-scope
     sg = S.Scope(["example.com"], ["admin.example.com"])
     set_scope_guard(sg)
-    code, _, h = get("https://evil.com/test", _bypass_scope=False)
+    code, _, h = get("https://evil.com/test")
     assert code == 0 and "scope violation" in h.get("_error", ""), f"expected scope block: {code} {h}"
-    code2, _, h2 = get("https://admin.example.com/x", _bypass_scope=False)
+    code2, _, h2 = get("https://admin.example.com/x")
     assert code2 == 0 and "scope violation" in h2.get("_error", ""), f"expected out-of-scope block: {code2} {h2}"
     set_scope_guard(None)
 
@@ -273,10 +272,10 @@ def _selftest():
     _request_count = 0
     _MAX_REQUESTS = 2
     assert request_count() == 0
-    get("https://httpbin.org/status/200", timeout=5, _bypass_scope=True)
+    get("https://httpbin.org/status/200", timeout=5)
     assert request_count() >= 1
     _request_count = _MAX_REQUESTS + 1
-    code3, _, h3 = get("https://httpbin.org/status/200", timeout=5, _bypass_scope=False)
+    code3, _, h3 = get("https://httpbin.org/status/200", timeout=5)
     assert code3 == 0 and "budget" in h3.get("_error", ""), f"expected budget block: {code3} {h3}"
     _request_count, _MAX_REQUESTS = saved_count, saved_max
 
