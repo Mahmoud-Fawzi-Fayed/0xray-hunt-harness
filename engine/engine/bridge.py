@@ -72,8 +72,9 @@ def _append_alert(base, entry):
 
 
 import shutil as _shutil
-HUNT_RUN_SH = os.environ.get("HUNT_RUN_SH", "/root/BugHunting_0xRay/harness/hunt-run.sh")
-PM2 = _shutil.which("pm2") or "/usr/bin/pm2"
+_HARNESS_DIR = os.environ.get("HUNT_HARNESS_DIR", os.path.expanduser("~/0xray-hunt-harness/harness"))
+HUNT_RUN_SH = os.environ.get("HUNT_RUN_SH", os.path.join(_HARNESS_DIR, "hunt-run.sh"))
+PM2 = _shutil.which("pm2") or os.path.expanduser("~/.local/bin/pm2") or "/usr/bin/pm2"
 
 
 def _pm2(args, timeout=25):

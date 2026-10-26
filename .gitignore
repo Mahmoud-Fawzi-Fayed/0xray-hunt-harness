@@ -29,6 +29,9 @@ venv/
 node_modules/
 .n8n/
 
+# Target-specific recon data (dynamic, not part of the harness)
+engine/engine/subdomains-*.txt
+
 # OS / editor
 .DS_Store
 *.swp

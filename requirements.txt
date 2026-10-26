@@ -1,3 +1,15 @@
+# 0xRay Hunt Harness — Python dependencies
+# Install: pip install -r requirements.txt
+
+# Core HTTP (netget.py: requests primary, curl_cffi for TLS fingerprint bypass)
 requests>=2.31
-playwright>=1.40
 curl_cffi>=0.7;python_version>="3.10"
+
+# Browser automation (browser.py — headless Chromium SPA capture)
+playwright>=1.40
+
+# PostgreSQL (hunt-container-escape: DB extension privesc testing)
+psycopg2-binary>=2.9
+
+# DNS resolution (recon.py subdomain enumeration)
+dnspython>=2.6

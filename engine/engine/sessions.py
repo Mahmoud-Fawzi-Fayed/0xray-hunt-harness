@@ -53,7 +53,7 @@ def _projects_dir():
 def _managed_pats():
     """Which transcript workspaces the harness manages (its own hunts) — everything else is hands-off."""
     return [p.strip() for p in os.environ.get(
-        "HUNT_SESSION_STORES", "root-Claude-BugHunter*,root-BugHunting-0xRay*").split(",") if p.strip()]
+        "HUNT_SESSION_STORES", "xRay-0xray-hunt-harness*,root-BugHunting-0xRay*").split(",") if p.strip()]
 
 
 def _slug(s):

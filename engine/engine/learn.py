@@ -124,6 +124,65 @@ def record_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE):
     return rec
 
 
+def diagnose_gaps(program=None, base=DEFAULT_BASE):
+    """Analyze the gap journal and return prioritized learning recommendations.
+    Groups gaps by kind, deduplicates, and recommends what to learn next."""
+    all_gaps = [r for r in _read_jsonl(_journal(base)) if r.get("type") in ("gap", "hunt_failure")]
+    if program:
+        all_gaps = [g for g in all_gaps if program in (g.get("context") or "")]
+
+    by_kind = {}
+    for g in all_gaps:
+        kind = g.get("kind", "unknown")
+        name = g.get("name", "")
+        key = f"{kind}:{name}"
+        if key not in by_kind:
+            by_kind[key] = {"kind": kind, "name": name, "count": 0, "contexts": [], "first": g.get("ts", "")}
+        by_kind[key]["count"] += 1
+        ctx = g.get("context", "")
+        if ctx and ctx not in by_kind[key]["contexts"]:
+            by_kind[key]["contexts"].append(ctx[:200])
+
+    recommendations = sorted(by_kind.values(), key=lambda x: x["count"], reverse=True)
+
+    unlearned = []
+    for rec in recommendations:
+        if not have_skill(rec["name"]):
+            unlearned.append(rec)
+
+    return {
+        "total_gaps": len(all_gaps),
+        "unique_gaps": len(by_kind),
+        "unlearned": unlearned[:10],
+        "all": recommendations[:20],
+    }
+
+
+def learn_from_hunt_failure(program, url, failure_type, error="", tech=None, base=DEFAULT_BASE):
+    """Record a structured hunt failure for later learning. Called when:
+    - timeout/double-timeout on an endpoint
+    - max retries exceeded
+    - auth blocker prevents testing
+    - WAF/rate-limit blocks all approaches
+    - discovery finds nothing
+    """
+    kind = "bypass" if failure_type in ("waf", "rate_limit", "auth_block", "timeout") else "tech"
+    name = f"{failure_type}-{_slug(program)}"
+    context_parts = [f"program={program}", f"url={url}", f"type={failure_type}"]
+    if error:
+        context_parts.append(f"error={str(error)[:200]}")
+    if tech:
+        context_parts.append(f"tech={','.join(tech) if isinstance(tech, list) else tech}")
+    context = "; ".join(context_parts)
+
+    rec = {"ts": _now(), "type": "hunt_failure", "program": _slug(program),
+           "url": str(url or "")[:300], "failure_type": str(failure_type)[:40],
+           "error": str(error or "")[:300], "tech": tech or [],
+           "kind": kind, "name": str(name)[:120], "context": context[:500]}
+    _append(_journal(base), rec)
+    return rec
+
+
 _EVOLVE_THRESHOLD = 5  # evolve after this many outcomes for a class
 
 def _maybe_evolve(vuln_class, base):
@@ -605,6 +664,18 @@ def _cmd_gaps(a):
     return 0
 
 
+def _cmd_diagnose(a):
+    d = diagnose_gaps(program=getattr(a, "program", None), base=a.base)
+    print(f"Total gaps: {d['total_gaps']}, Unique: {d['unique_gaps']}")
+    if d["unlearned"]:
+        print(f"\nUnlearned gaps (no skill exists):")
+        for g in d["unlearned"]:
+            print(f"  [{g['kind']}] {g['name']} (seen {g['count']}x)")
+            for ctx in g["contexts"][:2]:
+                print(f"    -> {ctx}")
+    return 0
+
+
 def _cmd_skills(_a):
     for e in learned_index():
         ev = e.get("evolved", 0)
@@ -712,6 +783,20 @@ def _cmd_selftest(_a):
     q_vuln = _research_queries("SSRF", "vuln", "")
     assert "bypass" in q_vuln[1].lower()
 
+    # learn_from_hunt_failure
+    hf = learn_from_hunt_failure("test-prog", "https://example.com/api/v1/users", "timeout",
+                                  error="double-timeout", tech=["nextjs", "graphql"], base=base)
+    assert hf["failure_type"] == "timeout"
+    assert hf["program"] == "test-prog"
+    assert "nextjs" in hf["tech"]
+
+    # diagnose_gaps
+    diag = diagnose_gaps(program="test-prog", base=base)
+    assert diag["total_gaps"] >= 1
+    assert isinstance(diag["unlearned"], list)
+    diag_all = diagnose_gaps(base=base)
+    assert diag_all["total_gaps"] >= diag["total_gaps"]
+
     print("learn.py self-test: PASS")
     return 0
 
@@ -729,6 +814,9 @@ def main(argv=None):
     pe.add_argument("--name", default="")
     pe.set_defaults(fn=_cmd_evolve)
     sub.add_parser("gaps").set_defaults(fn=_cmd_gaps)
+    pd = sub.add_parser("diagnose")
+    pd.add_argument("--program", default=None)
+    pd.set_defaults(fn=_cmd_diagnose)
     sub.add_parser("skills").set_defaults(fn=_cmd_skills)
     sub.add_parser("selftest").set_defaults(fn=_cmd_selftest)
     a = ap.parse_args(argv)

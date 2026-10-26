@@ -3,7 +3,7 @@
 Autonomous, **anti-duplicate** bug-hunting harness. Runs on **Cursor agents** (not Claude), hunts
 read-only by default, and **stops at draft — it never submits without you**.
 
-- **Engine:** `/root/Claude-BugHunter/engine`  ·  **Config/secrets:** `/root/BugHunting_0xRay/harness/.env`
+- **Engine:** `~/0xray-hunt-harness/engine/engine/`  ·  **Config/secrets:** `~/0xray-hunt-harness/harness/.env`
 - **Dashboard:** https://finding.redtracefai.com/panel/  (Basic-Auth)
 - **Findings viewer + email:** `finding.redtracefai.com` · `x00xrayx00x@gmail.com`
 - **Runtime models (pool):** `kimi-k3-max`, `cursor-grok-4.6-high`, `grok-4.7-high`, `claude-fable-5-1-high`
@@ -16,7 +16,7 @@ Everything is already running under `pm2` and survives reboots/crashes.
 
 ```bash
 pm2 list                                  # hunt-bridge + hunt-<target> processes
-python3 /root/Claude-BugHunter/scripts/e2e.py        # one-command health check (14 stages)
+python3 ~/0xray-hunt-harness/engine/scripts/e2e.py    # one-command health check (14 stages)
 ```
 
 Open the **dashboard** and watch: Overview (KPIs), Activity (model + skills per step), Findings,

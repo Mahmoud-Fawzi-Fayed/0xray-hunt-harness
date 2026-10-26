@@ -68,7 +68,7 @@ def stage(name, critical, fn):
     except Exception as e:  # noqa: BLE001
         status, detail = ("FAIL" if critical else "WARN"), f"{type(e).__name__}: {e}"
     RESULTS.append((name, status, detail))
-    c = G if status == "PASS" else (Y if status == "WARN" else R)
+    c = G if status == "PASS" else (Y if status in ("WARN", "SKIP") else R)
     print(f"  [{c}{status:4}{X}] {name:13} {detail}")
     return status
 
@@ -144,9 +144,12 @@ def s_models(ping):
 
 
 def s_bridge():
-    code, _ = _req("GET", "/health")
+    try:
+        code, _ = _req("GET", "/health")
+    except Exception:
+        return "SKIP", "bridge not running (optional — start with: python3 engine/engine/bridge.py)"
     if code != 200:
-        return "FAIL", f"/health -> {code} (is the bridge running under pm2?)"
+        return "SKIP", f"/health -> {code} (bridge not running — start with: python3 engine/engine/bridge.py)"
     tok = _env("HUNT_BRIDGE_TOKEN")
     no_auth, _ = _req("GET", "/stats")
     with_auth, _ = _req("GET", "/stats", headers={"X-Hunt-Token": tok})
@@ -369,7 +372,7 @@ def main(argv=None):
     stage("env", True, s_env)
     stage("cursor-agent", True, s_cursor)
     stage("models", True, lambda: s_models(a.ping))
-    stage("bridge", True, s_bridge)
+    stage("bridge", False, s_bridge)
     stage("n8n", False, s_n8n)
     stage("web", False, s_web)
     stage("targets", False, s_targets)

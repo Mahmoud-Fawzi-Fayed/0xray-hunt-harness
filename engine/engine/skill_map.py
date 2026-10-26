@@ -77,6 +77,18 @@ def skills_for(vuln_class, tech=None, url="", analysis=""):
     return _filter(["hunt-misc"])
 
 
+def skills_for_signals(signals, tech=None, url=""):
+    """Skills recommended by the knowledge layer for these endpoint signals + tech."""
+    try:
+        import knowledge as K
+        guidance = K.build_hunt_guidance(signals, tech=tech)
+        recommended = guidance.get("recommended_skills", [])
+        present = _present()
+        return [s for s in recommended if s in present][:8]
+    except Exception:
+        return matching(url, tech)
+
+
 def tech_skills(tech):
     """Skills whose names appear in the detected stack strings. No tech→class table."""
     return matching("", tech=tech)

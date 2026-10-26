@@ -41,7 +41,7 @@ import modelroute as MR            # noqa: E402
 def _deepen(items):
     """HUNT_DEEP: collapse surface items to ONE analysis-driven agent per endpoint (secrets keep their class).
     Applied at every add_surface call site so no path (gql/platform/feedback/scope) re-introduces per-class
-    spray. Idempotent."""
+    spray. Idempotent. Preserves metadata fields for rich knowledge-driven guidance."""
     if os.environ.get("HUNT_DEEP", "1") != "1" or os.environ.get("HUNT_MOCK_AGENT") == "1":
         return items   # mock pipeline is keyed by real vuln_class; never collapse under test
     out, seen = [], set()
@@ -55,7 +55,23 @@ def _deepen(items):
         k = (d.get("method", "GET"), d.get("url", ""), d.get("param", ""))
         if k not in seen:
             seen.add(k)
+            # Enrich: ensure params list is available for signal detection
+            if d.get("param") and not d.get("params"):
+                d["params"] = [p.strip() for p in d["param"].split(",") if p.strip()]
             out.append(d)
+        else:
+            # Merge metadata from duplicate endpoints (different sources may carry different info)
+            existing = next((o for o in out if (o.get("method", "GET"), o.get("url", ""), o.get("param", "")) == k), None)
+            if existing:
+                for field in ("auth_required", "body_params", "tags", "confidence", "tech", "category"):
+                    if it.get(field) and not existing.get(field):
+                        existing[field] = it[field]
+                # Merge params lists
+                new_params = it.get("params") or []
+                old_params = existing.get("params") or []
+                if new_params:
+                    merged = list(dict.fromkeys(old_params + new_params))
+                    existing["params"] = merged
     return out
 
 
@@ -153,8 +169,8 @@ def _endpoint_quality(s):
     return q
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
-ALL_PHASES = ["recon", "explore", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
-DEFAULT_PHASES = ["recon", "explore", "rank", "map", "plan"]
+ALL_PHASES = ["recon", "discover", "explore", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
+DEFAULT_PHASES = ["recon", "discover", "explore", "rank", "map", "plan"]
 
 # generic infra/hosting/CDN fingerprints that are NOT worth auto-drafting a skill for (too generic)
 INFRA_TECH = {"nginx", "apache", "cloudflare", "akamai", "fastly", "varnish", "iis", "openresty",
@@ -225,7 +241,8 @@ class Engine:
                 scope_data["path_restrictions"] = self.scope.path_restrictions
             if getattr(self.scope, "out_path_restrictions", None):
                 scope_data["out_path_restrictions"] = self.scope.out_path_restrictions
-            _j.dump(scope_data, open(tgt_path, "w"), indent=2)
+            with open(tgt_path, "w") as _f:
+                _j.dump(scope_data, _f, indent=2)
         self.eng.log(f"engine start | scope={self.scope.name} in={self.scope.in_scope} "
                      f"out={self.scope.out_of_scope} seeds={self.scope.seeds} mock={mock} "
                      f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}")
@@ -355,7 +372,8 @@ class Engine:
             pass
         params = R.gather_params(self.scope, log=self.eng.log)
         try:
-            _j.dump({"ts": _t.time(), "params": params}, open(cache, "w"))
+            with open(cache, "w") as _f:
+                _j.dump({"ts": _t.time(), "params": params}, _f)
         except Exception:  # noqa: BLE001
             pass
         return params
@@ -1040,6 +1058,109 @@ class Engine:
         except Exception as e:  # noqa: BLE001
             self.eng.log(f"deep-recon: browser skipped ({type(e).__name__}: {e})")
 
+    # ---------------- discover (exhaustive function inventory) ----------------
+    def discover(self):
+        """Run exhaustive discovery before any testing — map ALL functions, endpoints, roles, boundaries."""
+        self.eng.set_phase("discover")
+        if self.mock:
+            self.eng.log("discover(mock): skipped")
+            return
+        total_added = 0
+        try:
+            import discovery as DISC
+            result = DISC.discover(self.scope.name, self.scope, base=self.base, log=self.eng.log)
+            surface_items = DISC.inventory_to_surface(result)
+            if surface_items:
+                total_added += self.eng.add_surface(_deepen(surface_items))
+                self.eng.log(f"discover: queued {total_added} endpoint(s) from HTTP discovery")
+            self.eng.state["discovery"] = result.get("coverage", {}).get("_summary", {})
+            self.eng.save()
+        except Exception as e:
+            import traceback
+            self.eng.log(f"discover: ERROR — HTTP discovery failed ({type(e).__name__}: {e})")
+            self.eng.log(f"discover: traceback: {traceback.format_exc()[-500:]}")
+            self.eng.state["discovery"] = {"error": f"{type(e).__name__}: {e}"}
+            self.eng.save()
+
+        # Browser capture — SPA apps expose their real API surface at runtime via JS
+        try:
+            import browser
+            for seed in self.scope.seeds[:3]:
+                host = seed.rstrip("/")
+                if "://" not in host:
+                    host = "https://" + host
+                caps = browser.capture(host, slug=self.scope.name, scope_host=self.scope.seeds[0],
+                                       ident="A", base=self.base, log=self.eng.log)
+                browser_items = []
+                for it in (caps or []):
+                    url = it.get("url") or ""
+                    if not url or not self.scope.in_scope_host(url):
+                        continue
+                    param_names = [p.get("name", "") for p in (it.get("params") or []) if p.get("name")]
+                    browser_items.append({
+                        "url": url, "method": it.get("method", "GET"),
+                        "vuln_class": "deep", "source": "discovery/browser",
+                        "priority": 65 + (10 if it.get("method", "GET") != "GET" else 0),
+                        "param": ",".join(param_names[:5]),
+                        "params": param_names[:10],
+                        "auth_required": it.get("auth_required", bool(it.get("headers", {}).get("authorization")
+                                                                       or it.get("headers", {}).get("cookie"))),
+                        "confidence": "observed",
+                        "body_params": [p.get("name", "") for p in (it.get("body_params") or []) if p.get("name")],
+                        "note": it.get("label", "")[:200],
+                    })
+                if browser_items:
+                    added = self.eng.add_surface(_deepen(browser_items))
+                    total_added += added
+                    self.eng.log(f"discover: browser capture on {host} → {added} new endpoint(s)")
+        except Exception as e:
+            self.eng.log(f"discover: browser capture unavailable ({type(e).__name__}: {e})")
+
+        # GraphQL introspection — catches full query/mutation surface
+        try:
+            import recon as R
+            for seed in self.scope.seeds[:3]:
+                host = seed.rstrip("/")
+                if "://" not in host:
+                    host = "https://" + host
+                gql = R.graphql_recon(host, log=self.eng.log)
+                gql_items = []
+                for ep in (gql or []):
+                    url = ep.get("url") or host + "/graphql"
+                    args = [a.get("name", "") for a in (ep.get("args") or []) if a.get("name")]
+                    gql_items.append({
+                        "url": url, "method": "POST",
+                        "vuln_class": "deep", "source": "discovery/graphql",
+                        "priority": 70,
+                        "param": ep.get("name", ""),
+                        "params": args[:10] if args else [ep.get("name", "")],
+                        "auth_required": True,
+                        "confidence": "observed",
+                        "tech": ["graphql"],
+                        "tags": [ep.get("type", "query")],
+                        "note": f"GraphQL {ep.get('type', 'query')}: {ep.get('name', '')}",
+                    })
+                if gql_items:
+                    added = self.eng.add_surface(_deepen(gql_items))
+                    total_added += added
+                    self.eng.log(f"discover: GraphQL introspection → {added} operation(s)")
+        except Exception as e:
+            self.eng.log(f"discover: GraphQL introspection unavailable ({type(e).__name__}: {e})")
+
+        # Coverage gate — loud warning if discovery found nothing
+        if total_added == 0:
+            self.eng.log("discover: ⚠ WARNING — discovered ZERO endpoints! "
+                         "Check: (1) are seeds correct? (2) is auth configured? "
+                         "(3) does the target require browser capture? "
+                         "Hunting on an empty surface will find nothing.")
+            _lrn("record_gap", "bypass", f"empty-discovery-{self.scope.name}",
+                 f"discovery found 0 endpoints for {self.scope.name} — seeds: {self.scope.seeds[:3]}. "
+                 "Target may need auth, browser capture, or different discovery approach.",
+                 self.base)
+        else:
+            self.eng.log(f"discover: TOTAL {total_added} endpoint(s) queued from all discovery methods")
+        self.eng.save()
+
     # ---------------- explore (functional discovery) ----------------
     def explore(self):
         self.eng.set_phase("explore")
@@ -1067,7 +1188,9 @@ class Engine:
             self.eng.save()
             self.eng.log(f"explore: {result['stats']}")
         except Exception as e:
-            self.eng.log(f"explore: skipped ({type(e).__name__}: {e})")
+            import traceback
+            self.eng.log(f"explore: ERROR — functional discovery failed ({type(e).__name__}: {e})")
+            self.eng.log(f"explore: traceback: {traceback.format_exc()[-500:]}")
 
     # ---------------- rank ----------------
     def rank(self):
@@ -1129,28 +1252,29 @@ class Engine:
 
     # ---------------- map (arsenal categorization — the default deliverable) ----------------
     def map(self):
-        """Categorize the surface against the skill arsenal and SHOW it: per target ->
-        applicable hunt-* skill(s) + first curl. This is where the operator focuses; the
-        engine does NOT auto-test by default (run with --hunt to spend agents)."""
+        """Analyze the surface dynamically — per target, show what it does, what
+        signals it carries, and a first probe curl. No static vuln-class menu."""
         self.eng.set_phase("map")
         import skill_map as SM
+        import testplan as TP
         from collections import OrderedDict
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
         groups = OrderedDict()
         for s in sorted(self.eng.state["surface"], key=lambda z: -z.get("priority", 0)):
             url = s.get("url") or ""
-            cls = s.get("vuln_class") or "deep"
             if not url:
                 continue
+            profile = TP.analyze_endpoint(s)
             key = (url, s.get("param", ""))
-            g = groups.setdefault(key, {"classes": [], "src": s.get("source", "")})
-            if cls not in g["classes"]:
-                g["classes"].append(cls)
+            g = groups.setdefault(key, {"signals": [], "src": s.get("source", ""),
+                                        "priority": profile["priority"],
+                                        "method": s.get("method", "GET")})
+            for sig in profile["signals"]:
+                if sig not in g["signals"]:
+                    g["signals"].append(sig)
         tech_sk = SM.tech_skills(tech)
-        # self-learning: a detected app/framework with NO playbook is a capability gap -> research +
-        # auto-draft a skill so the NEXT hunt already knows it. Infra fingerprints are skipped (too generic).
         learned_now = 0
-        for t in ([] if self.mock else tech):        # skip network research during mock/self-test runs
+        for t in ([] if self.mock else tech):
             tl = (t or "").lower()
             if not tl or tl in INFRA_TECH or SM.tech_skills([tl]):
                 continue
@@ -1163,25 +1287,28 @@ class Engine:
                 learned_now += 1
                 self.eng.log(f"learn: no skill for '{t}' -> drafted {os.path.basename(os.path.dirname(r['path']))} "
                              f"(self-authored, review before relying on it)")
-        lines = [f"# Arsenal map — {self.scope.name}", "",
+        lines = [f"# Attack surface — {self.scope.name}", "",
                  f"**Service / tech:** {', '.join(tech) or '?'}  ",
-                 f"**Tech-wide skills:** {', '.join('`'+s+'`' for s in tech_sk) or 'none'}  ",
-                 f"**Attack surface:** {len(groups)} target(s). For each: applicable skill(s) + the first curl.",
-                 "", "> Active testing is curl-first; Burp MCP only for OOB/blind/fuzzing. "
-                 "Run the engine with `--hunt` to auto-test these with agents (skills-off, parallel).", ""]
-        self.eng.log(f"map: ARSENAL — tech-skills: {', '.join(tech_sk) or 'none'} | {len(groups)} target(s):")
+                 f"**Reference skills:** {', '.join('`'+s+'`' for s in tech_sk) or 'none'}  ",
+                 f"**Endpoints:** {len(groups)} target(s). Dynamic analysis — hunt agent reasons per-endpoint.",
+                 "", "> Testing is hypothesis-driven: the agent reads the endpoint, understands what it does, "
+                 "and invents tests from live behavior. No static vuln matching.", ""]
+        self.eng.log(f"map: SURFACE — tech: {', '.join(tech_sk) or 'none'} | {len(groups)} endpoint(s):")
         for (url, param), g in groups.items():
             label = param if param else "(endpoint)"
-            per = "  ".join(f"{c}→{','.join(SM.skills_for(c, url=url))}" for c in g["classes"])
-            self.eng.log(f"map:   {label:16.16s} {url[:42]:42.42s}  {per}")
-            lines.append(f"## `{label}`  —  {', '.join(g['classes'])}")
+            sigs = ", ".join(g["signals"]) if g["signals"] else "general"
+            self.eng.log(f"map:   {g['priority']:8s} {g['method']:6s} {url[:50]:50s}  [{sigs}]")
+            lines.append(f"## `{label}`  —  {g['method']}  [{g['priority']}]")
             lines.append(f"- **URL:** `{url}`" + (f"  ·  source: {g['src']}" if g["src"] else ""))
-            for c in g["classes"]:
-                lines.append(f"- **{c}** → {', '.join('`'+s+'`' for s in SM.skills_for(c, url=url))}  ·  "
-                             f"`{SM.probe_for(c, url, param)}`")
+            lines.append(f"- **Signals:** {sigs}")
+            ref_skills = SM.matching(url=url, tech=tech, analysis=sigs)
+            if ref_skills:
+                lines.append(f"- **Reference:** {', '.join('`'+s+'`' for s in ref_skills[:3])}")
+            lines.append(f"- **Probe:** `{SM.probe_for('deep', url, param)}`")
             lines.append("")
         path = os.path.join(self.eng.dir, "arsenal.md")
-        open(path, "w").write("\n".join(lines))
+        with open(path, "w") as _f:
+            _f.write("\n".join(lines))
         self.eng.log(f"map: wrote arsenal map -> {path}  ← focus your 20% here (or run --hunt to auto-test)")
 
     # ---------------- parallel runner ----------------
@@ -1222,10 +1349,18 @@ class Engine:
         p = self.scope.name
         parts = [self._roe()]
         parts.append(
-            "HUNT METHOD: Fetch the endpoint as the session. Read what it does, every input, object id, "
-            "host, and role the response implies. From those bytes, invent a test the developer should have "
-            "refused — do NOT start from a vulnerability catalog. Run it. If negative, try a second different "
-            "test. Prove impact with in-scope, read-only actions only.\n")
+            "HUNT METHOD — fully dynamic, no vuln catalog:\n"
+            "1. FETCH the endpoint as the session. Read every byte: status, headers, body, "
+            "object IDs, roles, links, error shapes, auth tokens, timing.\n"
+            "2. UNDERSTAND what the endpoint does — what resource, what action, what auth model, "
+            "what boundaries exist between users/orgs/roles.\n"
+            "3. HYPOTHESIZE what could go wrong based on what you SEE, not a checklist. "
+            "Ask: what would the developer NOT want another user to do here? What assumption "
+            "does this response rely on? What happens if I change the identity, the object, "
+            "the method, the content-type, the timing, the sequence?\n"
+            "4. TEST your hypothesis. One precise request that either proves or disproves it.\n"
+            "5. If negative, form a DIFFERENT hypothesis from what you learned and test again.\n"
+            "6. Prove impact with in-scope actions only. No theoretical claims.\n")
         parts.append(
             "AUTHZ GATE (hard): when identities A and B are both live, do NOT return vulnerable:false "
             "until you have executed both: "
@@ -1296,10 +1431,57 @@ class Engine:
         self.eng.log(f"test plan: {result['summary']['total_cases']} cases "
                      f"({result['summary']['pending']} pending, "
                      f"{result['summary']['coverage_pct']}% covered)")
+        # --- auth bootstrap: analyze what accounts are needed BEFORE hunting ---
+        try:
+            import authbootstrap as AB
+            auth_plan = AB.analyze_auth_needs(self.eng.state.get("surface", []))
+            if auth_plan["auth_walled_endpoints"] > 0:
+                plan_path = os.path.join(self.eng.dir, "auth-plan.md")
+                with open(plan_path, "w") as f:
+                    f.write(AB.format_plan(auth_plan))
+                self.eng.log(f"auth: {auth_plan['auth_walled_endpoints']}/{auth_plan['total_endpoints']} "
+                             f"endpoints need auth ({auth_plan['auth_coverage_pct']}%) — "
+                             f"{len(auth_plan['accounts_needed'])} accounts needed — "
+                             f"plan at {plan_path}")
+                if auth_plan["auth_coverage_pct"] > 50:
+                    self.eng.log(f"auth: CRITICAL — {auth_plan['auth_coverage_pct']}% of surface needs auth. "
+                                 "Hunt phase will BLOCK unless a session is provisioned. "
+                                 "Run: python3 engine/engine/authsession.py provision --program "
+                                 f"{self.scope.name}")
+        except Exception as exc:
+            self.eng.log(f"auth: bootstrap analysis failed ({exc})")
+        self.eng.save()
 
     # ---------------- hunt ----------------
     def hunt(self):
         self.eng.set_phase("hunt")
+        # --- GATE: coverage check — refuse to hunt on empty or thin surface ---
+        surface = self.eng.state.get("surface") or []
+        disc = self.eng.state.get("discovery") or {}
+        if not surface:
+            self.eng.log("hunt: BLOCKED — surface is empty. Run discovery first.")
+            return
+        cov_pct = disc.get("coverage_pct", 100)
+        if cov_pct < 80 and not os.environ.get("HUNT_SKIP_COVERAGE_GATE"):
+            self.eng.log(f"hunt: BLOCKED — discovery coverage {cov_pct}% < 80% threshold. "
+                         "Fill gaps before hunting (set HUNT_SKIP_COVERAGE_GATE=1 to override).")
+            return
+        # --- GATE: auth check — refuse to hunt when majority needs auth and no session exists ---
+        auth_walled = sum(1 for s in surface if s.get("auth_required"))
+        auth_pct = (auth_walled / len(surface) * 100) if surface else 0
+        if auth_pct > 50 and not os.environ.get("HUNT_SKIP_AUTH_GATE"):
+            _AS = _authmod()
+            has_session = False
+            if _AS:
+                sess = _AS.load(self.scope.name, self.base)
+                has_session = bool(sess and _AS.valid(sess))
+            if not has_session and os.environ.get("HUNT_AUTH") == "1":
+                has_session = True
+            if not has_session:
+                self.eng.log(f"hunt: BLOCKED — {auth_walled}/{len(surface)} endpoints ({auth_pct:.0f}%) "
+                             "need auth but no session exists. Provision accounts first "
+                             "(set HUNT_SKIP_AUTH_GATE=1 to override).")
+                return
         self._honor_heals()
         # start OOB callback server for blind vuln testing (best-effort)
         self._oob = None
@@ -1440,6 +1622,8 @@ class Engine:
         if skipped_static:
             self.eng.log(f"hunt: skipped {skipped_static} static/CDN url(s) — the round stays on APIs")
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
+        self.eng.record_hunt_start()
+        self._round_learnings = []
         for it, f in self._run_parallel(self._hunt_agent, todo):
             if f and f.get("error") == "timeout":
                 # MODEL-FAILOVER: a timeout usually clears on a DIFFERENT model — try ONCE more with a generous
@@ -1454,6 +1638,9 @@ class Engine:
                     self.eng.mark_skipped(it, "double_timeout")
                     self.eng.log(f"hunt: INCONCLUSIVE (double-timeout) {it.get('vuln_class')}@{it['url']} "
                                  "— marked skipped, moving on (too heavy for the budget)")
+                    _lrn("record_gap", "bypass", f"timeout-{it.get('vuln_class', 'deep')}",
+                         f"double-timeout on {it['url']} — endpoint too complex or defended for current approach",
+                         self.base)
                     continue
             if f and f.get("error"):
                 err = f["error"]
@@ -1494,6 +1681,16 @@ class Engine:
                 else:
                     self.eng.log(f"hunt: error on {it.get('vuln_class')}@{it['url']} ({err}) "
                                  f"— not marking tested, will retry next round")
+                    retry_key = self.eng._key(it)
+                    retries = self.eng.state.setdefault("_retry_counts", {})
+                    retries[retry_key] = retries.get(retry_key, 0) + 1
+                    if retries[retry_key] >= 3:
+                        self.eng.mark_skipped(it, f"max_retries_exceeded: {err}")
+                        self.eng.log(f"hunt: max retries (3) reached for {it['url']} — marking skipped")
+                        _lrn("record_gap", "bypass", f"retry-fail-{it.get('vuln_class', 'deep')}",
+                             f"3x failure on {it['url']}: {err} — need different approach",
+                             self.base)
+                    self.eng.save()
                     continue
             # --- classify result BEFORE marking tested ---
             self._feedback_surface(f)                 # endpoints the agent found mid-hunt -> back into the worklist
@@ -1517,6 +1714,8 @@ class Engine:
                                  "the token belongs to the account that registered the client")
                 else:
                     self.eng.add_candidate(cand)
+                    self.eng.record_hypothesis(confirmed=True)
+                    self.eng.record_finding_verified()
                     self._remember(it, cand.get("evidence") or "", [cand.get("vuln_class")],
                                    result="candidate", finding=f)
                     self.eng.log((f"hunt: ⚠ CANDIDATE {cand['vuln_class']} @ {it['url']} — PoC touched OUT-OF-SCOPE "
@@ -1557,6 +1756,7 @@ class Engine:
                 has_execution_evidence = bool(
                     isinstance(f, dict) and (f.get("request") or f.get("tool_calls"))
                 )
+                self.eng.record_hypothesis(confirmed=False)
                 if analysis and has_execution_evidence:
                     self.eng.mark_tested(it)
                     _plan_status = ("tested", analysis[:300])
@@ -1566,6 +1766,17 @@ class Engine:
                 self._remember(it, analysis, classes, result="nothing", finding=f)
                 tail = f" — {str(analysis)[:160]}" if analysis else ""
                 self.eng.log(f"hunt: nothing on {it.get('vuln_class')}@{it['url']}{tail}")
+            # --- accumulate round learnings for cross-endpoint context ---
+            _learning = {"url": it["url"], "method": it.get("method", "GET")}
+            if f and f.get("vulnerable"):
+                _learning["result"] = "vulnerable"
+                _learning["vuln_class"] = f.get("vuln_class", "")
+                _learning["note"] = (f.get("evidence") or f.get("proof_note") or "")[:200]
+            elif isinstance(f, dict) and f.get("analysis"):
+                _learning["result"] = "nothing"
+                _learning["note"] = str(f["analysis"])[:200]
+            if _learning.get("note"):
+                self._round_learnings.append(_learning)
             # --- update test plan case status ---
             if _plan_status and self._plan_index:
                 _sk = it.get("_plan_key") or TP.case_id({
@@ -1585,6 +1796,55 @@ class Engine:
             self.eng.state["test_plan"] = plan_cases
             self.eng.log(f"hunt: test plan updated — {cov.get('executed',0)}/{cov.get('total',0)} executed, "
                          f"{cov.get('confirmed',0)} confirmed, {cov.get('disproved',0)} disproved")
+        # --- record hunt metrics ---
+        self.eng.record_hunt_end()
+        self.eng.record_endpoint_tested(len(todo))
+        m = self.eng.metrics()
+        self.eng.log(f"hunt: METRICS — {m['endpoints_tested']} endpoints tested, "
+                     f"{m['hypotheses_formed']} hypotheses ({m['hypotheses_confirmed']} confirmed), "
+                     f"{m['findings_verified']} verified, {m['time_on_target_sec']}s on target")
+        self.eng.save()
+
+    def _related_endpoints(self, url, method, max_results=6):
+        """Find sibling endpoints from the surface — same resource path or related operations."""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+        if not path_parts:
+            return []
+        base_resource = "/".join(path_parts[:-1]) if len(path_parts) > 1 else path_parts[0]
+        siblings = []
+        for s in self.eng.state.get("surface", []):
+            s_url = s.get("url", "")
+            if s_url == url and s.get("method", "GET") == method:
+                continue
+            s_parsed = urlparse(s_url)
+            if s_parsed.hostname != parsed.hostname:
+                continue
+            s_path = s_parsed.path.strip("/")
+            if base_resource and base_resource in s_path:
+                siblings.append(s)
+        siblings.sort(key=lambda s: s.get("method", "GET") != method)
+        return siblings[:max_results]
+
+    def _round_context_block(self, url):
+        """Build a context block from learnings accumulated during this round."""
+        learnings = getattr(self, "_round_learnings", [])
+        if not learnings:
+            return ""
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        relevant = [l for l in learnings if host in l.get("url", "")][-5:]
+        if not relevant:
+            return ""
+        lines = ["ROUND CONTEXT — what other endpoints on this host revealed so far:"]
+        for l in relevant:
+            status = "VULNERABLE" if l.get("result") == "vulnerable" else "tested-clean"
+            note = l.get("note", "")
+            lines.append(f"  {l.get('method','?')} {l['url'][:80]} → {status}"
+                         + (f": {note[:120]}" if note else ""))
+        lines.append("Use this to avoid redundant work and to spot patterns across endpoints.\n")
+        return "\n".join(lines) + "\n"
 
     def _hunt_deep(self, it, model=None, timeout=None):
         """ANALYSIS-DRIVEN per-endpoint pentest: the agent reads the endpoint's source/JS, reasons about what
@@ -1596,16 +1856,23 @@ class Engine:
         tech = sorted({t for tg in self.eng.state.get("targets", []) for t in tg.get("tech", [])})
         p, e = self.scope.name, ENGINE_DIR
         lead = self._authz_lead(url)
-        # Do not log "authz:" here. A queued sentence is not a run; authz_logged stays false
-        # until _authz_closeout (or a real diff) writes the line.
         try:
             import brain as BR
             memory = BR.prompt_block(p, url, self.base)
         except Exception:  # noqa: BLE001
             memory = ""
-        hinted = SM.matching(url, tech, extra=str(it.get("note") or ""))
+        # Knowledge-driven guidance: what has gone wrong in similar endpoints before
+        import testplan as TP
+        endpoint_profile = TP.analyze_endpoint(it)
+        knowledge_text = endpoint_profile.get("guidance_text", "")
+        recommended = endpoint_profile.get("recommended_skills", [])
+
+        # Merge knowledge-recommended skills with keyword-matched skills
+        hinted_names = list(dict.fromkeys(
+            recommended + SM.matching(url, tech, extra=str(it.get("note") or ""))
+        ))[:8]
         hinted_paths = []
-        for n in hinted[:6]:
+        for n in hinted_names:
             sp = os.path.join(SM.SKILLS_DIR, n, "SKILL.md")
             if os.path.isfile(sp):
                 hinted_paths.append(sp)
@@ -1613,12 +1880,46 @@ class Engine:
                       + ", ".join(f"`{x}`" for x in hinted_paths[:6])
                       + f". Any other hunt-* in {SM.SKILLS_DIR} may be Read. "
                       "They are references, not a menu.")
+        knowledge_block = ""
+        if knowledge_text:
+            knowledge_block = (f"\nKNOWLEDGE — what has gone wrong in endpoints like this:\n"
+                               f"{knowledge_text}\n"
+                               "Use this as starting hypotheses, not a checklist. "
+                               "If the live response contradicts these patterns, trust the response.\n")
+        # Rich endpoint metadata from discovery
+        meta_parts = []
+        if it.get("auth_required"):
+            meta_parts.append("auth: REQUIRED")
+        if it.get("confidence"):
+            meta_parts.append(f"confidence: {it['confidence']}")
+        if it.get("body_params"):
+            meta_parts.append(f"body_params: {', '.join(it['body_params'][:10])}")
+        if it.get("tags"):
+            meta_parts.append(f"tags: {', '.join(it['tags'][:6])}")
+        metadata_line = f"  {' | '.join(meta_parts)}\n" if meta_parts else ""
+        # Related endpoints — sibling operations on the same resource
+        siblings = self._related_endpoints(url, it.get("method", "GET"))
+        related_block = ""
+        if siblings:
+            lines = ["RELATED ENDPOINTS on the same resource (test cross-endpoint interactions):"]
+            for s in siblings[:5]:
+                s_params = ", ".join(s.get("params", [])[:5]) or "none"
+                lines.append(f"  {s.get('method','GET')} {s['url'][:80]}  params: {s_params}"
+                             + (f"  [auth_required]" if s.get("auth_required") else ""))
+            lines.append("If you find a read works cross-account, try the write sibling too (and vice versa).\n")
+            related_block = "\n".join(lines) + "\n"
+        # Round context — what previous hunts in this round found
+        round_block = self._round_context_block(url)
         task = (self._session_preamble() + "\n"
                 f"PENTEST THIS ONE ENDPOINT.\n"
                 + lead + memory +
                 f"URL: {url}   method: {it.get('method','GET')}   known param(s): {', '.join(it.get('params') or []) or it.get('param','')}   "
                 f"tech: {', '.join(tech) or 'unknown'}\n"
-                "Use the session's Cookie/headers on EVERY request. "
+                + metadata_line
+                + f"Signals: {', '.join(endpoint_profile.get('signals', [])) or 'general'}   "
+                f"Priority: {endpoint_profile.get('priority', 'medium')}\n"
+                + knowledge_block + related_block + round_block
+                + "Use the session's Cookie/headers on EVERY request. "
                 + skill_hint + "\n"
                 f"  authed fetch: `python3 {e}/netget.py GET \"<url>\" --as A` (second: `--as B`).  "
                 f"No playbook? `python3 {e}/learn.py auto --kind <tech|vuln|bypass|program> --name \"<thing>\" --context \"<why>\"` — drafts a skill for the next hunt.\n")
@@ -2050,6 +2351,25 @@ class Engine:
                                  f"{info.get('fp',0)} FP, {info.get('dup',0)} dup")
         except Exception:  # noqa: BLE001
             pass
+        # post-validate: auto-learn from gaps recorded during this engagement
+        try:
+            all_gaps = _lrn("gaps", base=self.base) or []
+            fresh_gaps = [g for g in all_gaps
+                          if g.get("kind") == "bypass" and self.scope.name in (g.get("context") or "")]
+            if fresh_gaps:
+                self.eng.log(f"learn: {len(fresh_gaps)} gap(s) recorded this engagement — attempting auto-learn")
+                learned_count = 0
+                for gap in fresh_gaps[:3]:
+                    r = _lrn("autolearn", gap.get("kind", "bypass"), gap.get("name", ""),
+                             context=gap.get("context", ""), base=self.base)
+                    if isinstance(r, dict) and r.get("registered"):
+                        learned_count += 1
+                        self.eng.log(f"learn: drafted skill for gap '{gap.get('name')}' "
+                                     f"-> {os.path.basename(os.path.dirname(r['path']))}")
+                if learned_count:
+                    self.eng.log(f"learn: {learned_count} new skill(s) drafted from engagement gaps")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _disposition(self, c, v):
         """Score the candidate the way a program triager scores RTFS / Informative. Never raises."""
@@ -2200,7 +2520,8 @@ class Engine:
                       f"- **Verifier:** {f.get('verdict',{}).get('reason','')}", ""]
             lines += block
         path = os.path.join(self.eng.dir, "report.md")
-        open(path, "w").write("\n".join(lines))
+        with open(path, "w") as _f:
+            _f.write("\n".join(lines))
         self.eng.log(f"report: wrote {len(c)} confirmed finding(s) -> {path}")
         return path
 

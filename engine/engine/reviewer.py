@@ -1122,7 +1122,7 @@ def _selfcheck_ok():
     """True iff the full selfcheck gauntlet still passes — the gate that lets an auto-fix stay."""
     import subprocess
     try:
-        r = subprocess.run(["python3", "/root/Claude-BugHunter/scripts/selfcheck.py"],
+        r = subprocess.run(["python3", "/home/xRay/0xray-hunt-harness/engine/scripts/selfcheck.py"],
                            capture_output=True, text=True, timeout=300)
         return "0 failed" in (r.stdout + r.stderr)
     except Exception:  # noqa: BLE001
@@ -1135,7 +1135,7 @@ def _rec_sig(rec):
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
-_AUTOFIX_DIRS = ["/root/Claude-BugHunter/engine", "/root/Claude-BugHunter/scripts",
+_AUTOFIX_DIRS = ["/home/xRay/0xray-hunt-harness/engine/engine", "/home/xRay/0xray-hunt-harness/engine/scripts",
                  os.path.expanduser("~/.claude/skills")]
 
 
@@ -1193,9 +1193,9 @@ def autofix(base, rev):
         "- Make the SMALLEST change that achieves it; keep it backward-compatible.\n"
         "- Preserve ALL safety rails (in-scope only, read-only by default, NO brute-force/cracking, NO DoS, "
         "stop-at-draft, triager-grade honesty). Never weaken them.\n"
-        "- Do NOT break the selfcheck. After editing, run `python3 /root/Claude-BugHunter/scripts/selfcheck.py` "
+        "- Do NOT break the selfcheck. After editing, run `python3 /home/xRay/0xray-hunt-harness/engine/scripts/selfcheck.py` "
         "yourself and make sure it still prints '0 failed'.\n"
-        "- Edit files only under /root/Claude-BugHunter/engine, /root/Claude-BugHunter/scripts, or "
+        "- Edit files only under /home/xRay/0xray-hunt-harness/engine/engine, /home/xRay/0xray-hunt-harness/engine/scripts, or "
         f"{os.path.expanduser('~/.claude/skills')}.\n"
         "End with a fenced ```json``` block: {\"changed_files\":[...],\"summary\":\"...\"}")
     try:

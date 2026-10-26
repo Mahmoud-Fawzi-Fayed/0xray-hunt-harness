@@ -32,6 +32,7 @@ import threading
 HAIKU = "claude-haiku-5-5"
 SONNET = "claude-sonnet-5-5"
 OPUS = "claude-opus-4-6"
+FABLE = "claude-fable-5-1"
 
 TASK_MODELS = {
     # Haiku tier — simple, fast, cheap
@@ -69,6 +70,11 @@ TASK_MODELS = {
     "report_draft": OPUS,
     "hunt_deep": OPUS,
     "validate": OPUS,
+    "discover": OPUS,
+
+    # Fable tier — creative lateral thinking
+    "hypothesize": FABLE,
+    "creative_bypass": FABLE,
 }
 
 # Phases → task type
@@ -84,6 +90,7 @@ PHASE_TASK = {
     "coverage": "coverage",
     "dedup": "dedup",
     "profile": "profile",
+    "discover": "discover",
 }
 
 # Known standard vuln classes that Sonnet handles well
@@ -123,6 +130,7 @@ TASK_EFFORT = {
     "hunt": "high", "verify": "high", "exploit": "high", "auth_test": "high",
     "impact": "high", "bypass": "high", "report_draft": "high",
     "hunt_deep": "high", "validate": "high",
+    "discover": "high", "hypothesize": "high", "creative_bypass": "high",
 }
 
 TOKEN_BUDGETS = {

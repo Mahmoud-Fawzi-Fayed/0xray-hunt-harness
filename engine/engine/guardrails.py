@@ -150,14 +150,18 @@ def read_audit(program=None, n=200, base=None):
 
 
 def account_count(program, base=None):
-    """How many disposable inboxes this program has minted.
+    """How many disposable identities this program actually has saved on disk.
 
-    A signup agent probes several register URLs for one identity. Those probes are not extra
-    accounts — counting them filled the cap (indrive 4 inboxes + 6 URL hits = 10/10) and blocked
-    the next real session. The cap still refuses register once the inbox count is exhausted.
+    Previous implementation counted audit-log "allowed" entries, which double-counts
+    retries and rate-limit failures that were allowed by guardrails but failed at the
+    provider. Now counts actual saved identities via identity.saved().
     """
-    return sum(1 for r in read_audit(program, n=2000, base=base)
-               if r.get("action") == "identity" and r.get("allowed"))
+    try:
+        import identity as _id
+        return len(_id.saved(program, base=base))
+    except Exception:
+        return sum(1 for r in read_audit(program, n=2000, base=base)
+                   if r.get("action") == "identity" and r.get("allowed"))
 
 
 def _load_scope(program, base):
@@ -248,11 +252,19 @@ def _cmd_selftest(_a):
     assert not ok
     # inbox mints are the account cap; register URL probes during one signup do not each count
     os.environ["HUNT_MAX_ACCOUNTS"] = "2"
+    id_dir = os.path.join(base, "_identity")
+    os.makedirs(id_dir, exist_ok=True)
     assert check("acme", "identity", base=base)[0]
+    # simulate identity.py creating the first identity file after guardrails allowed it
+    json.dump([{"program": "acme", "email": "a@test.com"}],
+              open(os.path.join(id_dir, "acme.json"), "w"))
     assert check("acme", "register", url="https://api.acme.com/signup", base=base)[0]
     assert check("acme", "register", url="https://api.acme.com/other", base=base)[0]
     assert account_count("acme", base) == 1, account_count("acme", base)
     assert check("acme", "identity", base=base)[0]
+    # simulate second identity created
+    json.dump([{"program": "acme", "email": "a@test.com"}, {"program": "acme", "email": "b@test.com"}],
+              open(os.path.join(id_dir, "acme.json"), "w"))
     ok, why = check("acme", "identity", base=base)
     assert not ok and "cap" in why, why
     ok, why = check("acme", "register", url="https://api.acme.com/signup", base=base)

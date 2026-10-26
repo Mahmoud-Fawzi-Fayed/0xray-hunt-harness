@@ -23,176 +23,30 @@ sys.path.insert(0, ENGINE)
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
-_ID_PARAMS = re.compile(r"(^|_)(id|uid|user_?id|account_?id|org_?id|team_?id|object_?id|ref|uuid)($|_)", re.I)
-_FILE_PARAMS = re.compile(r"(file|upload|attachment|image|avatar|document|media|photo)", re.I)
-_REDIRECT_PARAMS = re.compile(r"(url|uri|redirect|return|next|continue|dest|goto|link|callback|redir)", re.I)
-_SEARCH_PARAMS = re.compile(r"(search|query|q|filter|find|keyword|term|s|name|title|text|input)", re.I)
-_AUTH_PATHS = re.compile(r"/(login|signin|signup|register|auth|oauth|token|password|reset|verify|confirm|session|sso)", re.I)
-_ADMIN_PATHS = re.compile(r"/(admin|manage|dashboard|internal|staff|moderator|settings/admin)", re.I)
-_SENSITIVE_PATHS = re.compile(r"/(payment|billing|invoice|order|checkout|subscribe|wallet|transfer|withdraw)", re.I)
-_STATE_CHANGE_PATHS = re.compile(r"/(buy|purchase|checkout|transfer|apply|redeem|coupon|vote|follow|like|approve|cancel)", re.I)
-_TEMPLATE_PARAMS = re.compile(r"(template|name|title|subject|message|body|comment|content|email|greeting)", re.I)
-_WEBSOCKET_PATHS = re.compile(r"/(ws|wss|socket|realtime|stream|events|notifications|chat|live)", re.I)
+# ---------------------------------------------------------------------------
+# Dynamic analysis signals — used to DESCRIBE what an endpoint does, NOT to
+# match it against a static vuln checklist.  The hunt agent reads these
+# descriptions and invents its own tests from live bytes.
+# ---------------------------------------------------------------------------
 
-VULN_RULES = [
-    {
-        "id": "idor",
-        "name": "Insecure Direct Object Reference",
-        "match": lambda ep: ep.get("method") in ("GET", "POST", "PUT", "PATCH", "DELETE")
-                 and any(_ID_PARAMS.search(p) for p in _params(ep)),
-        "test": "Replace ID parameter with another user's ID and verify access control",
-        "priority_boost": 2,
-    },
-    {
-        "id": "bac",
-        "name": "Broken Access Control",
-        "match": lambda ep: ep.get("auth_required") or _ADMIN_PATHS.search(ep.get("url", "")),
-        "test": "Access endpoint without auth or with lower-privilege role token",
-        "priority_boost": 2,
-    },
-    {
-        "id": "upload",
-        "name": "Unrestricted File Upload",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT")
-                 and any(_FILE_PARAMS.search(p) for p in _params(ep)),
-        "test": "Upload file with dangerous extension (.svg, .html, .php) and verify content-type handling",
-        "priority_boost": 1,
-    },
-    {
-        "id": "open_redirect",
-        "name": "Open Redirect",
-        "match": lambda ep: any(_REDIRECT_PARAMS.search(p) for p in _params(ep)),
-        "test": "Set redirect parameter to external domain and verify redirect is followed",
-        "priority_boost": 0,
-    },
-    {
-        "id": "ssrf",
-        "name": "Server-Side Request Forgery",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT", "GET")
-                 and any(_REDIRECT_PARAMS.search(p) for p in _params(ep)),
-        "test": "Set URL parameter to internal address (169.254.169.254) or collaborator and verify server-side fetch",
-        "priority_boost": 2,
-    },
-    {
-        "id": "xss",
-        "name": "Cross-Site Scripting",
-        "match": lambda ep: any(_SEARCH_PARAMS.search(p) for p in _params(ep)),
-        "test": "Inject XSS payload in search/input parameter and verify reflection in response",
-        "priority_boost": 0,
-    },
-    {
-        "id": "sqli",
-        "name": "SQL Injection",
-        "match": lambda ep: any(_SEARCH_PARAMS.search(p) for p in _params(ep))
-                 or any(_ID_PARAMS.search(p) for p in _params(ep)),
-        "test": "Inject SQL syntax (single quote, UNION, sleep) and observe error or timing difference",
-        "priority_boost": 1,
-    },
-    {
-        "id": "mass_assignment",
-        "name": "Mass Assignment",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH")
-                 and len(_params(ep)) >= 2,
-        "test": "Add extra fields (role, is_admin, verified) to request body and verify they are accepted",
-        "priority_boost": 1,
-    },
-    {
-        "id": "auth_bypass",
-        "name": "Authentication Bypass",
-        "match": lambda ep: _AUTH_PATHS.search(ep.get("url", "")),
-        "test": "Test default credentials, missing auth header, token manipulation, and response manipulation",
-        "priority_boost": 1,
-    },
-    {
-        "id": "rate_limit",
-        "name": "Rate Limit Bypass",
-        "match": lambda ep: _AUTH_PATHS.search(ep.get("url", "")),
-        "test": "Send rapid requests and verify rate limiting is enforced; try bypass via headers (X-Forwarded-For)",
-        "priority_boost": 0,
-    },
-    {
-        "id": "sensitive_data",
-        "name": "Sensitive Data Exposure",
-        "match": lambda ep: _SENSITIVE_PATHS.search(ep.get("url", "")),
-        "test": "Check for PII/financial data in response, verify HTTPS enforcement and caching headers",
-        "priority_boost": 1,
-    },
-    {
-        "id": "privilege_escalation",
-        "name": "Privilege Escalation",
-        "match": lambda ep: _ADMIN_PATHS.search(ep.get("url", ""))
-                 and ep.get("method") in ("POST", "PUT", "PATCH", "DELETE"),
-        "test": "Call admin endpoint with regular user credentials; try modifying own role/permissions",
-        "priority_boost": 2,
-    },
-    {
-        "id": "race_condition",
-        "name": "Race Condition",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH", "DELETE")
-                 and _STATE_CHANGE_PATHS.search(ep.get("url", "")),
-        "test": "Send concurrent identical requests (H2 last-byte sync) and verify state changes applied n>=2 times",
-        "priority_boost": 2,
-    },
-    {
-        "id": "csrf",
-        "name": "Cross-Site Request Forgery",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH", "DELETE")
-                 and ep.get("auth_required"),
-        "test": "Verify anti-CSRF token presence; craft cross-origin form/fetch and test state-changing action",
-        "priority_boost": 1,
-    },
-    {
-        "id": "ssti",
-        "name": "Server-Side Template Injection",
-        "match": lambda ep: any(_TEMPLATE_PARAMS.search(p) for p in _params(ep)),
-        "test": "Inject template syntax ({{7*7}}, ${7*7}, #{7*7}) and verify server-side evaluation in response",
-        "priority_boost": 2,
-    },
-    {
-        "id": "cors",
-        "name": "CORS Misconfiguration",
-        "match": lambda ep: ep.get("auth_required") and ep.get("method") == "GET",
-        "test": "Send request with Origin: https://evil.com and check if reflected with Allow-Credentials: true",
-        "priority_boost": 1,
-    },
-    {
-        "id": "xxe",
-        "name": "XML External Entity",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT")
-                 and any(re.search(r"xml|soap|svg|feed|import|export", p, re.I) for p in _params(ep)),
-        "test": "Submit XML with external entity declaration pointing to internal resource or OOB callback",
-        "priority_boost": 2,
-    },
-    {
-        "id": "http_smuggling",
-        "name": "HTTP Request Smuggling",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT"),
-        "test": "Test CL.TE and TE.CL desync with differential Content-Length/Transfer-Encoding headers",
-        "priority_boost": 2,
-    },
-    {
-        "id": "prototype_pollution",
-        "name": "Prototype Pollution",
-        "match": lambda ep: ep.get("method") in ("POST", "PUT", "PATCH")
-                 and len(_params(ep)) >= 1,
-        "test": "Inject __proto__, constructor.prototype in JSON body and verify property pollution in response",
-        "priority_boost": 1,
-    },
-    {
-        "id": "cache_poisoning",
-        "name": "Web Cache Poisoning",
-        "match": lambda ep: ep.get("method") == "GET",
-        "test": "Add unkeyed headers (X-Forwarded-Host, X-Original-URL) and check if reflected in cached response",
-        "priority_boost": 1,
-    },
-    {
-        "id": "websocket_hijack",
-        "name": "Cross-Site WebSocket Hijacking",
-        "match": lambda ep: _WEBSOCKET_PATHS.search(ep.get("url", "")),
-        "test": "Connect to WebSocket from cross-origin page and verify auth is enforced on upgrade request",
-        "priority_boost": 1,
-    },
-]
+_SIGNAL_PATTERNS = {
+    "handles_identity":  re.compile(r"(^|_)(id|uid|user_?id|account_?id|org_?id|team_?id|object_?id|ref|uuid)($|_)", re.I),
+    "accepts_file":      re.compile(r"(file|upload|attachment|image|avatar|document|media|photo)", re.I),
+    "accepts_url":       re.compile(r"(url|uri|redirect|return|next|continue|dest|goto|link|callback|redir)", re.I),
+    "accepts_freetext":  re.compile(r"(search|query|q|filter|find|keyword|term|name|title|text|input|body|comment|content|message|template|subject|email)", re.I),
+    "auth_flow":         re.compile(r"/(login|signin|signup|register|auth|oauth|token|password|reset|verify|confirm|session|sso|2fa|mfa|otp)", re.I),
+    "elevated_privilege": re.compile(r"/(admin|manage|dashboard|internal|staff|moderator|settings)", re.I),
+    "financial":         re.compile(r"/(payment|billing|invoice|order|checkout|subscribe|wallet|transfer|withdraw|buy|purchase|redeem|coupon)", re.I),
+    "state_changing":    re.compile(r"/(create|update|delete|remove|modify|approve|cancel|apply|transfer|invite|share|publish)", re.I),
+    "realtime":          re.compile(r"/(ws|wss|socket|realtime|stream|events|notifications|chat|live|cable)", re.I),
+    "api_schema":        re.compile(r"(graphql|/gql|/api/|/v[0-9]+/)", re.I),
+}
+
+# VULN_RULES is kept as an empty list for backward compatibility.
+# The engine no longer matches endpoints against a static vulnerability menu.
+# Instead, each endpoint gets a dynamic analysis profile (see analyze_endpoint)
+# and the hunt agent reasons about what to test from the profile.
+VULN_RULES = []
 
 
 def _params(ep):
@@ -202,39 +56,140 @@ def _params(ep):
     return [str(x) for x in p]
 
 
-def _priority_score(ep, matched_rules):
+def analyze_endpoint(ep):
+    """Build a dynamic analysis profile for one endpoint.
+
+    Instead of matching against a static vuln list, this describes WHAT the
+    endpoint does so the hunt agent can reason about what might go wrong.
+    Returns a dict of signals the agent reads to form hypotheses.
+    """
+    url = ep.get("url", "")
+    method = ep.get("method", "GET")
+    params = _params(ep)
+    all_text = url + " " + " ".join(params)
+
+    signals = []
+    for name, pat in _SIGNAL_PATTERNS.items():
+        if pat.search(all_text):
+            signals.append(name)
+
+    is_write = method in ("POST", "PUT", "PATCH", "DELETE")
+    if is_write and "state_changing" not in signals:
+        signals.append("state_changing")
+
+    profile = {
+        "url": url,
+        "method": method,
+        "params": params,
+        "is_write": is_write,
+        "auth_required": bool(ep.get("auth_required")),
+        "signals": signals,
+        "tags": ep.get("tags") or [],
+        "category": ep.get("category", ""),
+        "body_params": ep.get("body_params") or [],
+        "note": ep.get("note", ""),
+        "source": ep.get("source", ""),
+        "confidence": ep.get("confidence", "unknown"),
+    }
+
+    # Priority score — derived from what the endpoint IS, not from which
+    # vuln class we think applies.
     score = 0
-    n_params = len(_params(ep))
-    score += min(n_params, 5)
+    score += min(len(params), 5)
     if ep.get("auth_required"):
         score += 3
-    if ep.get("method") in ("POST", "PUT", "PATCH", "DELETE"):
+    if is_write:
+        score += 3
+    if "handles_identity" in signals:
+        score += 4
+    if "financial" in signals:
+        score += 4
+    if "elevated_privilege" in signals:
+        score += 3
+    if "auth_flow" in signals:
         score += 2
     if ep.get("confidence") == "observed":
         score += 2
     elif ep.get("confidence") == "documented":
         score += 1
-    for r in matched_rules:
-        score += r.get("priority_boost", 0)
-    if _SENSITIVE_PATHS.search(ep.get("url", "")):
-        score += 3
-    if _ADMIN_PATHS.search(ep.get("url", "")):
-        score += 2
-    return score
 
-
-def _priority_label(score):
+    profile["priority_score"] = score
     if score >= 10:
-        return "critical"
-    if score >= 7:
-        return "high"
-    if score >= 4:
-        return "medium"
-    return "low"
+        profile["priority"] = "critical"
+    elif score >= 7:
+        profile["priority"] = "high"
+    elif score >= 4:
+        profile["priority"] = "medium"
+    else:
+        profile["priority"] = "low"
+
+    try:
+        import knowledge as K
+        guidance = K.build_hunt_guidance(signals, tech=ep.get("tech", []), method=method)
+        profile["guidance"] = guidance
+        profile["guidance_text"] = K.format_guidance_text(guidance)
+        profile["recommended_skills"] = guidance.get("recommended_skills", [])
+    except Exception:
+        profile["guidance"] = {}
+        profile["guidance_text"] = ""
+        profile["recommended_skills"] = []
+
+    return profile
+
+
+def _build_test_instruction(profile):
+    """Build an actionable test instruction from a dynamic analysis profile.
+
+    Instead of the vague 'analyze endpoint', this produces specific guidance
+    based on the knowledge layer — what to look for, what to try first.
+    """
+    signals = profile.get("signals", [])
+    method = profile.get("method", "GET")
+    url = profile.get("url", "")
+    params = profile.get("params", [])
+    guidance = profile.get("guidance", {})
+
+    parts = []
+    parts.append(f"{method} {url}")
+
+    if signals:
+        parts.append(f"Signals: {', '.join(signals)}.")
+
+    signal_patterns = guidance.get("signal_patterns", [])
+    if signal_patterns:
+        top = signal_patterns[0]
+        wrongs = top.get("what_goes_wrong", [])[:2]
+        moves = top.get("first_moves", [])[:2]
+        if wrongs:
+            parts.append(f"What goes wrong here: {'; '.join(wrongs)}.")
+        if moves:
+            parts.append(f"First moves: {'; '.join(moves)}.")
+        bar = top.get("evidence_bar", "")
+        if bar:
+            parts.append(f"Evidence bar: {bar}.")
+    else:
+        parts.append("No specific pattern match — explore the endpoint: fetch it, read the response, "
+                      "identify trust boundaries, form a hypothesis about what the developer assumes, "
+                      "and test that assumption.")
+
+    tech_patterns = guidance.get("tech_patterns", [])
+    if tech_patterns:
+        tp = tech_patterns[0]
+        parts.append(f"Tech ({tp['tech']}): watch for {'; '.join(tp['what_goes_wrong'][:2])}.")
+
+    recommended = profile.get("recommended_skills", [])
+    if recommended:
+        parts.append(f"Reference skills: {', '.join(recommended[:3])}.")
+
+    return " ".join(parts)
 
 
 def generate_test_cases(endpoints, tested_checks=None):
-    """Generate test cases from endpoint list. Returns list of test case dicts."""
+    """Analyze endpoints and produce dynamic test profiles.
+
+    No static vuln-class matching. Each endpoint gets an analysis profile
+    with signals the hunt agent uses to form its own hypotheses.
+    """
     tested_checks = tested_checks or {}
     cases = []
     seen = set()
@@ -242,38 +197,35 @@ def generate_test_cases(endpoints, tested_checks=None):
     for ep in endpoints:
         url = ep.get("url", "")
         method = ep.get("method", "GET")
-        matched = [r for r in VULN_RULES if r["match"](ep)]
-
-        if not matched:
+        key = (method, url)
+        if key in seen or not url:
             continue
+        seen.add(key)
 
-        for rule in matched:
-            key = (method, url, rule["id"])
-            if key in seen:
-                continue
-            seen.add(key)
+        profile = analyze_endpoint(ep)
 
-            tc_key = f"{method}|{url}|{rule['id']}"
-            ep_key = f"{method}|{url}"
-            ep_checks = tested_checks.get(ep_key)
-            already_tested = (tc_key in tested_checks
-                              or (isinstance(ep_checks, list) and rule["id"] in ep_checks))
+        ep_key = f"{method}|{url}"
+        already_tested = ep_key in tested_checks
 
-            score = _priority_score(ep, [rule])
-            cases.append({
-                "endpoint": url,
-                "method": method,
-                "category": rule["id"],
-                "category_name": rule["name"],
-                "test": rule["test"],
-                "priority": _priority_label(score),
-                "priority_score": score,
-                "params": _params(ep),
-                "auth_required": bool(ep.get("auth_required")),
-                "confidence": ep.get("confidence", "unknown"),
-                "roles": ["user_a", "user_b"] if rule["id"] in ("idor", "bac", "privilege_escalation") else [],
-                "status": "tested" if already_tested else "pending",
-            })
+        test_instruction = _build_test_instruction(profile)
+
+        cases.append({
+            "endpoint": url,
+            "method": method,
+            "category": "dynamic",
+            "category_name": "Dynamic Analysis",
+            "test": test_instruction,
+            "priority": profile["priority"],
+            "priority_score": profile["priority_score"],
+            "params": profile["params"],
+            "auth_required": profile["auth_required"],
+            "confidence": profile["confidence"],
+            "signals": profile["signals"],
+            "guidance_text": profile.get("guidance_text", ""),
+            "recommended_skills": profile.get("recommended_skills", []),
+            "roles": ["user_a", "user_b"] if profile["is_write"] and profile["auth_required"] else [],
+            "status": "tested" if already_tested else "pending",
+        })
 
     cases.sort(key=lambda c: -c["priority_score"])
     return cases
@@ -417,18 +369,7 @@ def case_id(case):
 VALID_STATUSES = {"pending", "running", "tested", "blocked", "inconclusive", "disproved", "confirmed"}
 _EVIDENCE_REQUIRED = {"tested", "confirmed", "disproved", "inconclusive"}
 
-_CATEGORY_EVIDENCE = {
-    "idor": ["user", "other user", "owner", "access", "id", "object"],
-    "bac": ["role", "admin", "forbidden", "unauthorized", "access", "privilege"],
-    "xss": ["reflect", "script", "payload", "alert", "inject", "stored", "dom"],
-    "sqli": ["sql", "error", "database", "query", "extract", "union", "syntax"],
-    "ssrf": ["internal", "localhost", "127.0.0", "metadata", "server", "oob"],
-    "upload": ["file", "upload", "content-type", "extension", "mime", "shell"],
-    "open_redirect": ["redirect", "location", "external", "domain", "url"],
-    "mass_assignment": ["param", "role", "admin", "privilege", "field", "assign"],
-    "auth_bypass": ["bypass", "token", "session", "auth", "login", "password"],
-    "rate_limit": ["rate", "limit", "429", "throttle", "brute", "attempt"],
-}
+_CATEGORY_EVIDENCE = {}
 
 
 def validate_evidence(status, evidence, category=None):
@@ -499,9 +440,9 @@ def generate_auth_tests(endpoints, identities):
         url = ep.get("url", "")
         method = ep.get("method", "GET")
         params = _params(ep)
-        id_params = [p for p in params if _ID_PARAMS.search(p)]
+        id_params = [p for p in params if _SIGNAL_PATTERNS["handles_identity"].search(p)]
 
-        if ep.get("auth_required") or _ADMIN_PATHS.search(url):
+        if ep.get("auth_required") or _SIGNAL_PATTERNS["elevated_privilege"].search(url):
             for owner, accessor in id_pairs:
                 cases.append({
                     "endpoint": url, "method": method, "category": "bac",
@@ -531,7 +472,7 @@ def generate_auth_tests(endpoints, identities):
                     "status": "pending",
                 })
 
-        if _ADMIN_PATHS.search(url) and method in ("POST", "PUT", "PATCH", "DELETE"):
+        if _SIGNAL_PATTERNS["elevated_privilege"].search(url) and method in ("POST", "PUT", "PATCH", "DELETE"):
             for ident in identities:
                 if roles.get(ident["ident"]) != "admin":
                     cases.append({
@@ -684,29 +625,31 @@ def _selftest(_a=None):
     assert result["markdown"]
 
     categories = {c["category"] for c in result["plan"]}
-    assert "idor" in categories, f"missing idor: {categories}"
-    assert "upload" in categories, f"missing upload: {categories}"
-    assert "open_redirect" in categories or "ssrf" in categories, f"missing redirect/ssrf: {categories}"
-    assert "xss" in categories or "sqli" in categories, f"missing xss/sqli: {categories}"
-    assert "bac" in categories, f"missing bac: {categories}"
-    assert "auth_bypass" in categories, f"missing auth_bypass: {categories}"
-    assert "mass_assignment" in categories, f"missing mass_assignment: {categories}"
-    assert "sensitive_data" in categories, f"missing sensitive_data: {categories}"
+    assert "dynamic" in categories, f"expected dynamic category: {categories}"
+
+    # dynamic profiles should carry signals from the mock endpoints
+    all_signals = set()
+    for c in result["plan"]:
+        all_signals.update(c.get("signals", []))
+    assert "handles_identity" in all_signals, f"missing identity signal: {all_signals}"
+    assert "accepts_file" in all_signals, f"missing file signal: {all_signals}"
+    assert "accepts_url" in all_signals, f"missing url signal: {all_signals}"
+    assert "financial" in all_signals, f"missing financial signal: {all_signals}"
+    assert "auth_flow" in all_signals, f"missing auth_flow signal: {all_signals}"
 
     # priority ordering: first case should be high priority
     assert result["plan"][0]["priority"] in ("critical", "high"), \
         f"first case priority: {result['plan'][0]['priority']}"
 
     # cross-reference with tested_checks
-    tested = {"POST|https://api.acme.com/api/users|mass_assignment": True}
+    tested = {"POST|https://api.acme.com/api/users": True}
     result2 = build_test_plan(fmap, state={"tested_checks": tested})
     tested_cases = [c for c in result2["plan"] if c["status"] == "tested"]
     assert len(tested_cases) >= 1, "tested_checks cross-reference not working"
 
-    # GET and POST to same URL generate separate cases
-    user_cases = [c for c in result["plan"] if "users" in c["endpoint"] and c["category"] == "sqli"]
-    methods = {c["method"] for c in user_cases}
-    assert len(methods) >= 1, "should have method-specific cases"
+    # multiple endpoints produce separate cases
+    endpoints_seen = {c["endpoint"] for c in result["plan"]}
+    assert len(endpoints_seen) >= 4, f"expected multiple endpoints: {endpoints_seen}"
 
     # hostile input
     empty = build_test_plan({"endpoints": []})

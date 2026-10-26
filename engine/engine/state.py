@@ -321,15 +321,79 @@ class Engagement:
     def evidence_path(self, fname):
         return os.path.join(self.dir, "evidence", fname)
 
+    # ---- hunt metrics ----
+    def _ensure_metrics(self):
+        if "metrics" not in self.state:
+            self.state["metrics"] = {
+                "hunt_started": None,
+                "hunt_ended": None,
+                "endpoints_discovered": 0,
+                "endpoints_tested": 0,
+                "hypotheses_formed": 0,
+                "hypotheses_confirmed": 0,
+                "hypotheses_rejected": 0,
+                "findings_verified": 0,
+                "findings_submitted": 0,
+                "time_on_target_sec": 0,
+                "phase_times": {},
+            }
+        return self.state["metrics"]
+
+    def record_hunt_start(self):
+        m = self._ensure_metrics()
+        m["hunt_started"] = _now()
+
+    def record_hunt_end(self):
+        m = self._ensure_metrics()
+        m["hunt_ended"] = _now()
+        if m["hunt_started"]:
+            try:
+                from datetime import datetime
+                start = datetime.fromisoformat(m["hunt_started"])
+                end = datetime.fromisoformat(m["hunt_ended"])
+                m["time_on_target_sec"] = int((end - start).total_seconds())
+            except Exception:
+                pass
+
+    def record_phase_time(self, phase, seconds):
+        m = self._ensure_metrics()
+        m["phase_times"][phase] = m["phase_times"].get(phase, 0) + seconds
+
+    def record_endpoint_tested(self, count=1):
+        m = self._ensure_metrics()
+        m["endpoints_tested"] = m.get("endpoints_tested", 0) + count
+
+    def record_hypothesis(self, confirmed=False):
+        m = self._ensure_metrics()
+        m["hypotheses_formed"] = m.get("hypotheses_formed", 0) + 1
+        if confirmed:
+            m["hypotheses_confirmed"] = m.get("hypotheses_confirmed", 0) + 1
+        else:
+            m["hypotheses_rejected"] = m.get("hypotheses_rejected", 0) + 1
+
+    def record_finding_verified(self):
+        m = self._ensure_metrics()
+        m["findings_verified"] = m.get("findings_verified", 0) + 1
+
+    def metrics(self):
+        m = self._ensure_metrics()
+        m["endpoints_discovered"] = len(self.state["surface"])
+        return dict(m)
+
     # ---- progress ----
     def summary(self):
         t = self.state["tested"]
-        # count only new-format keys (METHOD|url|param|class) to avoid double-counting legacy compat keys
         tested_count = sum(1 for k in (t if isinstance(t, dict) else t or [])
                           if str(k).count("|") >= 3) or len(t if isinstance(t, dict) else t or [])
+        m = self.metrics()
         return {"surface": len(self.state["surface"]), "tested": tested_count,
                 "candidates": len(self.state["candidates"]), "confirmed": len(self.state["confirmed"]),
-                "phase": self.state["phase"]}
+                "phase": self.state["phase"],
+                "endpoints_tested": m["endpoints_tested"],
+                "hypotheses_formed": m["hypotheses_formed"],
+                "hypotheses_confirmed": m["hypotheses_confirmed"],
+                "findings_verified": m["findings_verified"],
+                "time_on_target_sec": m["time_on_target_sec"]}
 
 
 def _selftest():
@@ -361,7 +425,9 @@ def _selftest():
         e.confirm(e.state["candidates"][0], {"real": True})
         # resume: a fresh handle on the same dir sees persisted state
         e2 = Engagement(d, "demo")
-        assert e2.summary() == {"surface": 2, "tested": 1, "candidates": 1, "confirmed": 1, "phase": "init"}
+        s = e2.summary()
+        assert s["surface"] == 2 and s["tested"] == 1 and s["candidates"] == 1 and s["confirmed"] == 1 and s["phase"] == "init"
+        assert "endpoints_tested" in s and "hypotheses_formed" in s and "time_on_target_sec" in s
         # one file-id pattern is one hunt: the second UUID is not a new surface item
         u1 = "https://files.example/api/v1/files/11111111-1111-4111-8111-111111111111"
         u2 = "https://files.example/api/v1/files/22222222-2222-4222-8222-222222222222"
@@ -385,4 +451,17 @@ def _selftest():
 
 
 if __name__ == "__main__":
-    _selftest()
+    import sys as _sys
+    if len(_sys.argv) > 1 and _sys.argv[1] == "metrics":
+        import argparse
+        p = argparse.ArgumentParser()
+        p.add_argument("cmd")
+        p.add_argument("--slug", required=True)
+        p.add_argument("--base", default=DEFAULT_BASE)
+        a = p.parse_args()
+        eng = Engagement(a.base, a.slug)
+        m = eng.metrics()
+        s = eng.summary()
+        print(json.dumps({**s, "metrics": m}, indent=2))
+    else:
+        _selftest()
