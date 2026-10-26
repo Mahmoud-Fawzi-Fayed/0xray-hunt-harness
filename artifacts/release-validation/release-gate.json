@@ -1,8 +1,8 @@
 {
-  "harness_version": "10.1",
-  "generated": "2026-10-26T14:30:00Z",
+  "harness_version": "10.2",
+  "generated": "2026-10-26T16:00:00Z",
   "baseline_tag": "baseline-pre-release",
-  "head_commit": "38a54db",
+  "head_commit": "bf1a627+wip",
   "selftest_modules": {
     "passed": 63,
     "failed": 0,
@@ -110,7 +110,10 @@
         "engine.py: non-vulnerable cases without transport evidence → not marked tested",
         "state.py: collapse_patterns() uses separate 'collapsed' dict, not 'tested'",
         "engine.py: _honor_review_skips() uses 'collapsed' dict, not 'tested'",
-        "engine.py: _reproduce() no longer uses regex on agent text as 'reproduced'"
+        "engine.py: _reproduce() no longer uses regex on agent text as 'reproduced'",
+        "state.py: confirm() accepts reproduction_status parameter (reproduced/plausible/inconclusive/unreproduced)",
+        "state.py: independently_reproduced() and unreproduced_findings() query methods",
+        "engine.py: validate() passes repro status from _reproduce() to confirm()"
       ]
     },
     "P0_7_case_id_isolation": {
@@ -162,8 +165,10 @@
         "egress.py: required header injection, OSINT allowlist, audit trail",
         "egress.py: check_egress() decision point wired into netget.py::get()",
         "egress.py: fail-closed when policy unavailable",
-        "netget.py: set_scope_guard() auto-creates EgressPolicy from scope",
-        "egress.py selftest: PASS (13 test scenarios)"
+        "egress.py: non-intrusive mode blocks POST/PUT/DELETE/PATCH on target scope at transport level",
+        "netget.py: set_scope_guard(scope, allow_intrusive) passes mode to EgressPolicy",
+        "engine.py: passes allow_intrusive flag to netget.set_scope_guard()",
+        "egress.py selftest: PASS (21 test scenarios — 8 new non-intrusive mode tests)"
       ]
     },
     "P1_11_discovery_reliability": {
@@ -188,7 +193,11 @@
         "scheduler.py: duplicate prevention, crash-safe recovery, non-idempotent safety",
         "scheduler.py: AWAITING_APPROVAL status for safe pause on approval-needed ops",
         "scheduler.py: concurrent claim test — exactly 1 winner from 10 threads",
-        "scheduler.py selftest: PASS"
+        "scheduler.py selftest: PASS",
+        "engine.py: scheduler integrated into hunt loop via _scheduled_hunt() wrapper",
+        "engine.py: recover_expired() called before each hunt round for crash recovery",
+        "engine.py: scheduler filters already-completed/exhausted items from todo list",
+        "engine.py: scheduler metrics logged after each hunt round"
       ]
     },
     "P1_13_ci_quality": {
@@ -270,5 +279,5 @@
     }
   },
   "gate_verdict": "PASS",
-  "gate_notes": "All P0 critical fixes verified: evidence-gate bypass (no mark_tested without transport obs), concurrent case-ID race (per-task env, thread-local), wildcard port scope, deterministic A/B auth, false reproduction removed, egress policy broker. P1: durable scheduler, concurrency-safe evidence, browser test uses production blocker. 110/110 tests pass. Zero OOS requests."
+  "gate_notes": "v10.2: All audit-2 fixes applied. Scheduler integrated into engine.py hunt loop (claim/complete/fail/recover). Non-intrusive mode enforced at egress transport layer (POST/PUT/DELETE/PATCH blocked unless allow_intrusive=True). Reproduction status tracked separately from LLM validation (reproduced vs plausible vs inconclusive). Plus all v10.1 P0 fixes: evidence-gate bypass, case-ID race, wildcard port scope, deterministic A/B auth, egress broker, false reproduction removed. 110/110 tests pass. Zero OOS requests."
 }

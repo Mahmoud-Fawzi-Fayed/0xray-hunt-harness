@@ -226,7 +226,7 @@ class Engine:
         # Defense-in-depth: arm netget scope guard so no HTTP request can escape scope
         try:
             import netget
-            netget.set_scope_guard(self.scope)
+            netget.set_scope_guard(self.scope, allow_intrusive=self.allow_intrusive)
         except Exception:
             pass
         # Wire evidence pipeline so every HTTP exchange is auto-recorded
@@ -251,9 +251,15 @@ class Engine:
                 scope_data["out_path_restrictions"] = self.scope.out_path_restrictions
             with open(tgt_path, "w") as _f:
                 _j.dump(scope_data, _f, indent=2)
+        try:
+            from scheduler import Scheduler
+            self.scheduler = Scheduler(os.path.join(os.path.expanduser(base), self.scope.name))
+        except Exception:
+            self.scheduler = None
         self.eng.log(f"engine start | scope={self.scope.name} in={self.scope.in_scope} "
                      f"out={self.scope.out_of_scope} seeds={self.scope.seeds} mock={mock} "
-                     f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}")
+                     f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}"
+                     f" scheduler={'ON' if self.scheduler else 'OFF'}")
 
     # ---------------- rules of engagement (injected into every agent) ----------------
     def _roe(self):
@@ -1657,10 +1663,32 @@ class Engine:
                 todo.append(it)
         if skipped_static:
             self.eng.log(f"hunt: skipped {skipped_static} static/CDN url(s) — the round stays on APIs")
+        # --- scheduler integration: recover crashed work, filter already-completed ---
+        _sched = self.scheduler
+        if _sched:
+            expired = _sched.recover_expired()
+            if expired:
+                self.eng.log(f"hunt: scheduler recovered {len(expired)} expired lease(s)")
+            _pre = len(todo)
+            _filtered = []
+            for it in todo:
+                case_id = self.eng._key(it)
+                cs = _sched.status(case_id)
+                if cs and cs.get("status") == "completed":
+                    continue
+                if cs and cs.get("status") == "failed":
+                    attempt = cs.get("attempt", 0)
+                    max_r = cs.get("max_retries", 3)
+                    if attempt >= max_r and not cs.get("idempotent", True):
+                        continue
+                _filtered.append(it)
+            if _pre != len(_filtered):
+                self.eng.log(f"hunt: scheduler filtered {_pre - len(_filtered)} already-completed/exhausted item(s)")
+            todo = _filtered
         self.eng.log(f"hunt: testing {len(todo)} item(s), {self.parallel} at a time")
         self.eng.record_hunt_start()
         self._round_learnings = []
-        for it, f in self._run_parallel(self._hunt_agent, todo):
+        for it, f in self._run_parallel(self._scheduled_hunt, todo):
             if f and f.get("error") == "timeout":
                 # MODEL-FAILOVER: a timeout usually clears on a DIFFERENT model — try ONCE more with a generous
                 # budget. If it times out AGAIN, the endpoint is too heavy: mark it tested (INCONCLUSIVE) and move
@@ -1851,6 +1879,11 @@ class Engine:
         self.eng.log(f"hunt: METRICS — {m['endpoints_tested']} endpoints tested, "
                      f"{m['hypotheses_formed']} hypotheses ({m['hypotheses_confirmed']} confirmed), "
                      f"{m['findings_verified']} verified, {m['time_on_target_sec']}s on target")
+        if _sched:
+            sm = _sched.metrics()
+            retryable = _sched.retryable()
+            self.eng.log(f"hunt: SCHEDULER — {sm['total']} claims: {sm['by_status']}, "
+                         f"{len(retryable)} retryable")
         self.eng.save()
 
     def _related_endpoints(self, url, method, max_results=6):
@@ -2075,6 +2108,35 @@ class Engine:
         alts = [m for m in pool if m and m != current] or pool
         return random.choice(alts) if alts else None
 
+    def _scheduled_hunt(self, it, model=None, timeout=None):
+        """Scheduler-aware wrapper around _hunt_agent. Claims work, runs the agent, marks complete/fail."""
+        _sched = self.scheduler
+        if not _sched:
+            return self._hunt_agent(it, model, timeout)
+        case_id = self.eng._key(it)
+        worker_id = f"pid-{os.getpid()}"
+        method = it.get("method") or "GET"
+        is_read = method.upper() in ("GET", "HEAD", "OPTIONS")
+        claim = _sched.claim_work(
+            case_id, worker_id, lease_sec=int(os.environ.get("HUNT_LEASE_SEC", "600")),
+            method=method, url=it.get("url"),
+            owner_identity=it.get("owner"), accessor_identity=it.get("accessor"),
+            idempotent=is_read)
+        if claim is None:
+            cs = _sched.status(case_id)
+            self.eng.log(f"hunt: scheduler skip {it.get('url','?')[:60]} (status={cs.get('status') if cs else '?'})")
+            return {"skipped": "scheduler: already claimed or exhausted"}
+        try:
+            f = self._hunt_agent(it, model, timeout)
+            if f and f.get("error"):
+                _sched.fail(case_id, worker_id, error=f["error"])
+            else:
+                _sched.complete(case_id, worker_id)
+            return f
+        except Exception as exc:
+            _sched.fail(case_id, worker_id, error=str(exc))
+            raise
+
     def _hunt_agent(self, it, model=None, timeout=None):
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
@@ -2107,22 +2169,28 @@ class Engine:
             except Exception:  # noqa: BLE001
                 pass
         # DETERMINISTIC 2-account IDOR/BOLA shortcut — runs before the LLM call.
-        # If B can read A's object, that's a confirmed IDOR without burning an agent.
+        # Uses planned owner/accessor/method from test item, not hardcoded defaults.
         if str(it.get("url", "")).startswith("http"):
             try:
                 import authn as _AN
                 import authz as _AZ
+                _owner = it.get("owner") or "A"
+                _accessor = it.get("accessor") or "B"
+                _method = it.get("method") or "GET"
                 ids = _AN.identities(self.scope.name, self.base)
-                if "A" in ids and "B" in ids:
-                    d = _AZ.diff_one("GET", it["url"], None, self.scope.name)
-                    s = d if d.get("bola_suspect") else (_AZ.id_oracle(it["url"], self.scope.name) or [None])[0]
+                if _owner in ids and _accessor in ids:
+                    d = _AZ.diff_one(_method, it["url"], it.get("body"), self.scope.name,
+                                     owner=_owner, accessor=_accessor)
+                    s = d if d.get("bola_suspect") else (_AZ.id_oracle(
+                        it["url"], self.scope.name, owner=_owner, accessor=_accessor) or [None])[0]
                     if s and s.get("bola_suspect"):
                         return {"vulnerable": True, "severity": "high", "vuln_class": "idor",
-                                "evidence": (f"Cross-account read (authz 2-account): identity B requested A's object "
-                                             f"{s['url']} and received HTTP {s['B_status']} with {s['similarity']:.0%}-"
-                                             f"identical id-bearing content (A={s['A_status']}/{s['A_len']}B, "
-                                             f"B={s['B_status']}/{s['B_len']}B) — object-level authorization missing."),
-                                "request": f"GET {s['url']}  — as A vs as B (two-account diff)",
+                                "evidence": (f"Cross-account {_method} (authz 2-account): identity {_accessor} requested "
+                                             f"{_owner}'s object {s['url']} and received HTTP {s['B_status']} with "
+                                             f"{s['similarity']:.0%}-identical id-bearing content "
+                                             f"({_owner}={s['A_status']}/{s['A_len']}B, "
+                                             f"{_accessor}={s['B_status']}/{s['B_len']}B) — object-level authorization missing."),
+                                "request": f"{_method} {s['url']}  — as {_owner} vs as {_accessor} (two-account diff)",
                                 "attacker_holds": "own_session", "id_source": "in_scope_oracle",
                                 "_model": "authz-idor", "_skills": ["hunt-idor"]}
             except Exception:  # noqa: BLE001
@@ -2425,9 +2493,10 @@ class Engine:
             # 4) REAL -> confirm, LABELLED by how we know it's real (reproduced vs LLM-only-needs-manual-check)
             if v.get("severity"):
                 c["severity"] = v["severity"]     # use the validator's CALIBRATED severity, not the hunt's
-            self.eng.confirm(c, v)
-            self.eng.record_finding_verified()
             reproduced = repro["status"] == "reproduced"
+            repro_status = "reproduced" if reproduced else repro.get("status", "unreproduced")
+            self.eng.confirm(c, v, reproduction_status=repro_status)
+            self.eng.record_finding_verified()
             tag = ("✅ CONFIRMED REAL (reproduced)" if reproduced
                    else "⚠ CONFIRMED — LLM-validated but NOT independently reproduced; verify before submit")
             _lrn("record_outcome", self.scope.name, cls,

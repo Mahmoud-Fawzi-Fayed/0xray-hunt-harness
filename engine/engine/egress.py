@@ -67,10 +67,13 @@ class EgressDecision:
 class EgressPolicy:
     """Transport-level egress policy broker. Default-deny."""
 
-    def __init__(self, scope=None, osint_allowed=True, audit_path=None):
+    _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+    def __init__(self, scope=None, osint_allowed=True, audit_path=None, allow_intrusive=False):
         self._scope = scope
         self._osint_allowed = osint_allowed
         self._audit_path = audit_path
+        self._allow_intrusive = allow_intrusive
         self._prohibited_methods = set()
         self._required_headers = {}
         if scope and hasattr(scope, "policy"):
@@ -105,7 +108,10 @@ class EgressPolicy:
         if self._scope:
             reason = self._scope.reject_reason(url)
             if reason is None:
-                # In-scope: allowed
+                # In-scope: enforce non-intrusive mode (block state-changing methods unless intrusive allowed)
+                if (not self._allow_intrusive
+                        and method in self._STATE_CHANGING_METHODS):
+                    return self._deny(f"state-changing method {method} blocked (non-intrusive mode)")
                 return self._allow(f"in-scope target ({host})")
             # Not in target scope — check OSINT allowlist
             if self._osint_allowed and self._is_osint(method, host):
@@ -277,7 +283,7 @@ def _selftest():
     # --- Prohibited methods ---
     sc2 = Scope(["*.target.io"], name="method-test")
     sc2.policy = {"prohibited_actions": ["DELETE", "PATCH"], "required_headers": {}}
-    pol2 = EgressPolicy(scope=sc2)
+    pol2 = EgressPolicy(scope=sc2, allow_intrusive=True)
     d = pol2.check_egress("GET", "https://api.target.io/users")
     assert d.allowed, f"GET should be allowed: {d}"
     d = pol2.check_egress("DELETE", "https://api.target.io/users/1")
@@ -339,6 +345,32 @@ def _selftest():
     assert d.allowed, f"correct port should be allowed: {d}"
     d = pol_port.check_egress("GET", "https://api.example.com:443/")
     assert not d.allowed, f"wrong port should be denied: {d}"
+
+    # --- Non-intrusive mode: state-changing methods blocked on target scope ---
+    sc_ni = Scope(["*.example.com"], name="non-intrusive-test")
+    pol_ni = EgressPolicy(scope=sc_ni, allow_intrusive=False)
+    d = pol_ni.check_egress("GET", "https://api.example.com/users")
+    assert d.allowed, f"GET should be allowed in non-intrusive: {d}"
+    d = pol_ni.check_egress("HEAD", "https://api.example.com/users")
+    assert d.allowed, f"HEAD should be allowed in non-intrusive: {d}"
+    d = pol_ni.check_egress("OPTIONS", "https://api.example.com/users")
+    assert d.allowed, f"OPTIONS should be allowed in non-intrusive: {d}"
+    for m in ("POST", "PUT", "DELETE", "PATCH"):
+        d = pol_ni.check_egress(m, "https://api.example.com/users")
+        assert not d.allowed, f"{m} should be blocked in non-intrusive: {d}"
+        assert "non-intrusive" in d.reason, f"reason should mention non-intrusive: {d.reason}"
+    # Localhost exempt from non-intrusive
+    d = pol_ni.check_egress("POST", "http://127.0.0.1:8080/test")
+    assert d.allowed, f"localhost POST allowed even in non-intrusive: {d}"
+    # OSINT POST still blocked (it's OOS + non-GET)
+    d = pol_ni.check_egress("POST", "https://crt.sh/submit")
+    assert not d.allowed, f"OSINT POST should still be denied: {d}"
+
+    # --- Intrusive mode: state-changing methods allowed ---
+    pol_intr = EgressPolicy(scope=sc_ni, allow_intrusive=True)
+    for m in ("POST", "PUT", "DELETE", "PATCH"):
+        d = pol_intr.check_egress(m, "https://api.example.com/users")
+        assert d.allowed, f"{m} should be allowed in intrusive mode: {d}"
 
     print("egress.py self-test: PASS")
     return 0

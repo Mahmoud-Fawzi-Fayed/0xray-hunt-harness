@@ -84,7 +84,7 @@ def _get_session():
     return _RQ_SESSION
 
 
-def set_scope_guard(scope):
+def set_scope_guard(scope, allow_intrusive=False):
     """Set the module-level scope guard. Called by engine at init."""
     global _SCOPE_GUARD, _EGRESS_POLICY
     _SCOPE_GUARD = scope
@@ -92,7 +92,7 @@ def set_scope_guard(scope):
     if scope:
         try:
             import egress as _EG
-            _EGRESS_POLICY = _EG.EgressPolicy(scope=scope)
+            _EGRESS_POLICY = _EG.EgressPolicy(scope=scope, allow_intrusive=allow_intrusive)
             _EG.set_egress_policy(_EGRESS_POLICY)
         except Exception:
             _EGRESS_POLICY = None

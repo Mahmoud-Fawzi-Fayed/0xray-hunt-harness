@@ -10,6 +10,8 @@ Storage: <engagement_dir>/scheduler/
   claims.json   — active work claims (one per case)
   history.jsonl — append-only log of all claim state transitions
 """
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -35,7 +37,21 @@ CLAIM_EXPIRED = "expired"
 CLAIM_CANCELLED = "cancelled"
 CLAIM_AWAITING_APPROVAL = "awaiting_approval"
 
-_LOCK = threading.Lock()
+_THREAD_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _file_lock(engagement_dir):
+    """Cross-process + cross-thread lock using fcntl.flock on a dedicated lockfile."""
+    lock_path = os.path.join(_scheduler_dir(engagement_dir), ".lock")
+    with _THREAD_LOCK:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 def _scheduler_dir(engagement_dir):
@@ -153,7 +169,7 @@ class Scheduler:
                    method=None, url=None, owner_identity=None,
                    accessor_identity=None, idempotent=True):
         """Attempt to claim a work item. Returns WorkClaim or None if already claimed."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             existing = claims.get(case_id)
             if existing:
@@ -195,7 +211,7 @@ class Scheduler:
 
     def heartbeat(self, case_id, worker_id, checkpoint=None):
         """Renew the lease on a work claim. Returns True if still valid."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             c = claims.get(case_id)
             if not c or c.get("worker_id") != worker_id:
@@ -211,7 +227,7 @@ class Scheduler:
 
     def complete(self, case_id, worker_id):
         """Mark a work claim as completed."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             c = claims.get(case_id)
             if not c or c.get("worker_id") != worker_id:
@@ -226,7 +242,7 @@ class Scheduler:
     def fail(self, case_id, worker_id, error=None):
         """Mark a work claim as failed (eligible for retry if idempotent and under budget).
         Increments the attempt counter so retry budget is correctly tracked."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             c = claims.get(case_id)
             if not c or c.get("worker_id") != worker_id:
@@ -243,7 +259,7 @@ class Scheduler:
 
     def cancel(self, case_id, worker_id):
         """Cancel a work claim (no retry)."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             c = claims.get(case_id)
             if not c or c.get("worker_id") != worker_id:
@@ -257,7 +273,7 @@ class Scheduler:
 
     def set_awaiting_approval(self, case_id, worker_id):
         """Mark that human approval is needed (pauses safely, doesn't count as failure)."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             c = claims.get(case_id)
             if not c or c.get("worker_id") != worker_id:
@@ -273,7 +289,7 @@ class Scheduler:
         """Find and mark expired leases. Returns list of expired case_ids."""
         now = time.time()
         expired = []
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             for case_id, c in claims.items():
                 if c["status"] == CLAIM_ACTIVE and now >= c.get("lease_expires", 0):
@@ -289,7 +305,7 @@ class Scheduler:
 
     def retryable(self):
         """Return case_ids eligible for retry (failed + under budget + idempotent)."""
-        with _LOCK:
+        with _file_lock(self.engagement_dir):
             claims = _load_claims(self.engagement_dir)
             result = []
             for case_id, c in claims.items():

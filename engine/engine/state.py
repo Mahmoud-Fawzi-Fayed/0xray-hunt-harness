@@ -417,10 +417,24 @@ class Engagement:
         rec[self._finding_key(finding)] = str(reason or "")[:240]
         self.save()
 
-    def confirm(self, finding, verdict):
-        finding = {**finding, "verdict": verdict, "confirmed_ts": _now()}
+    def confirm(self, finding, verdict, reproduction_status="unreproduced"):
+        """Add to confirmed collection with explicit reproduction_status.
+        reproduction_status: 'reproduced' (independently verified), 'unreproduced' (LLM-validated only),
+        'plausible' (transport evidence present but no independent replay)."""
+        finding = {**finding, "verdict": verdict, "confirmed_ts": _now(),
+                   "reproduction_status": reproduction_status}
         self.state["confirmed"].append(finding)
         self.save()
+
+    def independently_reproduced(self):
+        """Return only findings that were independently reproduced (not just LLM-validated)."""
+        return [f for f in self.state.get("confirmed", [])
+                if f.get("reproduction_status") == "reproduced"]
+
+    def unreproduced_findings(self):
+        """Return confirmed findings that were NOT independently reproduced — need manual verification."""
+        return [f for f in self.state.get("confirmed", [])
+                if f.get("reproduction_status") != "reproduced"]
 
     def evidence_path(self, fname):
         return os.path.join(self.dir, "evidence", fname)
