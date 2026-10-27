@@ -111,6 +111,7 @@ def list_findings(base=DEFAULT_BASE):
                 "key": key, "program": program, "url": url, "vuln_class": cls,
                 "severity": (f.get("severity") or "").lower(),
                 "title": (f.get("evidence") or f.get("title") or "")[:160],
+                "trust_dimensions": list(f.get("trust_dimensions") or []),
                 "page": links.get("|".join((url, cls))) or "",
                 "confirmed_ts": f.get("confirmed_ts") or f.get("ts") or "",
                 "status": m.get("status", "pending"), "note": m.get("note", ""),
@@ -135,11 +136,13 @@ def set_mark(base, key, status, note=""):
     marks[key] = rec
     _save_marks(base, marks)
     if status != "pending":
-        # 1) class-level learning (yieldrank reprioritizes toward classes that get accepted)
         try:
             import learn
+            matched = next((finding for finding in list_findings(base) if finding["key"] == key), {})
+            dimensions = matched.get("trust_dimensions") or []
             learn.record_outcome(program, vuln_class, _RESULT.get(status, "invalid"),
-                                 note=f"operator-mark:{status} {note}".strip(), base=_base(base))
+                                 note=f"operator-mark:{status} {note}".strip(), base=_base(base),
+                                 trust_dimension=dimensions[0] if dimensions else "")
         except Exception:  # noqa: BLE001
             pass
         # 2) a per-finding LESSON the next hunt reads (avoid invalids, repeat valids)

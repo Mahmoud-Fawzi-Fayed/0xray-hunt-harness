@@ -8,7 +8,7 @@ description: Analysis-driven endpoint pentest methodology — SEE (map endpoint 
 Reference methodology for deep endpoint hunting. Read this when you need structured guidance — it is not mandatory for every endpoint.
 
 ## Step 1 — SEE
-Fetch the endpoint (and linked JS/source maps) as the authenticated session. Write what the product is doing:
+Fetch the endpoint (and linked JS/source maps) as the authenticated session. Retain the case-linked baseline observation IDs. Write what the product is doing:
 - Every input field, parameter, header the endpoint accepts
 - Every object id, user id, role identifier in the response
 - Every other host, API, or service the response references
@@ -18,6 +18,7 @@ Fetch the endpoint (and linked JS/source maps) as the authenticated session. Wri
 From those bytes, name ONE trust boundary and ONE test that would be false if the developer had been careful.
 - Do NOT start from SQLi/XSS/IDOR because those words exist in a list
 - Start from what the RESPONSE told you — what assumption did the developer make?
+- Only after naming the hypothesis, select optional references with `skill_map.for_hypothesis(...)` and the baseline observation IDs
 - If HUNT MEMORY shows a previous look, do something different this time
 
 ## Step 3 — RUN
@@ -30,9 +31,13 @@ Execute that test with curl/netget. Then a SECOND different test if the first is
 ## Step 4 — PROVE
 Claim a vulnerability ONLY with demonstrated, exploitable impact:
 - Not mere reflection, an error message, or a permissive header
-- IDOR/BOLA: A-vs-B body-diff showing B received A's unique marker
+- IDOR/BOLA: A-vs-B body-diff showing B received A's unique marker; similar bodies alone are only a lead
+- Preserve the same case ID and observation IDs from plan through replay and report
 - Use in-scope, read-only actions only
 - HOLD_RTFS and HOLD_INFORMATIVE findings are not real bounty findings
+
+## Step 5 — ACCOUNT
+Record every generated hypothesis and its tested/blocked/inconclusive outcome in the hypothesis ledger. A dynamic endpoint case is not proof that every applicable dimension was tested. Track source attempts, validated operations, workflows, independent dimensions, and residuals; never infer completeness from endpoint count or target categories.
 
 ## Anti-patterns to avoid
 - Walking a vulnerability catalog instead of reasoning from the response

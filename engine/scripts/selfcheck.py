@@ -102,11 +102,11 @@ def _yr_junk():
     b = tempfile.mkdtemp()
     os.makedirs(os.path.join(b, "hunt-memory"))
     open(os.path.join(b, "hunt-memory", "journal.jsonl"), "w", encoding="utf-8").write(
-        'not json\n{"vuln_class":"idor","result":"confirmed"}\n{}\n{"result":"duplicate"}\n')
+        'not json\n{"trust_dimension":"ownership_boundary","result":"confirmed"}\n{}\n{"result":"duplicate"}\n')
     m = yieldrank.Model.load(b)
     assert m.bonus(None) == 0.0
-    m.bonus("x"); m.score("idor", ["next.js"]); r = m.rank(["graphql"])
-    assert any(row.get("class") == "idor" for row in r)
+    m.bonus("x"); m.score("ownership_boundary", ["next.js"]); r = m.rank(["graphql"])
+    assert any(row.get("class") == "ownership_boundary" for row in r)
 case("yieldrank corrupt journal + bonus(None) + rank", _yr_junk)
 
 
@@ -179,37 +179,28 @@ case("learn autolearn offline + corrupt journal + hostile input", _learn_junk)
 
 # --------------------------------------------------------------- model-pool enforcement (regression guard)
 def _pool_guard():
-    saved_oc = os.environ.get("OPENCODE_HUNT_MODELS")
-    saved = os.environ.get("CURSOR_HUNT_MODELS")
-    os.environ["OPENCODE_HUNT_MODELS"] = "opencode/a,openai/b,opencode/c"
-    os.environ.pop("CURSOR_HUNT_MODELS", None)
-    os.environ["HUNT_MOCK_AGENT"] = "1"           # observe model selection without calling any agent CLI
+    saved = os.environ.get("HUNT_MODELS")
+    os.environ["HUNT_MODELS"] = "opaque/a,other/b,third/c"
+    os.environ["HUNT_MOCK_AGENT"] = "1"
     try:
-        # an off-pool pinned model (e.g. a stale default) must be forced back into the approved pool
         for _ in range(6):
-            assert agent.run_agent("x", model="claude-sonnet-4-6")["model"] in ("opencode/a", "openai/b", "opencode/c")
-        # model=None rotates the pool
-        assert agent.run_agent("x", model=None)["model"] in ("opencode/a", "openai/b", "opencode/c")
-        # opencode routing: opencode/* + openai/* -> opencode run, legacy -> cursor-agent
-        assert agent._is_opencode_model("opencode/muse-spark-1.3-contributor-free")
-        assert agent._is_opencode_model("openai/gpt-6-astra-fast")
-        assert not agent._is_opencode_model("kimi-k3-max")
+            assert agent.run_agent("x", model="unlisted-label")["model"] in ("opaque/a", "other/b", "third/c")
+        assert agent.run_agent("x", model=None)["model"] in ("opaque/a", "other/b", "third/c")
+        assert agent._runtime("anything") == agent._runtime("completely-different")
     finally:
         os.environ.pop("HUNT_MOCK_AGENT", None)
-        if saved_oc is not None:
-            os.environ["OPENCODE_HUNT_MODELS"] = saved_oc
-        else:
-            os.environ.pop("OPENCODE_HUNT_MODELS", None)
         if saved is not None:
-            os.environ["CURSOR_HUNT_MODELS"] = saved
+            os.environ["HUNT_MODELS"] = saved
         else:
-            os.environ.pop("CURSOR_HUNT_MODELS", None)
+            os.environ.pop("HUNT_MODELS", None)
 case("agent enforces approved model pool (no off-pool leak)", _pool_guard)
 
 
 # --------------------------------------------------------------- session pool bounded + slot reuse
 def _session_pool():
     _saved_base = os.environ.get("BUGHUNTER_BASE")
+    _saved_command = os.environ.get("HUNT_AGENT_CMD")
+    os.environ["HUNT_AGENT_CMD"] = "generic-test-command {resume}"
     os.environ["BUGHUNTER_BASE"] = tempfile.mkdtemp()
     agent._POOL.clear()
     try:
@@ -231,14 +222,18 @@ def _session_pool():
         assert os.path.isfile(agent._pool_file("p")), "per-target session state file written"
         agent._POOL.clear()
         assert agent._acquire("p")["id"] == "sess-abc", "pool must persist across restarts"
-        # dead persisted id -> skipped on reseed (resuming a dead id silently loses all context)
+        # persisted state without a matching runtime fingerprint must not be resumed
         import json as _json
         _json.dump({"ids": ["sess-dead"]}, open(agent._pool_file("p"), "w"))
         agent._POOL.clear()
-        assert agent._acquire("p")["id"] is None, "dead pooled id must not be reseeded"
+        assert agent._acquire("p")["id"] is None, "mismatched runtime state must not be reseeded"
         os.environ.pop("HUNT_CHATS_DIR", None); os.environ.pop("HUNT_PROJECTS_DIR", None)
     finally:
         agent._POOL.clear()
+        if _saved_command is not None:
+            os.environ["HUNT_AGENT_CMD"] = _saved_command
+        else:
+            os.environ.pop("HUNT_AGENT_CMD", None)
         if _saved_base is not None:
             os.environ["BUGHUNTER_BASE"] = _saved_base
         else:
@@ -264,6 +259,8 @@ def _authsession_junk():
     import tempfile
     b = tempfile.mkdtemp()
     _sb = os.environ.get("BUGHUNTER_BASE")
+    _sc = os.environ.get("HUNT_AGENT_CMD")
+    os.environ["HUNT_AGENT_CMD"] = "generic-test-command {resume}"
     os.environ["BUGHUNTER_BASE"] = b
     try:
         agent._POOL.clear()
@@ -273,6 +270,10 @@ def _authsession_junk():
         assert os.path.isfile(agent._pool_file("tgtA")) and os.path.isfile(agent._pool_file("tgtB"))
     finally:
         agent._POOL.clear()
+        if _sc is not None:
+            os.environ["HUNT_AGENT_CMD"] = _sc
+        else:
+            os.environ.pop("HUNT_AGENT_CMD", None)
         if _sb is not None:
             os.environ["BUGHUNTER_BASE"] = _sb
         else:

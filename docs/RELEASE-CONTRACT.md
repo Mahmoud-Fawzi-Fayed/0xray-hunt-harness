@@ -51,8 +51,8 @@ NOT_STARTED/RUNNING/PASS/BLOCKED/FAILED/PARTIAL/CANCELLED. `phase_can_proceed()`
 ## P1 — Quality & Integration
 
 ### §7 Discovery reliability
-Honest coverage formula (90% depth + 10% breadth). Source provenance on every endpoint.
-**Gate**: coverage matches transport-observed reality; provenance field non-empty.
+Source/operation validation and independent trust-dimensional coverage, with explicit residuals. Source provenance on every operation.
+**Gate**: coverage matches transport-observed reality; no category or schema is treated as universal; provenance field non-empty.
 **Status**: DONE
 
 ### §8 Runtime capability & permissions
@@ -72,7 +72,7 @@ Dedup confidence thresholds enforced. Corpus-aware dedup scoring.
 
 ### §11 CI & golden benchmark
 `test_policy_egress.py` and `test_evidence_pipeline.py` in CI. Push/PR triggers.
-**Gate**: `pytest engine/tests/` green on push.
+**Gate**: selfcheck, local/comprehensive E2E, policy-egress, evidence, remediation, dynamic, and matrix script gates pass in CI.
 **Status**: DONE
 
 ## P2 — Usability & Observability
@@ -121,7 +121,7 @@ Local E2E run against `vuln_app.py` exercising:
 2. **Redirect safety** — `allow_redirects=False` hardcoded in both transports. `follow_redirects()` re-authorizes each hop.
 3. **Evidence chain** — `evidence.py` separates transport-level observations from agent analysis. Coverage derived from real HTTP responses, not agent claims.
 4. **Phase state machine** — `state.py` tracks explicit phase statuses with atomic checkpoint writes and dependency enforcement.
-5. **Coverage formula** — 90% depth + 10% breadth bonus. Added `coverage_unknown` flag for sparse results.
+5. **Coverage dimensions** — sources, validated operations, workflows, and trust dimensions are independent. Sparse results and unresolved residuals remain visible; no fixed breadth percentage implies completeness.
 6. **Discovery provenance** — Every endpoint carries `confidence` (high/medium/low) and `provenance` (documented/observed/inferred/guessed/confirmed).
 
 ## Deliverables (§16)
@@ -134,14 +134,14 @@ Local E2E run against `vuln_app.py` exercising:
 | `docs/EVIDENCE-SCHEMA.md` | Evidence pipeline schema |
 | `docs/OPERATOR-RUNBOOK.md` | Operational guide |
 | `artifacts/release-validation/release-gate.json` | Machine-readable gate results |
+| `artifacts/release-validation/dynamic-matrix-results.json` | Live-target and artifact adapter matrix |
+| `artifacts/release-validation/model-family-results.json` | Opt-in model-family behavior and independent reproduction |
+| `artifacts/release-validation/dynamic-harness-assessment.json` | Evidence-weighted rating and residual limits |
 | `.github/workflows/ci.yml` | CI (push + PR triggers) |
 
 ## Test Results
 
-- Module selftests: 44/44 PASS (5 modules without selftest subcommand excluded)
-- E2E comprehensive: 27/27 PASS
-- Policy egress tests: PASS
-- Evidence pipeline tests: PASS
+Release status is generated from the current verification run; historical pass counts are not acceptance evidence. See `artifacts/release-validation/release-gate.json` for the current result and any unverified live-model/Burp checks.
 
 ## Final Acceptance Rule (§17)
 

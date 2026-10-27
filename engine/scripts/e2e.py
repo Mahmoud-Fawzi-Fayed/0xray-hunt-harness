@@ -5,8 +5,8 @@ reports PASS / WARN / FAIL per stage, so "is anything broken?" has a one-command
 
 Stages (critical ones fail the run; others warn):
   env          harness .env present + required keys set
-  runtime      opencode CLI and/or cursor-agent CLI installed and reachable
-  models       OPENCODE_HUNT_MODELS (preferred) or CURSOR_HUNT_MODELS configured  (+ per-model live ping with --ping)
+  runtime      active HUNT_AGENT_CMD contract (no implicit CLI fallback)
+  models       optional HUNT_MODELS labels or host default (+ live ping with --ping)
   bridge       /health up + token auth enforced (401 without, 200 with)
   n8n          hunt-n8n container up + HTTP reachable (the novelty monitor runs here)
   web          nginx + panel reachable over TLS (401 = up & auth-gated)
@@ -90,55 +90,37 @@ def s_env():
     missing = [k for k in need if not _env(k)]
     if missing:
         return "FAIL", f"missing keys: {missing}"
-    pool = _env("OPENCODE_HUNT_MODELS", "") or _env("CURSOR_HUNT_MODELS", "") or _env("HUNT_MODELS", "")
-    if not pool.strip():
-        return "FAIL", "missing keys: ['OPENCODE_HUNT_MODELS|CURSOR_HUNT_MODELS'] (model pool empty)"
-    return "PASS", f"{len(need)+1} required keys set"
+    return "PASS", f"{len(need)} required keys set"
 
 
 def s_runtime():
-    oc, cu = None, None
-    try:
-        p = subprocess.run([_env("OPENCODE_BIN", os.path.expanduser("~/.opencode/bin/opencode")), "--version"],
-                           capture_output=True, text=True, timeout=20)
-        if p.returncode == 0:
-            oc = (p.stdout.strip() or p.stderr.strip())[:80]
-    except FileNotFoundError:
-        pass
-    try:
-        p = subprocess.run(["cursor-agent", "--version"], capture_output=True, text=True, timeout=20)
-        if p.returncode == 0:
-            cu = (p.stdout.strip() or p.stderr.strip())[:80]
-    except FileNotFoundError:
-        pass
-    if oc and cu:
-        return "PASS", f"opencode {oc} + cursor-agent {cu}"
-    if oc:
-        return "PASS", f"opencode {oc} (cursor-agent absent — opencode-only pool)"
-    if cu:
-        return "PASS", f"cursor-agent {cu} (opencode absent — cursor-only pool)"
-    return "FAIL", "neither opencode nor cursor-agent on PATH"
+    import agent
+    info = agent.runtime_info()
+    if not info["configured"]:
+        return "SKIP", "HUNT_AGENT_CMD unset — deterministic stages available; AI stages fail closed"
+    return "PASS", (f"active runtime {info['runtime_id']} ({info['executable']}); "
+                    f"prompt={info['prompt_transport']}, resume={info['supports_resume']}")
 
 
 def s_cursor():
-    # legacy stage name kept for CI compat — now checks either runtime
     return s_runtime()
 
 
 def s_models(ping):
-    pool = [m.strip() for m in (_env("OPENCODE_HUNT_MODELS", "") or _env("CURSOR_HUNT_MODELS", "") or _env("HUNT_MODELS", "")).split(",") if m.strip()]
-    if not pool:
-        return "FAIL", "OPENCODE_HUNT_MODELS|CURSOR_HUNT_MODELS empty"
-    if not ping:
-        return "PASS", f"{len(pool)} models: {', '.join(pool)} (use --ping to live-test each)"
     import agent
+    if not agent.runtime_info()["configured"]:
+        return "SKIP", "no active AI runtime configured"
+    pool = agent._pool_models() or [None]
+    labels = [model or "host-default" for model in pool]
+    if not ping:
+        return "PASS", f"{len(pool)} configured label(s): {', '.join(labels)}"
     os.environ.pop("HUNT_MOCK_AGENT", None)
     ok, bad = [], []
-    for m in pool:
-        r = agent.run_agent("Reply with exactly: PONG. Then a json block {\"ok\":true}.",
-                            model=m, timeout=120)
-        (ok if r.get("error") is None and r.get("result") else bad).append(
-            m if r.get("error") is None else f"{m}({r.get('error')})")
+    for model, label in zip(pool, labels):
+        result = agent.run_agent("Reply with exactly: PONG. Then a json block {\"ok\":true}.",
+                                 model=model, timeout=120)
+        (ok if result.get("error") is None and result.get("result") else bad).append(
+            label if result.get("error") is None else f"{label}({result.get('error')})")
     detail = f"ok: {', '.join(ok) or 'none'}" + (f" | FAILED: {', '.join(bad)}" if bad else "")
     return ("PASS" if not bad else "WARN"), detail
 
@@ -200,12 +182,24 @@ def s_targets():
 
 
 def s_skills():
+    import evidence as EV
     import skill_map as SM
-    paths = SM.skill_paths("idor", tech=["next.js"])
-    real = [p for p in paths if os.path.isfile(p)]
-    if not real:
-        return "FAIL", "skill_map resolved 0 readable SKILL.md files"
-    return "PASS", f"{len(real)} SKILL.md resolved for idor+next.js (e.g. {os.path.basename(os.path.dirname(real[0]))})"
+    base = tempfile.mkdtemp()
+    case_id = "e2e-hypothesis"
+    early = SM.for_hypothesis("another actor may read an owned object")
+    if any(os.path.basename(os.path.dirname(path)) != "hunt-methodology" for path in early):
+        return "FAIL", "vulnerability skill resolved before live evidence"
+    obs = EV.record_observation(base, "GET", "http://localhost/resource", resp_status=200, case_id=case_id)
+    paths = SM.for_hypothesis("another actor may read an owned object", evidence_dir=base,
+                              case_id=case_id, observation_ids=[obs])
+    real = [path for path in paths if os.path.isfile(path)]
+    if len(real) < 2:
+        return "FAIL", "case-linked evidence did not unlock a hypothesis-matched reference"
+    forged = SM.for_hypothesis("another actor may read an owned object", evidence_dir=base,
+                               case_id=case_id, observation_ids=["forged"])
+    if any(os.path.basename(os.path.dirname(path)) != "hunt-methodology" for path in forged):
+        return "FAIL", "forged observation ID unlocked vulnerability skills"
+    return "PASS", "methodology before evidence; matched references after valid observations; forged IDs rejected"
 
 
 def s_pipeline():
@@ -220,6 +214,8 @@ def s_pipeline():
     scope = os.path.join(ENGINE, "engagement.example.json")
     obs = {"subdomains": ["localhost"], "hosts": [{"url": "http://localhost:3002", "status": 200}],
            "js": [], "endpoints": ["http://localhost:3002/api/account"], "params": []}
+    D.Corpus("demo-local", base=base).ingest([{"source": "h1-public", "vuln_class": "ssrf",
+             "url": "http://localhost:3002/unrelated", "title": "Unrelated SSRF", "link": "https://h1/0"}])
     import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):                      # keep the mock run's log out of the report
@@ -251,12 +247,14 @@ def _mock_env():
 def s_learning():
     """Prove the learning loop is CLOSED: a hunt's outcomes are journaled AND yieldrank learns from them,
     and an unknown stack auto-drafts a skill."""
-    import orchestrator as O, yieldrank as YR, learn as L
+    import orchestrator as O, yieldrank as YR, learn as L, dedup as D
     import io, contextlib, json as _j
     base = _mock_env()
     scope = os.path.join(ENGINE, "engagement.example.json")
     obs = {"subdomains": ["localhost"], "hosts": [{"url": "http://localhost:3002", "status": 200}],
            "js": [], "endpoints": ["http://localhost:3002/api/account"], "params": []}
+    D.Corpus("demo-local", base=base).ingest([{"source": "h1-public", "vuln_class": "ssrf",
+             "url": "http://localhost:3002/unrelated", "title": "Unrelated SSRF", "link": "https://h1/0"}])
     with contextlib.redirect_stdout(io.StringIO()):
         O.Orchestrator(scope, base=base, mock=True, do_hunt=True).run(obs=obs)
     jl = os.path.join(base, "hunt-memory", "journal.jsonl")
@@ -270,10 +268,11 @@ def s_learning():
     finally:
         L.LEARNED_DIR = _saved_ld                              # don't leak the temp dir into later stages
     load_env()
-    ok = ("confirmed" in results and "reported" in results
-          and learned.get("idor", {}).get("confirmed", 0) >= 1 and drafted)
+    dimensional_confirmed = sum(stats.get("confirmed", 0) for stats in learned.values())
+    ok = ("confirmed" in results and "reported" in results and dimensional_confirmed >= 1 and drafted)
     return ("PASS" if ok else "FAIL",
-            f"outcomes={sorted(results)}; yieldrank idor.confirmed={learned.get('idor',{}).get('confirmed',0)}; auto-skill={bool(drafted)}")
+            f"outcomes={sorted(results)}; dimensional_confirmed={dimensional_confirmed}; "
+            f"dimensions={sorted(learned)}; auto-skill={bool(drafted)}")
 
 
 def s_resilience():

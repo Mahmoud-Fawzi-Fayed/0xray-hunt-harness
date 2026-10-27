@@ -67,7 +67,8 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                 if key in seen:
                     return
                 seen.add(key)
-                reqs.append({"method": r.method, "url": r.url, "source": r.resource_type})
+                reqs.append({"method": r.method, "url": r.url,
+                             "type": r.resource_type, "source": r.resource_type})
             except Exception:  # noqa: BLE001
                 pass
         pg.on("request", on_req)
@@ -143,6 +144,26 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             if pages > 0:
                 import time as _t
                 host0 = urlparse(url).hostname or ""
+                forbidden = ("delete", "remove", "logout", "sign out", "pay", "purchase", "transfer",
+                             "send", "submit", "save", "create", "invite", "disable", "enable", "revoke",
+                             "cancel", "delete", "confirm", "checkout", "update", "change")
+                try:
+                    controls = pg.locator("button:not([type=submit]), [role=button]")
+                    for idx in range(min(controls.count(), 8)):
+                        if idx >= 5:
+                            break
+                        control = controls.nth(idx)
+                        label = (control.inner_text(timeout=500) or "").strip().lower()
+                        if not label or any(word in label for word in forbidden) or not control.is_visible():
+                            continue
+                        try:
+                            control.click(timeout=1000)
+                            pg.wait_for_timeout(600)
+                            _extract_page(pg)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
 
                 def _in_scope(hn):
                     if not hn:

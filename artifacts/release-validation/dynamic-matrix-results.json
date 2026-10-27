@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "generated": "2026-10-27T19:10:45Z",
+  "summary": {
+    "total": 17,
+    "passed": 17,
+    "failed": 0,
+    "blocked": 0
+  },
+  "oos_requests": [],
+  "unsupported": [
+    "desktop-native-runtime",
+    "smart-contract-runtime",
+    "kubernetes-live",
+    "hardware-firmware"
+  ],
+  "results": [
+    {
+      "id": "live-http",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 0.06,
+      "profiles": 1,
+      "cases": 1,
+      "protocols": [
+        "http"
+      ],
+      "trust_dimensions": [
+        "input_variation"
+      ],
+      "dimension_results_accepted": 1
+    },
+    {
+      "id": "live-openapi",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 0.1,
+      "profiles": 9,
+      "cases": 9,
+      "protocols": [
+        "http"
+      ],
+      "trust_dimensions": [
+        "content_and_parser_variation",
+        "input_variation",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1
+    },
+    {
+      "id": "live-graphql",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 0.1,
+      "profiles": 6,
+      "cases": 6,
+      "protocols": [
+        "http"
+      ],
+      "trust_dimensions": [
+        "input_variation"
+      ],
+      "dimension_results_accepted": 1
+    },
+    {
+      "id": "live-browser-spa",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 5.22,
+      "profiles": 4,
+      "cases": 4,
+      "protocols": [
+        "http"
+      ],
+      "trust_dimensions": [],
+      "dimension_results_accepted": 0
+    },
+    {
+      "id": "live-schema-less",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 35.09,
+      "profiles": 15,
+      "cases": 14,
+      "protocols": [
+        "event-stream",
+        "http",
+        "json-rpc"
+      ],
+      "trust_dimensions": [
+        "actor_variation",
+        "content_and_parser_variation",
+        "input_variation",
+        "ownership_boundary",
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "discovery_rounds": 4,
+      "convergence": "stable",
+      "observed_operations": 15
+    },
+    {
+      "id": "live-json-rpc",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 1,
+      "cases": 1,
+      "protocols": [
+        "json-rpc"
+      ],
+      "trust_dimensions": [
+        "content_and_parser_variation",
+        "input_variation",
+        "ownership_boundary",
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "discovery_rounds": 4,
+      "convergence": "stable",
+      "observed_operations": 15
+    },
+    {
+      "id": "live-event-stream",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 2,
+      "cases": 2,
+      "protocols": [
+        "event-stream"
+      ],
+      "trust_dimensions": [
+        "protocol_behavior"
+      ],
+      "dimension_results_accepted": 1,
+      "discovery_rounds": 4,
+      "convergence": "stable",
+      "observed_operations": 15
+    },
+    {
+      "id": "live-workflow",
+      "kind": "live-target",
+      "status": "PASS",
+      "elapsed_s": 0.2,
+      "profiles": 3,
+      "cases": 3,
+      "protocols": [
+        "http"
+      ],
+      "trust_dimensions": [
+        "content_and_parser_variation",
+        "input_variation",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "real_state_transition": true,
+      "discovery_rounds": 4,
+      "convergence": "stable",
+      "observed_operations": 15
+    },
+    {
+      "id": "artifact-cloud-json",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 1,
+      "cases": 1,
+      "protocols": [
+        "cloud-api"
+      ],
+      "trust_dimensions": [
+        "data_confidentiality",
+        "input_variation",
+        "ownership_boundary",
+        "protocol_behavior",
+        "tenant_boundary"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-llm-json",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 2,
+      "cases": 2,
+      "protocols": [
+        "llm-memory",
+        "llm-tool"
+      ],
+      "trust_dimensions": [
+        "actor_variation",
+        "data_confidentiality",
+        "external_effect",
+        "input_variation",
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-mcp-descriptor",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 1,
+      "cases": 1,
+      "protocols": [
+        "llm-tool"
+      ],
+      "trust_dimensions": [
+        "input_variation",
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-terraform",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 1,
+      "cases": 1,
+      "protocols": [
+        "infrastructure"
+      ],
+      "trust_dimensions": [
+        "input_variation",
+        "protocol_behavior"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-kubernetes",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.01,
+      "profiles": 1,
+      "cases": 1,
+      "protocols": [
+        "infrastructure"
+      ],
+      "trust_dimensions": [
+        "input_variation",
+        "protocol_behavior"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-desktop-app",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 2,
+      "cases": 2,
+      "protocols": [
+        "desktop-declaration",
+        "desktop-url-scheme"
+      ],
+      "trust_dimensions": [
+        "protocol_behavior"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-contract-source",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 2,
+      "cases": 2,
+      "protocols": [
+        "contract-source"
+      ],
+      "trust_dimensions": [
+        "input_variation",
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-android-tree",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 4,
+      "cases": 4,
+      "protocols": [
+        "android",
+        "android-ipc"
+      ],
+      "trust_dimensions": [
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    },
+    {
+      "id": "artifact-ios-ipa-binary",
+      "kind": "artifact-only",
+      "status": "PASS",
+      "elapsed_s": 0.0,
+      "profiles": 3,
+      "cases": 3,
+      "protocols": [
+        "ios",
+        "ios-entitlements",
+        "ios-url-scheme"
+      ],
+      "trust_dimensions": [
+        "protocol_behavior",
+        "state_and_sequence"
+      ],
+      "dimension_results_accepted": 1,
+      "adapter_status": "completed",
+      "residuals": []
+    }
+  ]
+}

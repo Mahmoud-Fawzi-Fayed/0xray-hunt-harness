@@ -86,19 +86,31 @@ def _log_path(root):
     return os.path.join(root, ".fixchat-log.json")
 
 
+_LOG_LOCK = threading.Lock()
+
+
+def _update_log(root, update):
+    if not os.path.isdir(root):
+        return []
+    with _LOG_LOCK:
+        try:
+            log = json.load(open(_log_path(root)))
+        except Exception:  # noqa: BLE001
+            log = []
+        log = update(log) or log
+        try:
+            json.dump(log[-200:], open(_log_path(root), "w"))
+            os.chmod(_log_path(root), 0o600)
+        except OSError:
+            pass
+        return log
+
+
 def _append_log(root, role, text):
-    try:
-        if not os.path.isdir(root):
-            return                                   # chat was closed mid-run — don't resurrect it
-        log = json.load(open(_log_path(root)))
-    except Exception:  # noqa: BLE001
-        log = []
-    try:
+    def append(log):
         log.append({"role": role, "text": str(text or "")[:12000], "ts": time.time()})
-        json.dump(log[-200:], open(_log_path(root), "w"))
-        os.chmod(_log_path(root), 0o600)
-    except OSError:
-        pass
+        return log
+    return _update_log(root, append)
 
 
 def _load_meta(root):
@@ -203,19 +215,13 @@ _HB_PREFIX = "agent is still working (may edit files)"
 def _heartbeat_log(root, started):
     elapsed = int(time.time() - started)
     line = f"{_HB_PREFIX}… {elapsed}s. Do not resend — this chat is live."
-    try:
-        log = json.load(open(_log_path(root)))
-    except Exception:  # noqa: BLE001
-        log = []
-    if log and log[-1].get("role") == "system" and str(log[-1].get("text") or "").startswith(_HB_PREFIX):
-        log[-1] = {"role": "system", "text": line, "ts": time.time()}
-    else:
-        log.append({"role": "system", "text": line, "ts": time.time()})
-    try:
-        json.dump(log[-200:], open(_log_path(root), "w"))
-        os.chmod(_log_path(root), 0o600)
-    except OSError:
-        pass
+    def heartbeat(log):
+        if log and log[-1].get("role") == "system" and str(log[-1].get("text") or "").startswith(_HB_PREFIX):
+            log[-1] = {"role": "system", "text": line, "ts": time.time()}
+        else:
+            log.append({"role": "system", "text": line, "ts": time.time()})
+        return log
+    return _update_log(root, heartbeat)
 
 
 def _clear_busy(root):
@@ -265,11 +271,16 @@ def _rewrite_dead_logs(root, log):
             m["text"] = _EMPTY_USER
         changed = True
     if changed:
-        try:
-            json.dump(log[-200:], open(_log_path(root), "w"))
-            os.chmod(_log_path(root), 0o600)
-        except OSError:
-            pass
+        def rewrite(current):
+            by_ts = {m.get("ts"): i for i, m in enumerate(current)}
+            for old in log:
+                ts = old.get("ts")
+                if ts in by_ts:
+                    current[by_ts[ts]].update(old)
+                else:
+                    current.append(old)
+            return current
+        log = _update_log(root, rewrite)
     return log
 
 

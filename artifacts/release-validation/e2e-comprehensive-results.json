@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-26T17:58:45Z",
+  "timestamp": "2026-10-27T19:10:54Z",
   "pass": 27,
   "fail": 0,
   "blocked": 0,
@@ -87,7 +87,7 @@
       "id": "T5.1",
       "name": "Test plan generates cases",
       "status": "PASS",
-      "detail": "12 cases"
+      "detail": "10 cases"
     },
     {
       "id": "T5.2",
@@ -111,7 +111,7 @@
       "id": "T5.5",
       "name": "Auth A/B cases with both directions",
       "status": "PASS",
-      "detail": "6 auth cases, 2 unique pairs"
+      "detail": "4 auth cases, 2 unique pairs"
     },
     {
       "id": "T6.1",
@@ -147,7 +147,7 @@
       "id": "T8.1",
       "name": "Playwright browser capture",
       "status": "PASS",
-      "detail": "6 requests, 3 API endpoints"
+      "detail": "4 requests, 3 API endpoints"
     },
     {
       "id": "T8.2",

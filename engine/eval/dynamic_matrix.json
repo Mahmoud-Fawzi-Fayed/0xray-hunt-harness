@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "rows": [
+    {"id": "live-http", "kind": "live-target", "adapter": "http", "protocols": ["http"], "dimensions": ["input_variation"]},
+    {"id": "live-openapi", "kind": "live-target", "adapter": "openapi", "protocols": ["http"], "dimensions": ["input_variation"]},
+    {"id": "live-graphql", "kind": "live-target", "adapter": "graphql", "protocols": ["http"], "dimensions": ["input_variation"]},
+    {"id": "live-browser-spa", "kind": "live-target", "adapter": "browser", "protocols": ["http"], "dimensions": [], "optional": true},
+    {"id": "live-schema-less", "kind": "live-target", "adapter": "schema-less", "protocols": ["http", "json-rpc", "event-stream"], "dimensions": ["input_variation", "state_and_sequence"]},
+    {"id": "live-json-rpc", "kind": "live-target", "adapter": "json-rpc", "protocols": ["json-rpc"], "dimensions": ["input_variation", "protocol_behavior"]},
+    {"id": "live-event-stream", "kind": "live-target", "adapter": "event-stream", "protocols": ["event-stream"], "dimensions": ["protocol_behavior"]},
+    {"id": "live-workflow", "kind": "live-target", "adapter": "workflow", "protocols": ["http"], "dimensions": ["state_and_sequence"]},
+    {"id": "artifact-cloud-json", "kind": "artifact-only", "adapter": "cloud", "protocols": ["cloud-api"], "dimensions": ["input_variation", "tenant_boundary"]},
+    {"id": "artifact-llm-json", "kind": "artifact-only", "adapter": "llm", "protocols": ["llm-tool", "llm-memory"], "dimensions": ["external_effect", "protocol_behavior"]},
+    {"id": "artifact-mcp-descriptor", "kind": "artifact-only", "adapter": "mcp", "protocols": ["llm-tool"], "dimensions": ["protocol_behavior", "state_and_sequence"]},
+    {"id": "artifact-terraform", "kind": "artifact-only", "adapter": "terraform", "protocols": ["infrastructure"], "dimensions": ["input_variation", "protocol_behavior"]},
+    {"id": "artifact-kubernetes", "kind": "artifact-only", "adapter": "kubernetes", "protocols": ["infrastructure"], "dimensions": ["input_variation", "protocol_behavior"]},
+    {"id": "artifact-desktop-app", "kind": "artifact-only", "adapter": "desktop", "protocols": ["desktop-url-scheme"], "dimensions": ["protocol_behavior"]},
+    {"id": "artifact-contract-source", "kind": "artifact-only", "adapter": "contract", "protocols": ["contract-source"], "dimensions": ["input_variation", "state_and_sequence"]},
+    {"id": "artifact-android-tree", "kind": "artifact-only", "adapter": "android", "protocols": ["android", "android-ipc"], "dimensions": ["protocol_behavior"]},
+    {"id": "artifact-ios-ipa-binary", "kind": "artifact-only", "adapter": "ios", "protocols": ["ios", "ios-url-scheme", "ios-entitlements"], "dimensions": ["protocol_behavior"]}
+  ],
+  "explicitly_unsupported": ["desktop-native-runtime", "smart-contract-runtime", "kubernetes-live", "hardware-firmware"]
+}

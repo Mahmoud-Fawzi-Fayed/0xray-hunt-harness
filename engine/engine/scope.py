@@ -91,6 +91,7 @@ class Scope:
         self.path_restrictions = path_restrictions or {}  # {host: ["/allowed/path"]} from URL-scoped entries
         self.out_path_restrictions = out_path_restrictions or {}  # {host: ["/excluded/path"]} path-specific exclusions
         self.policy = {}  # program-level policy: rate_limit, prohibited_actions, required_headers, auth_restrictions
+        self.discovery_not_applicable = {}
         # Port enforcement: scope entries with explicit ports restrict that host to those ports only
         self._allowed_ports = {}       # {exact_host: set(ports)}
         self._wildcard_ports = {}      # {base_domain: set(ports)} for *.domain:port entries
@@ -123,8 +124,10 @@ class Scope:
             "rate_limit": d.get("rate_limit"),
             "prohibited_actions": d.get("prohibited_actions", []),
             "required_headers": d.get("required_headers", {}),
+            "read_only_post_paths": d.get("read_only_post_paths", []),
             "auth_restrictions": d.get("auth_restrictions"),
         }
+        s.discovery_not_applicable = d.get("discovery_not_applicable", {})
         return s
 
     def _path_prefixes_for(self, host):

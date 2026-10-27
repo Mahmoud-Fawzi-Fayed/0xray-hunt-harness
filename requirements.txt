@@ -13,3 +13,6 @@ psycopg2-binary>=2.9
 
 # DNS resolution (recon.py subdomain enumeration)
 dnspython>=2.6
+
+# OpenAPI YAML discovery
+PyYAML>=6.0

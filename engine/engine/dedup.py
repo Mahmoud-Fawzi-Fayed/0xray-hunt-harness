@@ -136,9 +136,9 @@ def norm_class(s):
     if not s:
         return ""
     if s in CLASS_CANON:
-        return CLASS_CANON[s]
-    slug = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    return CLASS_CANON.get(slug, slug)
+        s = CLASS_CANON[s]
+    import vulncatalog as VC
+    return VC.canonical_class(s)
 
 
 def title_tokens(text):

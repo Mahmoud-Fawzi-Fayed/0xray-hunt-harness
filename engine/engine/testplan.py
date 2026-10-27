@@ -2,9 +2,8 @@
 """
 testplan.py — security test planner: feature map → structured test cases.
 
-Takes the feature map (endpoints, params, auth) and generates a prioritized
-security test plan mapping each endpoint to applicable vuln classes, roles,
-and specific test actions.
+Takes the feature map (operations, inputs, actors, effects, and relationships)
+and generates behavior-based cases with independent trust-dimensional outcomes.
 
 CLI:
   python3 engine/engine/testplan.py plan --scope scope.json [--state state.json] [--fmap feature-map.json]
@@ -23,25 +22,6 @@ sys.path.insert(0, ENGINE)
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
-# ---------------------------------------------------------------------------
-# Dynamic analysis signals — used to DESCRIBE what an endpoint does, NOT to
-# match it against a static vuln checklist.  The hunt agent reads these
-# descriptions and invents its own tests from live bytes.
-# ---------------------------------------------------------------------------
-
-_SIGNAL_PATTERNS = {
-    "handles_identity":  re.compile(r"(^|_)(id|uid|user_?id|account_?id|org_?id|team_?id|object_?id|ref|uuid)($|_)", re.I),
-    "accepts_file":      re.compile(r"(file|upload|attachment|image|avatar|document|media|photo)", re.I),
-    "accepts_url":       re.compile(r"(url|uri|redirect|return|next|continue|dest|goto|link|callback|redir)", re.I),
-    "accepts_freetext":  re.compile(r"(search|query|q|filter|find|keyword|term|name|title|text|input|body|comment|content|message|template|subject|email)", re.I),
-    "auth_flow":         re.compile(r"/(login|signin|signup|register|auth|oauth|token|password|reset|verify|confirm|session|sso|2fa|mfa|otp)", re.I),
-    "elevated_privilege": re.compile(r"/(admin|manage|dashboard|internal|staff|moderator|settings)", re.I),
-    "financial":         re.compile(r"/(payment|billing|invoice|order|checkout|subscribe|wallet|transfer|withdraw|buy|purchase|redeem|coupon)", re.I),
-    "state_changing":    re.compile(r"/(create|update|delete|remove|modify|approve|cancel|apply|transfer|invite|share|publish)", re.I),
-    "realtime":          re.compile(r"/(ws|wss|socket|realtime|stream|events|notifications|chat|live|cable)", re.I),
-    "api_schema":        re.compile(r"(graphql|/gql|/api/|/v[0-9]+/)", re.I),
-}
-
 # VULN_RULES is kept as an empty list for backward compatibility.
 # The engine no longer matches endpoints against a static vulnerability menu.
 # Instead, each endpoint gets a dynamic analysis profile (see analyze_endpoint)
@@ -53,134 +33,57 @@ def _params(ep):
     p = ep.get("params") or ep.get("param") or []
     if isinstance(p, str):
         return [p] if p else []
-    return [str(x) for x in p]
+    if isinstance(p, dict):
+        p = [p]
+    return [str(x.get("name") or "unnamed") if isinstance(x, dict) else str(x)
+            for x in p if x not in (None, "")]
 
 
 def analyze_endpoint(ep):
-    """Build a dynamic analysis profile for one endpoint.
-
-    Instead of matching against a static vuln list, this describes WHAT the
-    endpoint does so the hunt agent can reason about what might go wrong.
-    Returns a dict of signals the agent reads to form hypotheses.
-    """
+    """Build a behavior profile and impact score without vulnerability-class rules."""
+    import function_profile as FP
+    function = ep.get("function_profile") or FP.from_endpoint(ep)
     url = ep.get("url", "")
     method = ep.get("method", "GET")
     params = _params(ep)
-    all_text = url + " " + " ".join(params)
-
-    signals = []
-    for name, pat in _SIGNAL_PATTERNS.items():
-        if pat.search(all_text):
-            signals.append(name)
-
-    is_write = method in ("POST", "PUT", "PATCH", "DELETE")
-    if is_write and "state_changing" not in signals:
-        signals.append("state_changing")
-
-    profile = {
+    score = FP.impact_score(function)
+    priority = "critical" if score >= 65 else "high" if score >= 30 else "medium" if score >= 15 else "low"
+    return {
         "url": url,
         "method": method,
         "params": params,
-        "is_write": is_write,
+        "is_write": method in ("POST", "PUT", "PATCH", "DELETE"),
         "auth_required": bool(ep.get("auth_required")),
-        "signals": signals,
+        "signals": list(function.get("trust_dimensions") or []),
+        "function_profile": function,
+        "priority_score": score,
+        "priority": priority,
         "tags": ep.get("tags") or [],
         "category": ep.get("category", ""),
-        "body_params": ep.get("body_params") or [],
+        "body_params": _params({"params": ep.get("body_params")}),
         "note": ep.get("note", ""),
         "source": ep.get("source", ""),
         "confidence": ep.get("confidence", "unknown"),
+        "guidance": {},
+        "guidance_text": "",
+        "recommended_skills": [],
     }
-
-    # Priority score — derived from what the endpoint IS, not from which
-    # vuln class we think applies.
-    score = 0
-    score += min(len(params), 5)
-    if ep.get("auth_required"):
-        score += 3
-    if is_write:
-        score += 3
-    if "handles_identity" in signals:
-        score += 4
-    if "financial" in signals:
-        score += 4
-    if "elevated_privilege" in signals:
-        score += 3
-    if "auth_flow" in signals:
-        score += 2
-    if ep.get("confidence") == "observed":
-        score += 2
-    elif ep.get("confidence") == "documented":
-        score += 1
-
-    profile["priority_score"] = score
-    if score >= 10:
-        profile["priority"] = "critical"
-    elif score >= 7:
-        profile["priority"] = "high"
-    elif score >= 4:
-        profile["priority"] = "medium"
-    else:
-        profile["priority"] = "low"
-
-    try:
-        import knowledge as K
-        guidance = K.build_hunt_guidance(signals, tech=ep.get("tech", []), method=method)
-        profile["guidance"] = guidance
-        profile["guidance_text"] = K.format_guidance_text(guidance)
-        profile["recommended_skills"] = guidance.get("recommended_skills", [])
-    except Exception:
-        profile["guidance"] = {}
-        profile["guidance_text"] = ""
-        profile["recommended_skills"] = []
-
-    return profile
 
 
 def _build_test_instruction(profile):
-    """Build an actionable test instruction from a dynamic analysis profile.
-
-    Instead of the vague 'analyze endpoint', this produces specific guidance
-    based on the knowledge layer — what to look for, what to try first.
-    """
-    signals = profile.get("signals", [])
+    """Build a behavior-specific test instruction from the observed function."""
     method = profile.get("method", "GET")
     url = profile.get("url", "")
-    params = profile.get("params", [])
-    guidance = profile.get("guidance", {})
-
-    parts = []
-    parts.append(f"{method} {url}")
-
+    signals = profile.get("signals", [])
+    function = profile.get("function_profile") or {}
+    parts = [f"{method} {url}",
+             f"Action/resource: {function.get('action', 'unknown')} / {function.get('resource', 'unknown')}.",
+             "Fetch a baseline and identify actors, owned data, state changes, and external effects.",
+             "Form one hypothesis from the observed trust assumptions and execute it with exact controls."]
     if signals:
-        parts.append(f"Signals: {', '.join(signals)}.")
-
-    signal_patterns = guidance.get("signal_patterns", [])
-    if signal_patterns:
-        top = signal_patterns[0]
-        wrongs = top.get("what_goes_wrong", [])[:2]
-        moves = top.get("first_moves", [])[:2]
-        if wrongs:
-            parts.append(f"What goes wrong here: {'; '.join(wrongs)}.")
-        if moves:
-            parts.append(f"First moves: {'; '.join(moves)}.")
-        bar = top.get("evidence_bar", "")
-        if bar:
-            parts.append(f"Evidence bar: {bar}.")
-    else:
-        parts.append("No specific pattern match — explore the endpoint: fetch it, read the response, "
-                      "identify trust boundaries, form a hypothesis about what the developer assumes, "
-                      "and test that assumption.")
-
-    tech_patterns = guidance.get("tech_patterns", [])
-    if tech_patterns:
-        tp = tech_patterns[0]
-        parts.append(f"Tech ({tp['tech']}): watch for {'; '.join(tp['what_goes_wrong'][:2])}.")
-
-    recommended = profile.get("recommended_skills", [])
-    if recommended:
-        parts.append(f"Reference skills: {', '.join(recommended[:3])}.")
-
+        parts.append("Untested trust dimensions: " + ", ".join(signals) + ".")
+    if function.get("effects"):
+        parts.append("Validate state changes and second-order effects independently; do not rely on status alone.")
     return " ".join(parts)
 
 
@@ -197,16 +100,14 @@ def generate_test_cases(endpoints, tested_checks=None):
     for ep in endpoints:
         url = ep.get("url", "")
         method = ep.get("method", "GET")
-        key = (method, url)
+        params = _params(ep)
+        key = (method, url, tuple(sorted(params)), ep.get("role", ""),
+               ep.get("owner", ""), ep.get("accessor", ""))
         if key in seen or not url:
             continue
         seen.add(key)
 
         profile = analyze_endpoint(ep)
-
-        ep_key = f"{method}|{url}"
-        already_tested = ep_key in tested_checks
-
         test_instruction = _build_test_instruction(profile)
 
         case = {
@@ -217,19 +118,29 @@ def generate_test_cases(endpoints, tested_checks=None):
             "test": test_instruction,
             "priority": profile["priority"],
             "priority_score": profile["priority_score"],
-            "params": profile["params"],
+            "params": params,
             "auth_required": profile["auth_required"],
             "confidence": profile["confidence"],
             "signals": profile["signals"],
+            "trust_dimensions": list((profile.get("function_profile") or {}).get("trust_dimensions") or []),
+            "function_profile": profile.get("function_profile") or {},
             "guidance_text": profile.get("guidance_text", ""),
             "recommended_skills": profile.get("recommended_skills", []),
             "roles": ["user_a", "user_b"] if profile["is_write"] and profile["auth_required"] else [],
-            "status": "tested" if already_tested else "pending",
+            "role": ep.get("role", ""), "owner": ep.get("owner", ""),
+            "accessor": ep.get("accessor", ""),
+            "status": "pending",
         }
+        case["case_id"] = case_id(case)
+        if case["case_id"] in tested_checks or f"{method}|{url}" in tested_checks:
+            case["status"] = "tested"
+        if ep.get("unresolved_template") or "{" in url:
+            case["status"] = "blocked"
+            case["blocked_reason"] = "unresolved_path_template"
         if profile["is_write"] and profile["params"]:
             case["body"] = {p: f"<{p}>" for p in profile["params"][:10]}
         if ep.get("body_params"):
-            case["body_params"] = ep["body_params"]
+            case["body_params"] = profile["body_params"]
         cases.append(case)
 
     cases.sort(key=lambda c: -c["priority_score"])
@@ -249,7 +160,7 @@ def build_test_plan(feature_map, state=None, scope=None):
         feature_map = json.loads(feature_map)
 
     endpoints = feature_map.get("endpoints", [])
-    tested_checks = (state or {}).get("tested_checks", {})
+    tested_checks = (state or {}).get("tested") or (state or {}).get("tested_checks", {})
 
     cases = generate_test_cases(endpoints, tested_checks)
 
@@ -346,7 +257,7 @@ def state_key(case):
     """Human-readable state key (for logging/debugging). Primary identity is case_id()."""
     url = case.get("endpoint", "")
     method = case.get("method", "GET")
-    params = case.get("params") or []
+    params = _params(case)
     param = ",".join(sorted(params)) if params else ""
     category = case.get("category", "")
     role = case.get("role", "")
@@ -364,7 +275,7 @@ def case_id(case):
         "category": case.get("category") or case.get("vuln_class") or "",
         "method": (case.get("method") or "GET").upper(),
         "owner": case.get("owner") or "",
-        "params": sorted(case.get("params") or []),
+        "params": sorted(_params(case)),
         "role": case.get("role") or "",
         "url": case.get("endpoint") or case.get("url") or "",
     }, sort_keys=True, separators=(",", ":"))
@@ -429,71 +340,88 @@ def mark_case(case, status, evidence=None):
     return case
 
 
-def generate_auth_tests(endpoints, identities):
-    """Generate cross-role authorization test cases from endpoints and available identities.
+DIMENSION_STATUSES = {"tested", "confirmed", "disproved", "inconclusive", "blocked"}
 
-    identities: list of {"email": ..., "role": "user"|"admin"|..., "ident": "A"|"B"}
-    Returns list of auth test case dicts.
-    """
+
+def apply_hypothesis_results(case, results, evidence_dir=None, case_key=None):
+    """Persist per-dimension outcomes, accepting terminal results only with matching observations."""
+    applicable = set(case.get("trust_dimensions") or
+                     (case.get("function_profile") or {}).get("trust_dimensions") or [])
+    ledger = case.setdefault("hypothesis_ledger", [])
+    dimension_results = case.setdefault("dimension_results", {})
+    accepted = 0
+    for raw in results or []:
+        if not isinstance(raw, dict):
+            continue
+        dimensions = raw.get("dimensions") or [raw.get("dimension")]
+        hypothesis = str(raw.get("hypothesis") or "").strip()
+        observation_ids = [str(value) for value in raw.get("observation_ids") or [] if value]
+        evidence = str(raw.get("evidence") or raw.get("reason") or "").strip()
+        status = str(raw.get("status") or "inconclusive").lower()
+        observations = []
+        if evidence_dir and case_key and observation_ids:
+            import evidence as EV
+            requested = set(observation_ids)
+            observations = [obs for obs in EV.get_observations(evidence_dir, case_id=case_key)
+                            if obs.get("id") in requested and obs.get("resp_status", 0) != 0]
+        for dimension in dimensions:
+            if dimension not in applicable:
+                continue
+            record = {"hypothesis": hypothesis, "status": status, "observation_ids": observation_ids,
+                      "evidence": evidence, "ts": time.time()}
+            if len(dimensions) != 1:
+                record["status"] = "blocked"
+                record["reason"] = "exactly one trust dimension per hypothesis result is required"
+            elif status not in DIMENSION_STATUSES or not hypothesis or not evidence:
+                record["status"] = "blocked"
+                record["reason"] = "hypothesis, valid status, and evidence/reason are required"
+            elif status == "blocked":
+                record["reason"] = evidence
+            elif not observations:
+                record["status"] = "blocked"
+                record["reason"] = "missing or mismatched transport observations"
+            else:
+                accepted += 1
+            ledger.append(dict(record, dimension=dimension, case_id=case_key or case.get("case_id")))
+            dimension_results[dimension] = record
+    return {"accepted": accepted, "recorded": len(ledger)}
+
+
+def generate_auth_tests(endpoints, identities):
+    """Generate actor/role/tenant boundary cases from observed authenticated functions."""
     if not identities or len(identities) < 2:
         return []
     cases = []
     roles = {i.get("ident", ""): i.get("role", "user") for i in identities}
-    id_pairs = [(a, b) for a in identities for b in identities if a["ident"] != b["ident"]]
-
+    pairs = [(a, b) for a in identities for b in identities if a["ident"] != b["ident"]]
     for ep in endpoints:
+        if not ep.get("auth_required"):
+            continue
         url = ep.get("url", "")
         method = ep.get("method", "GET")
         params = _params(ep)
-        id_params = [p for p in params if _SIGNAL_PATTERNS["handles_identity"].search(p)]
-
-        if ep.get("auth_required") or _SIGNAL_PATTERNS["elevated_privilege"].search(url):
-            for owner, accessor in id_pairs:
-                ac = {
-                    "endpoint": url, "method": method, "category": "bac",
-                    "category_name": "Broken Access Control",
-                    "test": f"Access as {accessor['ident']} (role={roles.get(accessor['ident'],'user')}) "
-                            f"endpoint owned by {owner['ident']} (role={roles.get(owner['ident'],'user')})",
-                    "priority": "high", "priority_score": 8,
-                    "params": params, "auth_required": True,
-                    "confidence": ep.get("confidence", "observed"),
-                    "roles": [owner["ident"], accessor["ident"]],
-                    "owner": owner["ident"], "accessor": accessor["ident"],
-                    "status": "pending",
-                }
-                if method in ("POST", "PUT", "PATCH", "DELETE") and params:
-                    ac["body"] = {p: f"<{p}>" for p in params[:10]}
-                cases.append(ac)
-
-        if id_params:
-            for owner, accessor in id_pairs:
-                cases.append({
-                    "endpoint": url, "method": method, "category": "idor",
-                    "category_name": "Insecure Direct Object Reference",
-                    "test": f"Replace {id_params[0]} with {owner['ident']}'s object ID, "
-                            f"request as {accessor['ident']}",
-                    "priority": "high", "priority_score": 9,
-                    "params": params, "auth_required": True,
-                    "confidence": ep.get("confidence", "observed"),
-                    "roles": [owner["ident"], accessor["ident"]],
-                    "owner": owner["ident"], "accessor": accessor["ident"],
-                    "status": "pending",
-                })
-
-        if _SIGNAL_PATTERNS["elevated_privilege"].search(url) and method in ("POST", "PUT", "PATCH", "DELETE"):
-            for ident in identities:
-                if roles.get(ident["ident"]) != "admin":
-                    cases.append({
-                        "endpoint": url, "method": method, "category": "privilege_escalation",
-                        "category_name": "Privilege Escalation",
-                        "test": f"Call admin endpoint as {ident['ident']} (role={roles.get(ident['ident'],'user')})",
-                        "priority": "critical", "priority_score": 11,
-                        "params": params, "auth_required": True,
-                        "confidence": ep.get("confidence", "observed"),
-                        "roles": [ident["ident"]],
-                        "owner": "admin", "accessor": ident["ident"],
-                        "status": "pending",
-                    })
+        function = analyze_endpoint(ep)["function_profile"]
+        for owner, accessor in pairs:
+            case = {
+                "endpoint": url, "method": method, "category": "boundary",
+                "category_name": "Actor and Resource Boundary",
+                "test": (f"Run the same operation as {accessor['ident']} and compare data/state against "
+                         f"{owner['ident']}; require owner-specific proof, not response similarity"),
+                "priority": "high", "priority_score": 45,
+                "params": params, "auth_required": True,
+                "confidence": ep.get("confidence", "observed"),
+                "roles": [owner["ident"], accessor["ident"]],
+                "owner": owner["ident"], "accessor": accessor["ident"],
+                "role": roles.get(accessor["ident"], "user"),
+                "function_profile": function,
+                "trust_dimensions": ["actor_variation", "ownership_boundary"],
+                "status": "pending",
+            }
+            if method in ("POST", "PUT", "PATCH", "DELETE") and params:
+                case["body"] = {p: f"<{p}>" for p in params[:10]}
+            cases.append(case)
+    for case in cases:
+        case["case_id"] = case_id(case)
     return cases
 
 
@@ -550,12 +478,26 @@ def pending_cases(plan_cases, priority=None):
 
 
 def plan_coverage(plan_cases):
-    """Return coverage stats from an executed plan."""
+    """Return case and independent trust-dimensional coverage from an executed plan."""
     by_status = {}
-    for c in plan_cases:
-        by_status.setdefault(c.get("status", "unknown"), []).append(c)
+    dimensions = {}
+    for case in plan_cases:
+        by_status.setdefault(case.get("status", "unknown"), []).append(case)
+        applicable = case.get("trust_dimensions") or (case.get("function_profile") or {}).get("trust_dimensions") or []
+        results = case.get("dimension_results") or {}
+        for name in applicable:
+            status = (results.get(name) or {}).get("status", "unknown")
+            rec = dimensions.setdefault(name, {"total": 0, "tested": 0, "confirmed": 0,
+                                               "disproved": 0, "inconclusive": 0, "blocked": 0,
+                                               "pending": 0, "unknown": 0})
+            rec["total"] += 1
+            rec[status if status in rec else "unknown"] += 1
+            if status in ("tested", "confirmed", "disproved"):
+                rec["tested"] += 1
     total = len(plan_cases)
-    done = len(by_status.get("confirmed", [])) + len(by_status.get("disproved", [])) + len(by_status.get("inconclusive", []))
+    done = sum(len(by_status.get(status, [])) for status in ("tested", "confirmed", "disproved", "inconclusive"))
+    dimension_total = sum(rec["total"] for rec in dimensions.values())
+    dimension_tested = sum(rec["tested"] for rec in dimensions.values())
     return {
         "total": total, "executed": done,
         "confirmed": len(by_status.get("confirmed", [])),
@@ -564,6 +506,11 @@ def plan_coverage(plan_cases):
         "blocked": len(by_status.get("blocked", [])),
         "pending": len(by_status.get("pending", [])),
         "coverage_pct": round(100 * done / max(total, 1), 1),
+        "dimensions": dimensions,
+        "dimension_total": dimension_total,
+        "dimension_tested": dimension_tested,
+        "dimension_coverage_pct": round(100 * dimension_tested / max(dimension_total, 1), 1),
+        "blind_spots": sorted(name for name, rec in dimensions.items() if rec["tested"] < rec["total"]),
     }
 
 
@@ -639,11 +586,13 @@ def _selftest(_a=None):
     all_signals = set()
     for c in result["plan"]:
         all_signals.update(c.get("signals", []))
-    assert "handles_identity" in all_signals, f"missing identity signal: {all_signals}"
-    assert "accepts_file" in all_signals, f"missing file signal: {all_signals}"
-    assert "accepts_url" in all_signals, f"missing url signal: {all_signals}"
-    assert "financial" in all_signals, f"missing financial signal: {all_signals}"
-    assert "auth_flow" in all_signals, f"missing auth_flow signal: {all_signals}"
+    assert "actor_variation" in all_signals, f"missing actor dimension: {all_signals}"
+    assert "input_variation" in all_signals, f"missing input dimension: {all_signals}"
+    assert "state_and_sequence" in all_signals, f"missing state dimension: {all_signals}"
+    with_body = analyze_endpoint({"url": "https://api.acme.com/api/users", "method": "POST",
+                                  "params": ["name"], "body_params": ["role"], "role": "member"})
+    assert "content_and_parser_variation" in with_body["signals"], with_body["signals"]
+    assert "role_transition" in with_body["signals"], with_body["signals"]
 
     # priority ordering: first case should be high priority
     assert result["plan"][0]["priority"] in ("critical", "high"), \
@@ -780,7 +729,7 @@ def _selftest(_a=None):
     auth_cases = generate_auth_tests(mock_endpoints, identities)
     assert len(auth_cases) > 0, "no auth test cases generated"
     cats = {c["category"] for c in auth_cases}
-    assert "bac" in cats or "idor" in cats, f"auth tests missing bac/idor: {cats}"
+    assert cats == {"boundary"}, f"auth tests must be behavior boundaries: {cats}"
     assert all(c.get("owner") and c.get("accessor") for c in auth_cases)
     assert generate_auth_tests([], []) == []  # no identities -> empty
 

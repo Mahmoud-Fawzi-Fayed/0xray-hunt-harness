@@ -63,7 +63,9 @@ def _load_env_file():
     if _ENV_LOADED:
         return
     _ENV_LOADED = True
-    path = os.environ.get("HUNT_ENV_FILE", os.path.expanduser("~/BugHunting_0xRay/harness/.env"))
+    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                "harness", ".env")
+    path = os.environ.get("HUNT_ENV_FILE", default_path)
     try:
         for line in open(path, encoding="utf-8"):
             line = line.strip()

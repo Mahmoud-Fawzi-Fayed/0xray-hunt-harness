@@ -127,3 +127,22 @@ jobs:
         run: pip install requests
       - name: Evidence pipeline tests
         run: python3 engine/tests/test_evidence_pipeline.py
+
+  remediation:
+    runs-on: ubuntu-latest
+    needs: selfcheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install requests PyYAML playwright
+          python3 -m playwright install chromium
+      - name: Hunting correctness regression tests
+        run: python3 engine/tests/test_remediation.py
+      - name: Dynamic evidence and artifact adapter regressions
+        run: python3 engine/tests/test_dynamic_harness.py
+      - name: Live-local target and real-artifact matrix
+        run: python3 engine/eval/run_dynamic_matrix.py

@@ -30,15 +30,23 @@ Baseline: `c48fa14` (2026-10-25)
 | RECON-01 | P1 | `recon.py` stdlib fallback validated only final redirect URL | `recon.py:102` — custom `HTTPRedirectHandler` validates each hop | selftest | PASS |
 | RECON-02 | P1 | `recon.py::auth_enforcement_sweep` didn't check scope before requests | `recon.py` — added `_recon_scope` check | selftest | PASS |
 
-## Remaining / Not Yet Verified
+## Hunting Correctness Remediation
+
+| Area | Fix | Verification |
+|---|---|---|
+| Orchestration | Discovery restored to the real phase list; case IDs immutable; scheduler completes only after evidence validation | `test_remediation.py`, orchestrator selftest |
+| Authorization | Similarity-only BOLA removed; A-owned markers and controls required | ownership regression tests |
+| Discovery | Guessed paths separated from validated surface; YAML/refs/auth/template handling; browser XHR fixed | discovery/OpenAPI/browser tests |
+| Novelty/transport | Novelty feeds ranked work; direct target fetches use scope-guarded transport; uncontained crawler disabled | novelty/egress tests |
+| Reporting | Reproduction, two-tool High/Critical, scope, dedup UNKNOWN/REVIEW, and READY gates enforced | draft-gate tests |
+| Coverage/taxonomy | Canonical aliases and class rules; role/hypothesis-aware coverage; notes no longer count as coverage | taxonomy/coverage tests |
+| Evidence/learning | Redacted excerpts, schema v2, reproduced-only yield, proposed-skill quarantine | evidence/learning tests |
+| Concurrency | Fix-chat log read-modify-write made atomic | fixchat selftest |
+
+## Verification Status and Residual Risks
 
 | Issue ID | Severity | Description | Status |
 |---|---|---|---|
-| E2E-LIVE | P0 | Full browser → LLM agent → verify → report E2E with live model | NOT VERIFIED — requires model API access |
+| E2E-LIVE | P0 | Live model hunt → independent reproduction → dedup → report draft on local vulnerable app | PASS — see `artifacts/release-validation/release-gate.json` |
 | BURP-MCP | P1 | Burp MCP integration tested end-to-end | NOT VERIFIED — requires running Burp Pro |
-| OBSERVE-01 | P1 | `observe.py` `curl -sL` / `httpx` subprocesses bypass scope guard | KNOWN — needs egress proxy or tool replacement |
-| SCOPE-PORT | P1 | `scope.py` doesn't enforce port restrictions | KNOWN — design limitation |
-| NETGET-01 | P1 | `netget.py::_request_count` global int not thread-safe | KNOWN — needs atomic counter |
-| NETGET-02 | P1 | `netget.py::_bypass_scope` accessible to any caller | KNOWN — needs test-only restriction |
-| ENGINE-PLAN | P1 | `engine.py::plan()` overwrites test_plan on each run (no merge/resume) | KNOWN — needs idempotent plan merge |
-| BROWSER-01 | P1 | `browser.py::screenshot/dom_xss_probe/csrf_check` lack scope enforcement | KNOWN — scope param added to screenshot but not wired |
+| AGENT-SANDBOX | P1 | Agent CLIs can execute arbitrary local tools; prompt/transport rules are not OS-level network containment | RESIDUAL RISK — use OS sandboxing for untrusted agents; built-in transports and dangerous flags are guarded |

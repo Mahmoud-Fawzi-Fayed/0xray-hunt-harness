@@ -115,26 +115,15 @@ def _auth_state(slug, base):
 
 
 def _coverage_counts(st):
-    """Same rule as State.worklist(): `tested` ∪ `hunt_notes` inside RETEST_HOURS is covered.
-    The old expert path counted only `tested`, so Superhuman looked like 12% real coverage
-    while the hunt correctly treated 300+ notes as done."""
+    """Evidence-backed coverage only; notes are attempt history, never proof of completion."""
     import state as ST
     surface = st.get("surface") or []
     raw_t = st.get("tested")
-    if isinstance(raw_t, dict):
-        tmap = raw_t
-    elif isinstance(raw_t, list):
-        tmap = {str(k): 0.0 for k in raw_t}
-    else:
-        tmap = {}
+    tmap = raw_t if isinstance(raw_t, dict) else {str(k): 0.0 for k in (raw_t or [])}
     notes = st.get("hunt_notes") if isinstance(st.get("hunt_notes"), dict) else {}
     now = time.time()
     ttl = ST.RETEST_HOURS * 3600
-    try:
-        import engine as HUNTENG
-        junk_re = HUNTENG._REVIEW_JUNK
-    except Exception:  # noqa: BLE001
-        junk_re = re.compile(r"$^")
+    junk_re = re.compile(r"$^")
     covered = untested_real = junk_untested = 0
     n = 0
     for s in surface:
@@ -142,26 +131,30 @@ def _coverage_counts(st):
             continue
         n += 1
         url = s.get("url") or ""
-        key = f"{url}|{s.get('param','')}|{s.get('vuln_class','')}"
+        key = ST.Engagement._key(s)
         last = ST._as_epoch(tmap[key]) if key in tmap else None
-        if key in notes:
-            rec = notes[key]
-            ts = rec.get("ts") if isinstance(rec, dict) else 0
-            nlast = ST._as_epoch(ts) or now
-            if last is None or nlast > last:
-                last = nlast
-        if last is None:
+        if last is None or (ttl > 0 and now - last >= ttl):
             if junk_re.search(url):
                 junk_untested += 1
             else:
                 untested_real += 1
-        elif ttl > 0 and (now - last) >= ttl:
-            untested_real += 1
         else:
             covered += 1
     pct = round(100 * covered / n, 1) if n else 0.0
+    plan = st.get("test_plan") or []
+    if isinstance(plan, dict):
+        plan = plan.get("cases") or plan.get("test_cases") or []
+    import testplan as TP
+    dimensional = TP.plan_coverage(plan)
+    stalled = sorted(name for name, rec in dimensional["dimensions"].items()
+                     if rec["tested"] < rec["total"])
+    if dimensional["dimension_total"]:
+        pct = dimensional["dimension_coverage_pct"]
     return {"covered": covered, "untested_real": untested_real, "junk_untested": junk_untested,
-            "coverage_pct": pct, "surface": n, "notes": len(notes), "tested_keys": len(tmap)}
+            "coverage_pct": pct, "surface": n, "notes": len(notes), "tested_keys": len(tmap),
+            "dimension_total": dimensional["dimension_total"],
+            "dimension_tested": dimensional["dimension_tested"],
+            "unresolved_dimensions": stalled}
 
 
 def _scope_brief(slug, base):
@@ -195,12 +188,8 @@ def _target_snapshot(base, tgt):
             out[k] = out.get(k, 0) + 1
         return out
 
-    attempted = _dist(surface, "vuln_class")                  # what the surface is CLASSIFIED to hunt
-    found = _dist(confirmed, "vuln_class")                     # what actually landed
-    # the misflow signal: classes with lots of surface but zero confirmed
-    zero_yield = sorted([c for c, n in attempted.items()
-                         if n >= 3 and found.get(c, 0) == 0 and c not in ("?", "deep")],
-                        key=lambda c: -attempted[c])[:8]
+    found = _dist(confirmed, "vuln_class")
+    stalled = list(cov.get("unresolved_dimensions") or [])
     sev = _dist(confirmed, "severity")
     log = _tail(os.path.join(d, "engine.log"), 400)
     errs = [ln for ln in log[-120:] if ERR_RE.search(ln)]
@@ -213,7 +202,8 @@ def _target_snapshot(base, tgt):
         "coverage_pct": cov["coverage_pct"],
         "candidates": len(candidates), "confirmed": len(confirmed),
         "confirmed_by_class": found, "confirmed_by_severity": sev,
-        "high_surface_zero_yield_classes": zero_yield,
+        "stalled_dimensions": stalled,
+        "dimension_total": cov["dimension_total"], "dimension_tested": cov["dimension_tested"],
         "auth": _auth_state(slug, base),
         "scope": _scope_brief(slug, base),
         "expert": expert_signals(base, slug),
@@ -245,13 +235,13 @@ def gather(base):
         "ts": _now(),
         "box": {"cores": CORES, "load_1_5_15": [round(x, 2) for x in la]},
         "config": {
-            "models": os.environ.get("OPENCODE_HUNT_MODELS", "") or os.environ.get("CURSOR_HUNT_MODELS", ""),
+            "models": os.environ.get("HUNT_MODELS", ""),
             "parallel": os.environ.get("HUNT_PARALLEL", ""),
             "intrusive": os.environ.get("HUNT_INTRUSIVE", ""),
             "deep": os.environ.get("HUNT_DEEP", "1"),
         },
         "rails": {
-            "notes_are_coverage": True,
+            "notes_are_attempt_history": True,
             "deny_wins_oos": True,
             "deep_is_destatic": True,
             "same_tenant_false_is_isolation": True,
@@ -270,16 +260,13 @@ def gather(base):
 
 def _task(snap):
     return (
-        "You are the LEAD of an autonomous bug-bounty operation. Review the live hunt-workflow telemetry "
-        "below. THE MISSION: find MORE and MORE VALUABLE findings (IDOR/BOLA, auth bypass, SSRF, RCE, "
-        "injection — not just low info-leak). This is a diagnostic review: be blunt, specific, and tie every "
-        "point to the numbers in the data.\n\n"
+        "You are the LEAD of an autonomous bug-bounty operation. Review live hunt telemetry and diagnose "
+        "how to produce more demonstrated, meaningful impact without preferring a vulnerability class.\n\n"
         "Analyse especially:\n"
-        "- `high_surface_zero_yield_classes`: classes with lots of attack surface but ZERO confirmed — the "
-        "workflow is attacking them but nothing lands. WHY? (missing 2nd account? no auth session? a gate "
-        "killing candidates? wrong technique?) This is the #1 clue to the misflow.\n"
-        "- coverage_pct, phase, rounds, sleeping: is a target stalled, re-hunting the same slice, or starved?\n"
-        "- auth.two_account / session_valid: IDOR/BOLA need two live accounts — which targets lack them?\n"
+        "- `stalled_dimensions`: trust/workflow dimensions with unresolved evidence. Determine whether the cause "
+        "is missing observations, actor context, parser capability, workflow state, or a validation gate.\n"
+        "- dimension_total/dimension_tested, coverage_pct, phase, rounds, sleeping: is work stalled or repeated?\n"
+        "- auth.two_account / session_valid: which observed actor or ownership boundaries lack required identities?\n"
         "- recent_errors: recurring timeouts/limits/captcha/5xx blocking progress.\n"
         "- yield.by_severity: are we only landing low/medium? what would unlock high/critical?\n\n"
         "Output ONLY a fenced ```json``` block, no prose, shaped exactly:\n"
@@ -301,9 +288,8 @@ def _task(snap):
         "scope.out or expert.out_of_scope_candidates (including mcp-server.zomato.com / blinkit). "
         "OOS candidates are already closed — that is correct, not a miss. own_session_oauth is "
         "HOLD_RTFS (own DCR / own redirect), not missing scope.\n"
-        "COVERAGE (hard): coverage_pct already counts hunt_notes ∪ tested inside RETEST_HOURS. "
-        "Do NOT call it a lie, do NOT demand untested_real from tested-only, do NOT block "
-        "phase=done on notes-covered surface.\n"
+        "COVERAGE (hard): coverage_pct counts only evidence-backed tested cases inside RETEST_HOURS. "
+        "hunt_notes are attempt history, not coverage; blocked and auth-wall cases remain open.\n"
         "AUTH (hard): auth.same_tenant=false means B lives on another host — A=200 B=401 is "
         "tenant isolation, not a dead B. Do not mint a same-tenant A2.\n"
         "SITE (hard): do not recommend reload-site / pm2 restart hunt-bridge. STOP at draft.\n\n"
@@ -460,7 +446,7 @@ def _render_md(snap, rev):
     lines += ["", "## Per-target"]
     for t in snap["targets"]:
         lines.append(f"- **{t['slug']}** phase={t['phase']} cov={t['coverage_pct']}% "
-                     f"conf={t['confirmed']} zero-yield={t['high_surface_zero_yield_classes']} "
+                     f"conf={t['confirmed']} stalled={t['stalled_dimensions']} "
                      f"auth={t['auth']['idents']} 2acct={t['auth']['two_account']}")
     return "\n".join(lines) + "\n"
 
@@ -1067,14 +1053,13 @@ def apply_fixes(base, snap):
     if os.environ.get("REVIEW_AUTOAPPLY", "1") != "1":
         return applied, needs_op
     cap_surface = int(os.environ.get("REVIEW_RECON_CAP_SURFACE", "1500"))
-    hi_classes = ("idor", "bola", "auth-bypass", "sqli", "ssrf")
+    actor_dimensions = {"actor_variation", "ownership_boundary", "tenant_boundary", "role_transition"}
     for t in snap.get("targets", []):
         slug = t["slug"]
         tdir = os.path.join(os.path.expanduser(base), slug)
         auth = t.get("auth") or {}
-        zero = t.get("high_surface_zero_yield_classes") or []
-        # Destatic stores every job as class "deep" — that is not an IDOR/BOLA auth gap.
-        auth_gap = any(c in zero for c in hi_classes)
+        stalled = set(t.get("stalled_dimensions") or [])
+        auth_gap = bool(actor_dimensions & stalled)
         # 1) RECON CAP — a starved huge-surface target still crawling recon: hunt the ranked slice NOW
         try:
             flag = os.path.join(tdir, ".recon_capped")
@@ -1086,8 +1071,7 @@ def apply_fixes(base, snap):
                                           "done) -> hunt the ranked slice now"})
         except OSError:
             pass
-        # 2) PROVISION ACCOUNT B — IDOR/BOLA is untestable without a 2nd account. Mint one (hard-gated:
-        #    needs a live A, no existing B, self-register host, account-cap, + an internal cooldown).
+        # 2) Actor/ownership dimensions need a second identity when one is missing.
         if (os.environ.get("REVIEW_AUTO_PROVISION_B", "1") == "1" and auth.get("session_valid")
                 and not auth.get("two_account") and auth_gap):
             try:
@@ -1095,14 +1079,13 @@ def apply_fixes(base, snap):
                 r = AS.provision_b(slug, base=base)
                 if r.get("ok") and r.get("ident") == "B":
                     applied.append({"action": "provision_b", "target": slug,
-                                    "result": "second account (B) provisioned -> cross-account IDOR now testable"})
-                elif r.get("error") and "cooldown" not in r["error"]:   # can't auto-make B -> tell the operator
-                    needs_op.append(f"{slug}: couldn't auto-provision account B ({r['error']}) — "
-                                    "raise HUNT_MAX_ACCOUNTS or paste a B login (panel) to unlock cross-account IDOR")
+                                    "result": "second actor provisioned for unresolved actor/ownership dimensions"})
+                elif r.get("error") and "cooldown" not in r["error"]:
+                    needs_op.append(f"{slug}: couldn't provision a second actor ({r['error']}); "
+                                    "actor-boundary checks remain blocked")
             except Exception:  # noqa: BLE001
                 pass
-        # 3) NEEDS OPERATOR — no auth session but auth-dependent classes are the gap (often captcha-walled):
-        #    can't safely auto-fix; surface it loudly so the operator pastes a login in the panel.
+        # 3) Missing authenticated actor context remains an operator-visible blocker.
         if not auth.get("session_valid") and auth_gap:
             err = ""
             try:
@@ -1113,8 +1096,8 @@ def apply_fixes(base, snap):
                 needs_op.append(f"{slug}: no session yet ({err[:90]}). Signup retries after its cooldown; "
                                 "a pasted login is only needed if that retry does not return a site.")
             else:
-                needs_op.append(f"{slug}: no auth session — paste a test login in the panel to unlock "
-                                f"{', '.join(c for c in list(hi_classes) + ['deep'] if c in zero)}")
+                needs_op.append(f"{slug}: no authenticated actor — paste a test login for: "
+                                + ", ".join(sorted(actor_dimensions & stalled)))
     return applied, needs_op
 
 
@@ -1263,15 +1246,10 @@ def _coerce_review(agent_result):
 
 
 def _next_model(failed):
-    for key in ("OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
-        pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
-        if pool:
-            break
-    else:
-        pool = []
-    for m in pool:
-        if m != failed:
-            return m
+    pool = [m.strip() for m in os.environ.get("HUNT_MODELS", "").split(",") if m.strip()]
+    for model in pool:
+        if model != failed:
+            return model
     return None
 
 
@@ -1299,7 +1277,7 @@ def _too_soon(base):
 def review(base=BASE, quiet=False, dry=False, force=False, apply_only=False):
     try:
         import notify
-        notify._load_env_file()                       # make CURSOR_HUNT_MODELS* + HUNT_WEB_DIR available
+        notify._load_env_file()                       # make generic runtime + output settings available
     except Exception:  # noqa: BLE001
         notify = None
     base = os.path.expanduser(base)
@@ -1485,7 +1463,7 @@ def _selftest():
         assert sig["untested_real"] == 0, sig
         assert sig["coverage_pct"] == 100.0, sig
         snap = _target_snapshot(d, {"slug": slug, "online": True, "restarts": 0})
-        assert "deep" not in (snap.get("high_surface_zero_yield_classes") or []), snap
+        assert "deep" not in (snap.get("stalled_dimensions") or []), snap
         assert snap["coverage_pct"] == 100.0, snap
         bad = {"assessment": "register mcp-server.zomato.com for eternal",
                "weaknesses": ["Coverage accounting lie: 99.7% vs 12.9%"],

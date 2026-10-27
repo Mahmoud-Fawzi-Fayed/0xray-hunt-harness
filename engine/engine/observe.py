@@ -42,6 +42,14 @@ def _run(cmd, timeout=60, inp=None):
         return ""
 
 
+def _fetch(url, method="GET", timeout=12):
+    try:
+        import netget
+        return netget.get(url, method=method, timeout=timeout)
+    except Exception:
+        return 0, "", {}
+
+
 def _host_of(target):
     t = target if "://" in target else "//" + target
     return (urlparse(t, scheme="https").hostname or target).strip().lower()
@@ -104,38 +112,17 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
     subs = sorted(s for s in subs if s and "." in s)
 
     hosts = []
-    if live and _have("httpx"):
-        out = _run(["httpx", "-silent", "-json", "-status-code", "-title", "-td", "-no-color"],
-                   timeout=timeout, inp="\n".join(subs))
-        for ln in out.splitlines():
-            try:
-                j = json.loads(ln)
-            except json.JSONDecodeError:
-                continue
-            url = j.get("url") or j.get("input")
-            if url:
-                hosts.append({"url": url, "status": j.get("status_code") or j.get("status-code"),
-                              "title": j.get("title", ""), "tech": j.get("tech") or j.get("technologies") or []})
-    elif live:
+    if live:
         for s in subs[:cap_hosts]:
             if time.time() - t0 > deadline_s:
                 break
             sub_url = f"https://{s}"
             if scope and not scope.in_scope_host(sub_url):
                 continue
-            hdr_out = _run(["curl", "-s", "-D", "-", "-o", "/dev/null", "-m", "10",
-                           sub_url], timeout=15).strip()
-            code, tech = "", []
-            for hl in hdr_out.splitlines():
-                if hl.startswith("HTTP/"):
-                    parts = hl.split()
-                    code = parts[1] if len(parts) > 1 else ""
-                lw = hl.lower()
-                if lw.startswith(("x-powered-by:", "server:")):
-                    tech.append(hl.split(":", 1)[1].strip())
-            if code and code != "000":
-                hosts.append({"url": f"https://{s}", "status": int(code) if code.isdigit() else code,
-                              "title": "", "tech": tech})
+            code, _, headers = _fetch(sub_url, method="HEAD")
+            tech = [headers[k] for k in ("server", "x-powered-by") if headers.get(k)]
+            if code:
+                hosts.append({"url": sub_url, "status": code, "title": "", "tech": tech})
     if not hosts:
         hosts = [{"url": f"https://{host}", "status": None, "title": "", "tech": []}]
 
@@ -147,7 +134,7 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
             url = h["url"]
             if scope and not scope.in_scope_host(url):
                 continue
-            html = _run(["curl", "-s", "-m", "12", url], timeout=15)
+            _, html, _ = _fetch(url)
             for m in _JS_SRC.findall(html):
                 if time.time() - t0 > deadline_s:
                     break
@@ -156,7 +143,7 @@ def observe(target, base=DEFAULT_BASE, live=True, cap_hosts=12, cap_js=40, timeo
                     continue
                 if scope and not scope.in_scope_host(ju):
                     continue
-                body = _run(["curl", "-s", "-m", "12", ju], timeout=15)
+                _, body, _ = _fetch(ju)
                 if body:
                     js[ju] = hashlib.sha256(body.encode("utf-8", "ignore")).hexdigest()[:16]
             if len(js) >= cap_js:

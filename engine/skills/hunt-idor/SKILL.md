@@ -97,6 +97,8 @@ done
 ## Validation
 - **B cannot legitimately access A’s object** (different user, preferably different tenant).
 - Response contains **A’s unique marker** (body-diff vs B baseline and vs 401 garbage cookie). 200 + `[]` / redacted fields / `"access denied"` in body = **not** IDOR.
+- Similar A/B bodies or matching status codes are only a triage lead. Prove ownership with a marker unique to A and a negative public/shared-resource control; generic success bodies are never confirmation.
+- Preserve method, URL, owner, accessor, case ID, and observation IDs through independent replay and report.
 - Write-IDOR: mutate a **disposable** A object, confirm via A’s session (second channel). Revert if cheap.
 - Blind: unique marker in export/email/OOB webhook, not status-only.
 - Reproduce from two fresh accounts in <10 minutes.

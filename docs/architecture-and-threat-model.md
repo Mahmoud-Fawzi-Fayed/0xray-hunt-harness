@@ -44,7 +44,7 @@
 ### Agent and Model
 | Module | Role |
 |---|---|
-| `agent.py` | Dispatches tasks to Claude Code / OpenCode / Kimi CLI. Parses JSON results from agent output |
+| `agent.py` | Dispatches tasks only to the configured active command. Parses plain/JSON/JSONL output by content |
 | `modelroute.py` | Routes tasks to models: Opus (deep), Fable (creative), Sonnet (fast). Escalation ladder |
 | `skill_map.py` | Filesystem-based skill discovery — matches `hunt-*` directories to vuln classes |
 | `brain.py` | Per-program memory — stores/retrieves context for agent prompts |
@@ -104,9 +104,9 @@ Program URL
 │     - Playwright route handler              │
 │     - Fail-closed (abort on exception)      │
 │                                             │
-│  4. observe.py (PARTIAL — subprocess gap)   │
-│     - JS URL filtering uses scope           │
-│     - curl -sL / httpx bypass scope guard   │
+│  4. observe.py + recon transports           │
+│     - netget scope/redirect enforcement     │
+│     - uncontained active crawler disabled   │
 │                                             │
 │  5. guardrails.py                           │
 │     - All URL-bearing actions scope-checked │
@@ -119,15 +119,14 @@ Program URL
 ┌─────────────────────────────────────────────┐
 │  AGENT EXECUTION                            │
 │                                             │
-│  modelroute.py selects model:               │
-│    Opus  → deep reasoning, report drafts    │
-│    Fable → hypothesis, creative bypass      │
-│    Sonnet → recon, dedup, fast tasks        │
+│  modelroute.py selects an opaque pool label │
+│  or delegates to the host default; effort   │
+│  follows observed task complexity.          │
 │                                             │
-│  agent.py dispatches to runtime:            │
-│    Claude Code CLI / OpenCode / Kimi        │
-│    Timeout + turn limits (advisory)         │
-│    JSON result extraction                   │
+│  agent.py dispatches only to the configured │
+│  active command; no fallback runtime.       │
+│    Timeout + process-group cleanup          │
+│    Plain/JSON/JSONL result extraction       │
 │                                             │
 │  Agents can invoke engine tools:            │
 │    netget.py, identity.py, browser.py,      │
@@ -149,9 +148,8 @@ Program URL
 └─────────────────────────────────────────────┘
 ```
 
-## Known Egress Gaps
+## Residual Egress Risks
 
-1. **observe.py**: `curl -sL` and `httpx` subprocesses bypass the scope guard. Mitigation: scope-filter results post-hoc.
-2. **Agent tools**: Agents can invoke shell commands. Mitigation: guardrails.py gates write actions; scope.py gates URLs. But a creative agent could theoretically invoke an unguarded binary.
-3. **Port-based scope**: `scope.py` matches hostnames, not ports. Two services on the same host at different ports cannot be independently scoped.
-4. **DNS rebinding**: No protection against DNS changes between scope check and request.
+1. **Agent tools**: Agents can invoke shell commands. Built-in target fetches use netget, dangerous flags are refused, and uncontained active crawling is disabled, but this is not OS-level network containment. Use an OS sandbox for untrusted agents.
+2. **Port-based scope**: Explicit `host:port` and wildcard-port rules are enforced; portless scope entries intentionally allow any port.
+3. **DNS rebinding**: No protection against DNS changes between scope check and request.

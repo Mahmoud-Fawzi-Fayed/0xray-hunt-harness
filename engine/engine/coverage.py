@@ -174,7 +174,8 @@ def report(slug, base=DEFAULT_BASE):
     for role in sorted(roles_seen):
         role_ops = [(m, u) for (m, u), op in by_operation.items() if role in op["roles"]]
         role_tested = sum(1 for m, u in role_ops
-                         if any(v == "tested" for v in by_operation[(m, u)]["classes"].values()))
+                         if by_operation[(m, u)]["classes"] and
+                         all(v == "tested" for v in by_operation[(m, u)]["classes"].values()))
         role_coverage[role] = {"operations": len(role_ops), "tested": role_tested}
 
     operations = []
@@ -192,19 +193,41 @@ def report(slug, base=DEFAULT_BASE):
 
     unique_tested = len(tested_records)
 
-    # Class-level blind spot detection: vuln classes with hunt skills but zero test coverage.
-    # Derived dynamically from installed hunt-* skills on disk — no static list.
-    _expected_classes = set()
-    try:
-        import skill_map as _sm
-        for name in _sm.installed():
-            if name.startswith("hunt-"):
-                _expected_classes.add(name[len("hunt-"):])
-    except Exception:  # noqa: BLE001
-        pass
-    tested_classes = {c for c in by_class if by_class[c]["tested"] > 0}
-    observed_classes = set(by_class.keys())
-    blind_spots = sorted(_expected_classes - tested_classes)
+    trust = {}
+    dimension_details = []
+    import testplan as TP
+    raw_plan = d.get("test_plan") or []
+    plan_cases = raw_plan if isinstance(raw_plan, list) else raw_plan.get("cases") or raw_plan.get("test_cases") or []
+    dimension_cases = plan_cases or surface
+    for case in dimension_cases:
+        if not isinstance(case, dict):
+            continue
+        profile = case.get("function_profile") or TP.analyze_endpoint(case).get("function_profile") or {}
+        applicable = case.get("trust_dimensions") or profile.get("trust_dimensions") or []
+        results = case.get("dimension_results") or {}
+        default_status = "pending" if case.get("status", "pending") in ("pending", "running") else "unknown"
+        for dimension in applicable:
+            result = results.get(dimension) or {}
+            status = result.get("status", default_status)
+            if status not in ("tested", "confirmed", "disproved", "inconclusive", "blocked", "pending"):
+                status = "unknown"
+            rec = trust.setdefault(dimension, {"total": 0, "tested": 0, "confirmed": 0,
+                                               "disproved": 0, "inconclusive": 0, "blocked": 0,
+                                               "pending": 0, "unknown": 0})
+            rec["total"] += 1
+            rec[status] += 1
+            if status in ("tested", "confirmed", "disproved"):
+                rec["tested"] += 1
+            dimension_details.append({
+                "dimension": dimension, "method": case.get("method", "GET"),
+                "url": case.get("endpoint") or case.get("url", ""),
+                "role": case.get("role", ""), "owner": case.get("owner", ""),
+                "accessor": case.get("accessor", ""), "status": status,
+                "observation_ids": result.get("observation_ids") or [],
+            })
+    blind_spots = sorted(name for name, rec in trust.items() if rec["tested"] < rec["total"])
+    dimension_total = sum(rec["total"] for rec in trust.values())
+    dimension_tested = sum(rec["tested"] for rec in trust.values())
 
     return {"program": slug, "phase": d.get("phase"),
             "surface": len(surface), "tested": unique_tested,
@@ -212,6 +235,9 @@ def report(slug, base=DEFAULT_BASE):
             "candidates": len(cand), "confirmed": len(conf),
             "coverage_by_class": matrix,
             "coverage_by_role": role_coverage,
+            "trust_dimensions": trust,
+            "dimension_details": dimension_details,
+            "dimension_coverage_pct": round(100 * dimension_tested / max(dimension_total, 1), 1),
             "operations": operations[:50],
             "leads": leads,
             "blind_spots": blind_spots}
@@ -250,9 +276,16 @@ def fmt(r):
                 parts.append(f"{cls}:{status}{check_str}{role_str}")
             L.append(f"  {op['method']:6s} {op['url'][:60]:60s} {' | '.join(parts)}")
 
+    if r.get("trust_dimensions"):
+        L += ["", f"  ## Trust dimensions ({r.get('dimension_coverage_pct', 0)}% evidence-backed)"]
+        for name, rec in sorted(r["trust_dimensions"].items()):
+            unresolved = rec["total"] - rec["tested"]
+            L.append(f"  {name:32s} {rec['tested']}/{rec['total']} tested; {unresolved} unresolved "
+                     f"(blocked={rec['blocked']}, inconclusive={rec['inconclusive']}, unknown={rec['unknown']})")
+
     if r.get("blind_spots"):
-        L += ["", "  ## BLIND SPOTS (vuln classes never tested)"]
-        L.append(f"  ⚠ {len(r['blind_spots'])} class(es) with hunt skills but zero coverage:")
+        L += ["", "  ## BLIND SPOTS (trust dimensions not fully tested)"]
+        L.append(f"  ⚠ {len(r['blind_spots'])} dimension(s) with incomplete evidence:")
         for bs in r["blind_spots"]:
             L.append(f"    - {bs}")
 

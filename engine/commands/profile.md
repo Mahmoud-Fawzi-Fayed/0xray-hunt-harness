@@ -34,8 +34,8 @@ Builds a `target_profile.json` in `recon/<target>/` with:
 TARGET="$1"
 mkdir -p recon/$TARGET
 
-# Fetch homepage, extract what the product does
-curl -sL "https://$TARGET/" -o recon/$TARGET/homepage.html
+# Fetch homepage through the scoped transport, extract what the product does
+python3 engine/engine/netget.py GET "https://$TARGET/" --slug "$TARGET" > recon/$TARGET/homepage.html
 # Extract title, meta description, and og tags
 grep -oP '(?<=<title>).*?(?=</title>)' recon/$TARGET/homepage.html
 grep -oP 'content="[^"]*"' recon/$TARGET/homepage.html | head -10

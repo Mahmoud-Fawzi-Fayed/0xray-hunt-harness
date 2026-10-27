@@ -20,7 +20,7 @@ real surface. The rest — org boundaries, permission models, transfer/sharing f
 management, billing manipulation, admin endpoints — only appears through authenticated exploration
 and systematic probing.
 
-**Rule: NEVER start testing until discovery covers ≥80% of function categories.**
+**Rule: start only with validated, in-scope operations and retain every source attempt. Guessed paths are leads, not coverage. Unresolved operations, workflows, dimensions, unavailable capabilities, and residuals stay PARTIAL/unknown; never infer completeness from a category or percentage.**
 
 ## Discovery Checklist (mandatory — every category must be attempted)
 
@@ -126,23 +126,19 @@ After discovery, produce a structured inventory:
 
 ## Coverage Gate
 
-Discovery is NOT complete until:
-1. ≥80% of function categories have at least one endpoint discovered
-2. All documented API endpoints are accounted for
-3. Auth boundaries are mapped (which endpoints require auth, which don't)
-4. Role boundaries are mapped (which roles can access what)
-5. Cross-account/cross-org test vectors are identified
+Discovery readiness requires:
+1. At least one validated, in-scope operation (observed traffic, confirmed response, or parsed documentation); guessed paths remain leads.
+2. Every required source for the detected target type attempted, with failures visible.
+3. Auth and role boundaries mapped where applicable; unresolved auth surface stays blocked rather than falsely tested.
+4. Every category marked covered, missing, blocked, not_applicable with evidence, or unknown.
+5. Cross-account/cross-org vectors identified where multi-tenant behavior exists.
 
-If coverage is below 80%, repeat discovery with:
-- Authenticated browser exploration (different roles)
-- Documentation crawl
-- GraphQL introspection
-- Response mining from existing endpoints
+Repeat missing discovery with authenticated browser exploration, documentation, GraphQL introspection, and response mining. Hunting may proceed on validated surface while the remaining categories are explicitly PARTIAL; endpoint count alone never proves completeness.
 
 ## What Happens After Discovery
 
 The discovery inventory feeds directly into the hunt pipeline:
-- Each discovered endpoint becomes a surface item with a priority
-- High-value categories (credentials, admin, org boundaries) get priority boosts
-- The hunt phase tests every discovered endpoint, not just the ones recon found
-- Coverage tracking ensures no function is left untested
+- Each validated operation becomes a function profile with observed actors, effects, and trust dimensions
+- Priority comes from observed sensitivity, effects, and unresolved trust—not category names
+- The hunt phase forms hypotheses from live baselines rather than treating categories as a vulnerability worklist
+- Dimensional evidence shows what remains pending, blocked, inconclusive, or unknown; it never proves that no function is missing

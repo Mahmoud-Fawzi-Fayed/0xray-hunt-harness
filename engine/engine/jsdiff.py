@@ -100,8 +100,9 @@ def diff(old_text, new_text):
 
 def _curl(url, timeout=20):
     try:
-        return subprocess.run(["curl", "-sL", "-m", str(timeout), url],
-                              capture_output=True, text=True, timeout=timeout + 5, errors="ignore").stdout
+        import netget
+        _, text, _ = netget.follow_redirects(url, timeout=timeout)
+        return text or ""
     except Exception:
         return ""
 

@@ -162,7 +162,7 @@ def _browser_api_request(req):
     """Keep runtime API calls, not page navigation, assets, CDN challenges, or marketing paths."""
     url = (req.get("url") or "").split("#", 1)[0]
     path = urlparse(url).path or "/"
-    if req.get("type") not in ("xhr", "fetch"):
+    if (req.get("type") or req.get("source")) not in ("xhr", "fetch"):
         return False
     if BROWSER_NOISE.search(path) or is_static_asset(url):
         return False
@@ -332,71 +332,15 @@ def spa_recon(scope, seeds=None, max_js=20, interesting_only=True, log=print):
 
 
 def classify(item):
-    """Cheap heuristic -> likely vuln class (no LLM). Param-name signals win first."""
-    url = item.get("url", "").lower()
-    p = (item.get("param", "") or "").lower()
-    PARAM = {
-        "open-redirect": {"url", "uri", "next", "redirect", "return", "returnurl", "return_url",
-                          "callback", "goto", "dest", "destination", "continue", "u", "link", "target"},
-        "lfi": {"file", "path", "page", "template", "include", "doc", "document", "filename", "filepath", "load"},
-        "ssrf": {"image", "imageurl", "image_url", "fetch", "webhook", "proxy", "feed", "host", "port", "ip", "endpoint"},
-        "idor": {"id", "uid", "user", "userid", "user_id", "account", "accountid", "order",
-                 "orderid", "invoice", "docid", "pid", "oid", "ref"},
-        "sqli": {"q", "query", "search", "keyword", "s", "term", "filter", "sort"},
-    }
-    for cls, names in PARAM.items():
-        if p in names:
-            return cls
-    rules = [
-        (("/graphql",), "graphql"),
-        (("/chat", "/ai", "/llm", "completion", "/assistant", "/agent", "prompt", "/copilot"), "llm-ai"),
-        (("redirect", "returnurl", "callback", "goto", "/go"), "open-redirect"),
-        (("/upload", "filename", "filepath", "/download", "/file"), "lfi"),
-        (("/account", "/users", "/user/", "userid", "/profile", "/order", "/invoice", "/report", "/export"), "idor"),
-        (("/search", "/query", "keyword"), "sqli"),
-        (("/login", "/signin", "/register", "/auth", "/oauth", "/token", "/session"), "auth-bypass"),
-        (("/proxy", "/fetch", "webhook"), "ssrf"),
-    ]
-    for keys, cls in rules:
-        if any(k in url for k in keys):
-            return cls
-    return "idor" if p else "info-leak"
+    """Compatibility label only; hunting behavior comes from the function profile."""
+    if item.get("source") == "secret" and item.get("vuln_class"):
+        return item["vuln_class"]
+    return "deep"
 
 
 def classify_all(item, max_classes=None):
-    """Work units for an endpoint. Deep mode is one thinking hunt per URL — not a
-    vuln-class matrix. A preset secret finding stays single-class. The keyword
-    matrix below is only used when HUNT_DEEP is off (tests / explicit class mode)."""
-    if item.get("source") == "secret" and item.get("vuln_class"):
-        return [item["vuln_class"]]
-    if os.environ.get("HUNT_DEEP", "1") == "1":
-        return ["deep"]
-    if max_classes is None:
-        max_classes = int(os.environ.get("HUNT_MAX_CLASSES", "10"))
-    url = item.get("url", "").lower()
-    p = (item.get("param", "") or "").lower()
-    classes = [classify(item)]
-    extras = ["idor", "auth-bypass", "info-leak"]   # universal access / exposure
-    # context-SPECIALISED classes FIRST (before the generic injection matrix) so they survive the cap
-    if any(k in url for k in ("/login", "/signin", "/register", "/auth", "/oauth", "/token",
-                              "/session", "/sso", "/saml", "/mfa", "/2fa", "/otp", "/password", "/reset")):
-        extras += ["jwt", "oauth", "csrf", "mfa", "saml"]
-    if any(k in url for k in ("/chat", "/ai", "/llm", "/assistant", "/agent", "/copilot", "prompt")):
-        extras += ["llm-ai"]
-    if "/graphql" in url or "/gql" in url:
-        extras += ["graphql"]
-    if any(k in url for k in ("/upload", "/file", "/download", "/import", "/attachment", "/avatar", "/media")):
-        extras += ["file-upload", "xxe"]
-    if any(k in url for k in ("/webhook", "/callback", "/fetch", "/proxy", "/integration", "/notify")):
-        extras += ["webhook"]
-    extras += ["ssrf", "open-redirect", "cors"]     # more universal
-    if (bool(p) or "?" in url or any(k in url for k in ("/api", "/rest", "/v1", "/v2", "/v3", "/graphql",
-            "/gql", "/rpc", "/ajax", "/json", "/search", "/query", ".php", ".asp", ".jsp", ".do"))):
-        extras += ["sqli", "nosqli", "xss", "ssti", "lfi", "cmdi", "xxe"]   # full injection matrix on any input
-    for e in extras:
-        if e not in classes:
-            classes.append(e)
-    return classes[:max_classes]
+    """Return one dynamic work item, never a parameter/URL vulnerability matrix."""
+    return [classify(item)]
 
 
 # tracking / cache params with no attack value — dropped from the surface
@@ -406,31 +350,8 @@ PARAM_NOISE = {"utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_t
 
 
 def classes_for_param(name, url=""):
-    """Deterministic per-parameter attack categorization (name-driven). Returns ranked classes."""
-    n = (name or "").lower()
-    cls = []
-    def add(*cs):
-        for c in cs:
-            if c not in cls:
-                cls.append(c)
-    if n in ("url", "uri", "next", "dest", "destination", "u", "link", "target", "return", "continue") \
-            or any(k in n for k in ("redirect", "returnurl", "return_to", "callback", "goto", "forward")):
-        add("open-redirect", "ssrf")
-    if any(k in n for k in ("image", "fetch", "webhook", "proxy", "feed", "remote", "load_url")):
-        add("ssrf")
-    if (any(k in n for k in ("file", "path", "template", "include", "document", "folder", "dir"))
-            and not n.endswith("id")):
-        add("lfi")
-    if n in ("id", "uid", "pid", "oid", "gid") or n.endswith("_id") or n.endswith("id") \
-            or any(k in n for k in ("user", "account", "order", "invoice", "node", "post", "item", "doc", "page", "cat", "tag", "profile")):
-        add("idor", "sqli")
-    if n in ("q", "s", "query", "search", "keyword", "filter", "term", "sort", "name", "email", "cat", "tag", "lang"):
-        add("sqli", "xss")
-    if any(k in n for k in ("auth", "token", "session", "login", "sso", "saml", "oauth")):
-        add("auth-bypass")
-    if not cls:
-        add("sqli", "xss", "idor")     # any reflected/used param is a generic injection/IDOR surface
-    return cls[:3]
+    """Compatibility wrapper for one dynamic parameter operation."""
+    return ["deep"]
 
 
 def _gau_urls(scope, log):
@@ -475,6 +396,9 @@ def _katana_urls(scope, log, depth=2, timeout=45, max_seeds=30, budget_s=480):
     a total time budget, and progress logs. Before this, a program with hundreds of seeds
     crawled silently for ~1h and the watchdog (correctly) read it as a stuck hunt."""
     import subprocess, time, hashlib
+    if os.environ.get("HUNT_ALLOW_UNCONTAINED_TOOLS") != "1":
+        log("params: external katana disabled (no per-request egress containment); using scoped internal discovery")
+        return {}
     if not which("katana"):
         log("params: katana not installed — skipping live crawl")
         return {}
@@ -571,28 +495,8 @@ OPENAPI_PATHS = ["/openapi.json", "/swagger.json", "/api/openapi.json", "/v1/ope
 
 
 def classes_for_openapi(path, method, op, secured):
-    """Categorize an OpenAPI operation into attack classes (name + shape driven)."""
-    pl = path.lower()
-    cls = []
-    def add(*cs):
-        for c in cs:
-            if c not in cls:
-                cls.append(c)
-    if "{" in path:                       # path parameter -> object reference (IDOR/BOLA)
-        add("idor")
-    if any(k in pl for k in ("/admin", "permission", "role", "/users", "/orgs", "deactivate",
-                             "reactivate", "/members")):
-        add("auth-bypass")                # broken access control / privilege escalation
-    if any(k in pl for k in ("sso", "saml")):
-        add("saml")
-    if any(k in pl for k in ("oauth", "keycloak", "/auth", "/login", "token")):
-        add("auth-bypass")
-    has_param = any(pr.get("in") in ("query", "path") for pr in op.get("parameters", []))
-    if has_param or method in ("post", "put", "patch"):
-        add("sqli")
-    if not cls:
-        add("info-leak")
-    return cls[:3]
+    """Compatibility wrapper for one dynamic documented operation."""
+    return ["deep"]
 
 
 def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-00000", allow_intrusive=False):
@@ -803,7 +707,7 @@ def gather_params(scope, log=print, max_items=80):
 # ---------------- deep / authenticated recon (the authed API surface curl recon misses) --------------
 _GQL_INTROSPECT = ('{"query":"query IntrospectionQuery{__schema{queryType{name} mutationType{name} '
                    'types{name kind fields{name}}}}"}')
-_GQL_PATHS = ("/graphql", "/api/graphql", "/gql", "/v1/graphql", "/query", "/graphql/v1", "/api/gql")
+_GQL_INTROSPECTION_METHOD = "POST"
 
 
 def graphql_recon(scope, slug=None, ident=None, log=print, timeout=20, max_probes=12):
@@ -818,12 +722,12 @@ def graphql_recon(scope, slug=None, ident=None, log=print, timeout=20, max_probe
     cand = []
     for s in scope.seeds:
         u = urlparse(s)
-        base = f"{u.scheme or 'https'}://{u.hostname}"
-        first = (u.hostname or "").split(".")[0]
-        if first in ("gql", "graphql"):
-            cand += [base, base + "/graphql"]
-        for p in _GQL_PATHS:
-            cand.append(base + p)
+        base = f"{u.scheme or 'https'}://{u.hostname}" + (f":{u.port}" if u.port else "")
+        if (u.hostname or "").split(".")[0] in ("gql", "graphql"):
+            cand.append(base)
+    for documented in getattr(scope, "endpoints", []) or []:
+        if isinstance(documented, str) and documented.startswith(("http://", "https://", "/")):
+            cand.append(documented if documented.startswith("http") else base + documented)
     cand = [u for u in dict.fromkeys(cand) if scope.in_scope_host(u)][:max_probes]
     out = []
     for u in cand:
@@ -910,7 +814,7 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
                 u = (r.get("url") or "").split("#")[0]
                 if not u or u in seen or not scope.in_scope_host(u):
                     continue
-                rtype = r.get("type", "")
+                rtype = r.get("type") or r.get("source", "")
                 if rtype in ("form", "button") or _browser_api_request(r):
                     seen.add(u)
                     item = {"url": u, "method": r.get("method", "GET"), "source": "browser"}
@@ -990,10 +894,11 @@ if __name__ == "__main__":
         assert "/api/completion" in rel and "/api/v1/users" in rel and "/graphql" in rel, rel
         assert "https://api.acme.com/x" in ab, ab
         assert not any("googleapis" in a for a in ab), "noise not filtered"
-        assert classify({"url": "/api/completion"}) == "llm-ai"
-        assert classify({"url": "/api/account", "param": "id"}) == "idor"
-        assert classify({"url": "/go", "param": "url"}) == "open-redirect"
-        assert classify({"url": "/x", "param": "file"}) == "lfi"
+        assert classify({"url": "/api/completion"}) == "deep"
+        assert classify({"url": "/api/account", "param": "id"}) == "deep"
+        assert classify({"url": "/go", "param": "url"}) == "deep"
+        assert classify({"url": "/x", "param": "file"}) == "deep"
+        assert classify({"url": "/x", "source": "secret", "vuln_class": "info-leak"}) == "info-leak"
         # junk-target filter: globs + static assets are not concrete targets
         assert is_concrete_target("https://api.x.com/account")
         assert is_concrete_target("https://api.x.com/users?id=FUZZ")      # FUZZ marker is fine

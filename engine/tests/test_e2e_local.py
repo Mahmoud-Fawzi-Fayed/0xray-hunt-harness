@@ -117,6 +117,8 @@ def test_full_pipeline():
                 {"source": "form", "action": f"http://127.0.0.1:{port}/api/transfer", "method": "POST",
                  "inputs": [{"name": "to"}, {"name": "amount"}]},
                 {"source": "fetch", "url": f"http://127.0.0.1:{port}/api/v1/notifications", "method": "GET"},
+                {"source": "script", "url": f"http://127.0.0.1:{port}/app.js",
+                 "content": "const route = {path: '/api/internal/debug'};"},
             ],
             "surface": [
                 {"url": f"http://127.0.0.1:{port}/", "method": "GET"},

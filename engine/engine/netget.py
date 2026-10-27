@@ -61,14 +61,14 @@ def _record_obs(method, url, req_headers, resp_status, resp_body, ident,
     try:
         import evidence as EV
         case_id = getattr(_CURRENT_CASE_ID, "value", None)
-        EV.record_observation(
+        return EV.record_observation(
             edir, method.upper(), url,
             req_headers=req_headers, req_body=req_body,
             resp_status=resp_status, resp_headers=resp_headers, resp_body=resp_body,
             identity=ident, case_id=case_id,
             policy_id=getattr(_SCOPE_GUARD, "name", None))
     except Exception:  # noqa: BLE001
-        pass
+        return None
 
 
 # Connection pooling — reuse TCP connections across requests
@@ -284,7 +284,7 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
     # Egress policy check (prohibited methods, scope, audit) — fail-closed on broker error
     if _EGRESS_POLICY:
         try:
-            decision = _EGRESS_POLICY.check_egress(method, url, headers)
+            decision = _EGRESS_POLICY.check_egress(method, url, headers, body=data)
             _EGRESS_POLICY.record_decision(method, url, decision)
             if not decision.allowed:
                 return 0, "", {"_error": f"egress denied: {decision.reason}"}
@@ -348,8 +348,10 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
                 if reason:
                     rh["_redirect_blocked"] = reason
-        _record_obs(method, url, h, r.status_code, r.text, ident,
-                    req_body=data, resp_headers=rh)
+        observation_id = _record_obs(method, url, h, r.status_code, r.text, ident,
+                                     req_body=data, resp_headers=rh)
+        if observation_id:
+            rh["_observation_id"] = observation_id
         return r.status_code, r.text, rh
     except ImportError:
         pass
@@ -373,8 +375,10 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
                 reason = _SCOPE_GUARD.reject_reason(loc if "://" in loc else f"https://{host}{loc}")
                 if reason:
                     rh["_redirect_blocked"] = reason
-        _record_obs(method, url, h, r.status_code, r.text, ident,
-                    req_body=data, resp_headers=rh)
+        observation_id = _record_obs(method, url, h, r.status_code, r.text, ident,
+                                     req_body=data, resp_headers=rh)
+        if observation_id:
+            rh["_observation_id"] = observation_id
         return r.status_code, r.text, rh
     except ImportError:
         return 0, "", {"_error": "neither curl_cffi nor requests available"}
@@ -468,6 +472,8 @@ def _main(argv):
     code, text, h = get(url, method=method, data=body, headers=hdrs, ident=ident, slug=slug)
     err = h.get("_error")
     print(f"HTTP {code}" + (f"  [transport error: {err}]" if err else ""))
+    if h.get("_observation_id"):
+        print(f"observation-id: {h['_observation_id']}")
     for k in ("server", "content-type", "content-length", "www-authenticate", "location", "set-cookie"):
         if h.get(k):
             print(f"{k}: {h[k]}")

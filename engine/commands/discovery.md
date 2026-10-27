@@ -35,7 +35,7 @@ python3 ~/0xray-hunt-harness/engine/engine/discovery.py show --slug <program>
 ```
 
 ## Coverage Gate
-Discovery must hit ≥80% category coverage. If below, the command suggests which methods to run next (browser walk, documentation crawl, deeper role exploration).
+Discovery must produce validated in-scope operations and attempt every required source. Guessed paths are leads only. Missing categories stay PARTIAL/unknown and drive role-aware browser, documentation, GraphQL, and response-mining passes.
 
 ## After Discovery
 

@@ -206,8 +206,8 @@ def run_tests():
             ],
             "surface": [
                 {"url": f"{BASE_URL}/", "method": "GET"},
-                {"url": f"{BASE_URL}/api/users/1", "method": "GET", "params": ["id"]},
-                {"url": f"{BASE_URL}/api/users/1", "method": "PATCH", "params": ["id", "name"]},
+                {"url": f"{BASE_URL}/api/users/1", "method": "GET", "params": ["id"], "auth_required": True},
+                {"url": f"{BASE_URL}/api/users/1", "method": "PATCH", "params": ["id", "name"], "auth_required": True},
                 {"url": f"{BASE_URL}/api/search", "method": "GET", "params": ["q"]},
                 {"url": f"{BASE_URL}/api/admin/users", "method": "GET"},
                 {"url": f"{BASE_URL}/api/debug", "method": "GET"},

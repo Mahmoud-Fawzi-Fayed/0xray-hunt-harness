@@ -123,9 +123,9 @@ Threat model for the harness itself, not the targets it hunts.
 | Risk | Severity | Notes |
 |------|----------|-------|
 | Agent shell commands not network-sandboxed | Medium | Agents can make arbitrary HTTP calls outside `netget.py`. Requires OS-level firewall. |
-| Cross-process budget is in-process only | Low | `_request_count` resets on process restart. Per-engagement budget not enforced across CLI invocations. |
+| Budget durability | Low | A file-locked shared budget covers cooperating processes; process restart or non-cooperating tools can still bypass accounting. |
 | DNS rebinding | Medium | Scope checks hostname at call time. If DNS changes between check and connect, a different IP may be reached. Mitigation: re-resolve and re-check is not implemented. |
-| Recon tool egress | Medium | `subfinder`, `httpx`, `gau` bypass `netget.py` scope guard. Only mitigated by passing in-scope args. |
+| Recon tool egress | Medium | Built-in target fetches use `netget.py`; external active crawling is disabled by default. Passive research tools and arbitrary agent shell commands remain outside full containment. |
 | Browser WebRTC/WebSocket | Low | May bypass route-level blocker in edge cases. |
 
 ## Non-Negotiables

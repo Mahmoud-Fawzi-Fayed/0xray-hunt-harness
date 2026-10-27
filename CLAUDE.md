@@ -1,7 +1,7 @@
 # 0xRay Hunt Harness
 
-Engine: `~/0xray-hunt-harness/engine/engine/` (49 modules).
-Skills: `~/0xray-hunt-harness/engine/skills/` (96 skills, 68 hunt-*).
+Engine: `~/0xray-hunt-harness/engine/engine/` (55 modules).
+Skills: `~/0xray-hunt-harness/engine/skills/` (95 skills, 68 hunt-*).
 Agents: `.claude/agents/` (6 agents). Commands: 22.
 Config/secrets: `~/0xray-hunt-harness/harness/.env`.
 Engagement state: `~/.bughunter-engagements/<program>/`.
@@ -27,13 +27,7 @@ When a new conversation opens and a target is provided (program URL, domain, or 
 
 ## Model Routing
 
-| Model | Agent | Use |
-|-------|-------|-----|
-| Opus (`claude-opus-4-6`) | vuln-hunter, report-drafter, hunt-orchestrator, discovery-agent | Deep reasoning, quality writing, thorough mapping |
-| Fable (`claude-fable-5-1`) | (creative bypass) | Hypothesis generation, creative bypass, novel attack paths |
-| Sonnet (`claude-sonnet-5-5`) | recon-novelty, dedup-oracle | Fast recon, pattern matching, dedup scoring |
-
-Route to Fable when standard techniques fail and lateral thinking is needed. Route to Sonnet for high-volume low-depth work. Default to Opus for anything requiring judgment.
+`HUNT_AGENT_CMD` is the only AI runtime command. Its optional `{task}`, `{model}`, and `{resume}` placeholders support argv prompts and model/session labels; without `{task}`, the prompt goes to stdin. `HUNT_MODELS` is an optional pool of opaque labels, and an empty pool uses the active host's default. There are no provider tiers, model-prefix rules, or fallback CLIs. If no command is configured, AI stages fail closed while deterministic stages remain available.
 
 ## Pipeline
 
@@ -53,33 +47,13 @@ targets.py show --program <p>     # load/fetch scope via bb-platforms MCP
 Subdomain enumeration, seed probing, parameter gathering. Uses go/bin tools (subfinder, httpx, gau, katana). Feeds surface to the engine worklist.
 
 ### Phase 2: Discover (`engine.discover()`)
-Exhaustive surface mapping — runs `discovery.py` which auto-detects program type and adapts methods.
+Iterative function and relationship inventory through `discovery.py`. No schema or target category is required: observed seeds, nested JSON relationships, HTML forms, event data, response headers, client execution, and available document parsers can all contribute operations.
 
-**HARD GATE**: if coverage <80%, hunt phase will BLOCK (set `HUNT_SKIP_COVERAGE_GATE=1` to override).
+**HARD GATE**: hunt requires validated in-scope operations. Guessed paths remain leads; failed or unavailable sources and unparsed relationships remain explicit residuals (set `HUNT_SKIP_COVERAGE_GATE=1` only for an intentional operator override).
 
-Discovery auto-detects program type (SPA, pure API, mobile API, GraphQL, WordPress, traditional web) and prioritizes methods accordingly:
-- OpenAPI/Swagger parsing
-- JS bundle mining (`jsminer.py`)
-- Browser capture (headless SPA walk)
-- GraphQL introspection
-- Admin/internal probing
-- API resource probing
-- Error-based discovery (405/404 mining)
-- Response mining (follow JSON links)
-- Dynamic tech fingerprinting (`knowledge.detect_tech()`)
+Discovery attempts safe protocol parsers and browser/client observation when applicable, then expands only from observed behavior for up to six rounds or its budget. Two stable rounds stop expansion. It records source attempts, validated operations, protocol-neutral function profiles, convergence, and residuals; convergence is not a claim that every function was found. No OpenAPI, GraphQL schema, framework name, URL convention, or fixed function checklist is required.
 
-What to discover (coverage checklist — 11 categories):
-- `ui_features` — buttons, forms, modals, tabs, workflows
-- `api_endpoints` — REST, GraphQL, WebSocket, gRPC, internal
-- `user_roles` — admin, member, viewer, guest, service account
-- `auth_mechanisms` — cookies, JWT, OAuth, API keys, SAML, MFA
-- `org_boundaries` — orgs, projects, teams, workspaces, permissions
-- `sharing_flows` — sharing, transfers, invitations, collaboration
-- `integration_points` — webhooks, OAuth apps, imports/exports
-- `storage_operations` — CRUD, file upload/download
-- `admin_endpoints` — actuator, debug, metrics, health, internal
-- `billing_flows` — subscriptions, usage limits, spending
-- `credential_management` — API keys, tokens, secrets, connection strings
+Coverage is dimensional rather than categorical: source/operation validation, function profiles, actor and ownership boundaries, input/parser behavior, state and sequence, external effects, relationships, workflow invariants, confidentiality, and unresolved residuals are reported independently.
 
 ### Phase 3: Explore (`engine.explore()`)
 Functional analysis — `explorer.py` builds app model from state, identifies API surface patterns.
@@ -88,10 +62,10 @@ Functional analysis — `explorer.py` builds app model from state, identifies AP
 Yield-based ranking via `yieldrank.py`. Dedup-downranks known issues. Prioritizes by dynamic signals.
 
 ### Phase 5: Map (`engine.map()`)
-Knowledge-to-skill mapping. Generates `arsenal.md` with per-endpoint skill recommendations.
+Generates `arsenal.md` with protocol-neutral function profiles and trust dimensions. Vulnerability references are not attached before live evidence and a concrete hypothesis.
 
 ### Phase 6: Plan (`engine.plan()`)
-`testplan.py` generates signal-based test plan. `authbootstrap.py` analyzes auth needs.
+`testplan.py` generates behavior-based cases with independent dimensional outcomes. `authbootstrap.py` analyzes auth needs.
 
 **HARD GATE**: if >50% of surface needs auth and no session exists, hunt phase will BLOCK (set `HUNT_SKIP_AUTH_GATE=1` to override).
 
@@ -100,13 +74,13 @@ Auth provisioning:
 - Manual: `authbootstrap.py inject --program <p> --cookie '...' --ident A`
 
 ### Phase 7: Hunt (`engine.hunt()`)
-Knowledge-driven per-endpoint analysis with test-plan-driven dispatch:
-1. FETCH — read every byte (status, headers, body, IDs, roles, links, errors, timing)
-2. UNDERSTAND — resource, action, auth model, boundaries
-3. HYPOTHESIZE — knowledge patterns as starting points, adapt to live behavior
-4. TEST — one precise request per hypothesis
-5. ITERATE — new hypotheses from observations
-6. PROVE — impact with in-scope actions only
+Evidence-driven per-function analysis with test-plan-driven dispatch:
+1. FETCH — read every byte and retain baseline observation IDs
+2. UNDERSTAND — resource, action, auth model, effects, and trust boundaries
+3. HYPOTHESIZE — derive one testable assumption from those observations, then select optional references
+4. TEST — one precise request per hypothesis and trust dimension
+5. ITERATE — new hypotheses from observations; leave untested dimensions unresolved
+6. PROVE — impact with in-scope actions and case-linked evidence only
 
 Requirements:
 - Unique markers in every test request (header with H1 username)
@@ -116,15 +90,15 @@ Requirements:
 - Two distinct identities for any cross-account test
 
 ### Phase 8: Validate (`engine.validate()`)
-`verify.py check` — triager-grade verification gate. Per-class PoC minimums enforced for 15+ vuln classes.
+`verify.py check` — triager-grade verification gate with canonical class-specific proof rules and independent reproduction. LLM-only or similarity-only claims stay in manual review.
 
 Per-finding checklist (ALL must pass):
-1. Full exploit chain with HTTP requests/responses
-2. Cross-account impact with two distinct identities
+1. Full exploit chain with HTTP requests/responses and linked observation IDs
+2. Cross-account impact with two distinct identities and an A-owned unique marker plus controls
 3. Not documented/expected behavior
-4. Working PoC with reproducible steps
+4. Independently reproduced PoC with reproducible steps
 5. CVSS scored to match ACTUAL demonstrated impact
-6. Evidence saved with redacted credentials
+6. Evidence saved with redacted credentials and private, size-bounded request/response excerpts
 
 ### Phase 9: Chain (`engine.chain()`)
 Chains related findings into higher-impact attack paths where possible.
@@ -133,8 +107,9 @@ Chains related findings into higher-impact attack paths where possible.
 Dedup check (`dedup.py check`) + report generation. Writes `report.md`.
 
 Dedup verdicts:
-- `NOVEL` — proceed to draft
-- `REVIEW` — draft with "why this is different" paragraph
+- `NOVEL` — eligible only after reproduction and report-ready checks pass
+- `REVIEW` — requires a concrete differentiator; otherwise HELD
+- `UNKNOWN` — **HELD. Empty corpus is not novelty.**
 - `LIKELY_DUP` — **STOP. Do not draft.**
 
 **HARD STOP: never submit without explicit per-report approval.**
@@ -142,39 +117,26 @@ Dedup verdicts:
 Self-verdict on every draft: `READY` / `NEEDS_FIXES` / `DO_NOT_SUBMIT`.
 Findings publish to `https://finding.redtracefai.com` + email `x00xrayx00x@gmail.com`.
 
-## Knowledge-Driven Dynamic Hunting
+## Evidence-Driven Dynamic Hunting
 
-Three-layer system. Everything is dynamic — works for any target without static data.
+Three-layer system. Target behavior comes from live inputs and supplied artifacts, not a vulnerability checklist.
 
-### Layer 1: Signal Detection (`testplan.py`)
-Each endpoint is profiled by what it DOES:
-- `handles_identity` — params contain id/uid/user_id/account_id/org_id
-- `accepts_file` — file/upload/attachment/image/avatar params
-- `accepts_url` — url/uri/redirect/callback/dest params
-- `accepts_freetext` — search/query/filter/comment/template params
-- `auth_flow` — login/signup/oauth/token/password/reset paths
-- `elevated_privilege` — admin/manage/dashboard/internal paths
-- `financial` — payment/billing/order/checkout/subscribe paths
-- `state_changing` — create/update/delete/modify/approve paths + POST/PUT/PATCH/DELETE methods
+### Layer 1: Function Profiles (`function_profile.py`, `target_adapters.py`)
+Each operation is described by its protocol, action, resource, actors, inputs, outputs, effects, state, sensitivity, and provenance. Profiles expose trust dimensions including actor variation, ownership/tenant boundaries, input and parser variation, state/sequence, external effects, file handling, role transitions, and protocol behavior. Ranking uses observed impact and unresolved trust, not URL or vulnerability names.
 
-### Layer 2: Knowledge Patterns (`knowledge.py`)
-Signals map to historical vuln patterns — "when you see X, here's what has gone wrong before":
-- `handles_identity + state_changing` → cross-account mutation, bulk endpoint auth bypass
-- `financial + state_changing` → price manipulation, race conditions, discount abuse
-- `auth_flow` → token predictability, host header poisoning, OAuth state CSRF
-- Tech-detected patterns: `graphql` → introspection leak, depth attack; `jwt` → alg confusion; `rails` → mass assignment; `remix` → loader data exposure; `nextjs` → middleware bypass
-- `detect_tech(headers, body, url)` fingerprints tech stack from live HTTP responses — NEVER from static config
+### Layer 2: Evidence-Late References (`skill_map.py`)
+The agent first fetches a baseline and retains its case-linked observation IDs. Only after forming a concrete hypothesis may it request matching hunt-* references with those IDs. Missing, forged, or cross-case evidence returns methodology only. Technology and class-specific references remain valid later during validation and reporting, after the relevant fact is established.
 
-### Layer 3: Hypothesis-Driven Hunt (`engine.py`)
-Agent receives knowledge-driven guidance and hunts adaptively. No scripted checklist — live reasoning from observed behavior.
+### Layer 3: Dimensional Hunt and Coverage (`engine.py`, `testplan.py`, `coverage.py`)
+Each hypothesis result names one trust dimension, an outcome, evidence, and observation IDs. A terminal result resolves only that dimension. Pending, blocked, inconclusive, and unknown dimensions stay visible; a tested endpoint or legacy plan never blanket-covers the operation.
 
 ### Supporting Capabilities
 - **Auth bootstrap** (`authbootstrap.py`): auto-analyzes what accounts are needed post-discovery
 - **JS bundle mining** (`jsminer.py`): extracts API paths, GraphQL ops, auth patterns, routes, hidden endpoints, tokens, fetch calls from client JS
-- **Knowledge-to-skill bridge** (`skill_map.py`): signals auto-recommend relevant hunt-* skills as reference
-- **Coverage tracking** (`coverage.py show --slug <p>`): tested vs untested surface
-- **Creative bypass via Fable**: when standard techniques fail, route to Fable for lateral thinking
-- **Retry resilience**: failed endpoints retry up to 3x with different models/timeouts
+- **Target/artifact matrix** (`eval/run_dynamic_matrix.py`): verifies live HTTP, schema, browser, schema-less JSON/form/event/workflow inputs and cloud, LLM/MCP, infrastructure, desktop, contract, Android, and IPA artifacts end to end; artifact-only results are not runtime claims
+- **Coverage tracking** (`coverage.py show --slug <p>`): per-operation, per-identity, per-dimension evidence and blind spots
+- **Creative retry on the active host**: when standard techniques fail, increase effort or rotate an approved opaque label without changing runtime
+- **Retry resilience**: failed endpoints retry up to 3x with different labels/timeouts on the same configured command
 
 ## Self-Learning System (`learn.py`)
 
@@ -194,11 +156,11 @@ The harness teaches itself. When the hunter meets something it has no playbook f
    - Drafts a new `SKILL.md` in `engine/skills/learned/<slug>/`
    - Caps: 5 calls/session, 12h cooldown per topic, 120-line max
 
-3. **Outcome recording** — `record_outcome(program, class, result, note)`:
+3. **Outcome recording** — `record_outcome(program, class, result, note, trust_dimension=...)`:
    - Confirmed findings → `confirmed`
    - False positives → `false-positive`
    - Duplicates → `duplicate`
-   - Feeds into yieldrank (class ranking learns over time)
+   - Feeds into yieldrank using observed trust dimensions and profile IDs; legacy class names do not influence target selection
 
 4. **Skill evolution** — `evolve_skill(name)`:
    - After 5+ outcomes, auto-evolves the skill
@@ -256,12 +218,12 @@ python3 engine/engine/learn.py skills                # list learned skills
 ### Analysis & Planning
 | Module | Purpose | CLI |
 |--------|---------|-----|
-| `knowledge.py` | Signal→pattern library + `detect_tech()` | `selftest` |
-| `testplan.py` | Signal-based test plan generation | `plan --scope <file>` |
+| `function_profile.py` | Protocol-neutral functions, trust dimensions, impact ranking | (library) |
+| `target_adapters.py` | Live-target and artifact adapters | (library) |
+| `testplan.py` | Behavior-based cases and dimensional outcomes | `plan --scope <file>` |
 | `yieldrank.py` | Yield-based endpoint ranking | `rank --tech <stack>` |
 | `brain.py` | LLM reasoning interface | (library) |
-| `bridge.py` | Knowledge-to-skill recommendation | (library) |
-| `skill_map.py` | Skill lookup and routing | (library) |
+| `skill_map.py` | Evidence-gated hypothesis references and post-finding skills | (library) |
 
 ### Auth & Identity
 | Module | Purpose | CLI |
@@ -313,12 +275,12 @@ python3 engine/engine/learn.py skills                # list learned skills
 
 | Agent | Model | Effort | Role |
 |-------|-------|--------|------|
-| `hunt-orchestrator` | Opus | xhigh | Top-level pipeline coordinator |
-| `vuln-hunter` | Opus | xhigh | Single-endpoint deep hunter |
-| `discovery-agent` | Opus | high | Exhaustive surface mapper |
-| `recon-novelty` | Sonnet | high | Recon + novelty delta scout |
-| `dedup-oracle` | Sonnet | high | Duplicate-risk gate |
-| `report-drafter` | Opus | high | Triager-grade draft writer |
+| `hunt-orchestrator` | active host | xhigh | Top-level pipeline coordinator |
+| `vuln-hunter` | active host | xhigh | Single-endpoint deep hunter |
+| `discovery-agent` | active host | high | Exhaustive surface mapper |
+| `recon-novelty` | active host | high | Recon + novelty delta scout |
+| `dedup-oracle` | active host | high | Duplicate-risk gate |
+| `report-drafter` | active host | high | Triager-grade draft writer |
 
 ## Guardrails
 
@@ -394,7 +356,7 @@ These are distilled from real engagement experience. The harness applies them wi
 
 - **Incomplete discovery = wasted hunt** — the Neon audit found 0 bounty-eligible findings because initial discovery missed entire feature categories (orgs, transfers, credentials). Discovery must be exhaustive before hunting begins.
 - **Auth blockers kill momentum** — Shopify audit: 13/26 endpoints untested because Cloudflare blocked automated signup. Detect auth walls early, solve them before testing.
-- **Hardened targets need creativity** — extremely hardened targets (modern WAF, tight CORS, proper auth boundaries) need Fable-routed creative bypass, not brute repetition of standard checks.
+- **Hardened targets need creativity** — extremely hardened targets need observation-driven hypotheses and creative retries on the active host, not brute repetition or a provider-specific fallback.
 - **Static data rots** — any hardcoded target-specific pattern becomes wrong when the target changes. Dynamic detection from live responses is the only reliable approach.
 - **Dedup saves reputation** — reporting a known issue burns triager goodwill and wastes time. The dedup corpus is as important as the finding itself.
 

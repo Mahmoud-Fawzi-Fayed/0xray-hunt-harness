@@ -20,7 +20,14 @@ def _present():
     names = set()
     for d in [SKILLS_DIR] + _FALLBACK_DIRS:
         try:
-            names.update(os.listdir(d))
+            for name in os.listdir(d):
+                path = os.path.join(d, name, "SKILL.md")
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        frontmatter = fh.read(4096)
+                    if "review_status: proposed" in frontmatter:
+                        continue
+                names.add(name)
         except Exception:
             pass
     return names
@@ -62,9 +69,12 @@ def matching(url="", tech=None, analysis="", extra=""):
 
 def skills_for(vuln_class, tech=None, url="", analysis=""):
     """Skills on disk whose names match this URL/stack/class token. No built-in map."""
+    if vuln_class in ("deep", "dynamic", ""):
+        return []
     extra = " ".join(x for x in (vuln_class, analysis) if x)
-    hits = matching(url, tech, extra)
-    slug = "hunt-" + str(vuln_class or "").replace("_", "-").lower()
+    hits = matching("", tech, extra)
+    import vulncatalog as VC
+    slug = VC.skill_name(vuln_class)
     if vuln_class and vuln_class not in ("deep", "") and slug in _present():
         if slug in hits:
             hits.remove(slug)
@@ -77,16 +87,59 @@ def skills_for(vuln_class, tech=None, url="", analysis=""):
     return _filter(["hunt-misc"])
 
 
-def skills_for_signals(signals, tech=None, url=""):
-    """Skills recommended by the knowledge layer for these endpoint signals + tech."""
-    try:
-        import knowledge as K
-        guidance = K.build_hunt_guidance(signals, tech=tech)
-        recommended = guidance.get("recommended_skills", [])
-        present = _present()
-        return [s for s in recommended if s in present][:8]
-    except Exception:
-        return matching(url, tech)
+def _methodology_paths():
+    for root in [SKILLS_DIR] + _FALLBACK_DIRS:
+        path = os.path.join(root, "hunt-methodology", "SKILL.md")
+        if os.path.isfile(path):
+            return [path]
+    return []
+
+
+def _live_observations(evidence_dir, case_id, observation_ids):
+    if not evidence_dir or not case_id or not observation_ids:
+        return []
+    import evidence as EV
+    requested = {str(value) for value in observation_ids if value}
+    observations = EV.get_observations(evidence_dir, case_id=case_id)
+    return [obs for obs in observations
+            if obs.get("id") in requested and obs.get("resp_status", 0) != 0]
+
+
+def for_hypothesis(hypothesis, profile=None, limit=4, evidence_dir=None,
+                   case_id=None, observation_ids=None):
+    """Select vulnerability references only after case-linked live evidence exists."""
+    methodology = _methodology_paths()
+    if not str(hypothesis or "").strip():
+        return methodology
+    if not _live_observations(evidence_dir, case_id, observation_ids):
+        return methodology
+    text = str(hypothesis).lower()
+    profile = profile or {}
+    text += " " + str(profile.get("action", "")) + " " + str(profile.get("resource", ""))
+    text += " " + " ".join(profile.get("trust_dimensions") or [])
+    text += " " + str(profile.get("protocol", ""))
+    tokens = {w for w in re.findall(r"[a-z][a-z0-9_+-]{2,}", text)
+              if w not in {"the", "and", "with", "from", "this", "that", "what", "when", "into", "does"}}
+    ranked = []
+    for name in installed():
+        if not name.startswith("hunt-") or name in ("hunt-discovery", "hunt-dispatch", "hunt-hypothesis"):
+            continue
+        for root in [SKILLS_DIR] + _FALLBACK_DIRS:
+            path = os.path.join(root, name, "SKILL.md")
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as fh:
+                    content = fh.read(12000).lower()
+            except OSError:
+                continue
+            score = sum(1 for token in tokens if token in content)
+            if score:
+                ranked.append((score, name, path))
+            break
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    paths = methodology + [path for _, _, path in ranked[:limit]]
+    return list(dict.fromkeys(paths))[:limit]
 
 
 def tech_skills(tech):

@@ -36,15 +36,14 @@ For each user role the target supports:
 
 ## Coverage Gate
 
-Discovery is NOT complete until:
-- ≥80% of function categories have at least one endpoint discovered
-- All documented API endpoints are accounted for
-- Auth boundaries mapped (which endpoints require auth, which don't)
-- Role boundaries mapped (which roles can access what)
-- Cross-account/cross-org test vectors are identified
+Discovery readiness requires:
+- Validated in-scope operations; guessed paths are leads, not coverage
+- All required methods attempted with failures visible
+- Auth and role boundaries mapped where applicable
+- Categories marked covered, missing, blocked, not_applicable, or unknown
+- Cross-account/cross-org test vectors identified where multi-tenancy exists
 
-If coverage is below 80%, repeat with deeper methods: browser walks as different roles,
-documentation crawl, GraphQL introspection, response mining from existing endpoints.
+Repeat missing discovery with role-aware browser walks, documentation, GraphQL introspection, and response mining. Partial coverage is reported honestly rather than converted to a fictional percentage.
 
 ## Rich Metadata
 

@@ -25,7 +25,7 @@ When a new chat opens with a target (program URL, domain, or "hunt X"):
 1. **Discovery** — `python3 ~/0xray-hunt-harness/engine/engine/discovery.py discover --slug <p> --scope <scope.json>`.
    **Exhaustive function inventory BEFORE any testing.** Maps ALL: UI features, API endpoints, auth flows,
    org/permission boundaries, sharing/transfer flows, integrations, credential management, billing, admin paths.
-   Coverage gate: ≥80% categories must be covered or repeat with authenticated browser exploration.
+   Readiness gate: validated in-scope operations with source attempts retained; guessed paths are leads and unresolved operations, workflows, dimensions, and residuals stay PARTIAL.
    This is the #1 gap that causes missed bugs — testing before discovery is complete.
 2. **Recon-novelty** — spawn `recon-novelty` agent. Get the surface AND the novelty delta. Hunt the
    delta (new subdomains, redeployed JS, new endpoints/params) FIRST — lowest-duplicate, highest-signal.

@@ -88,38 +88,43 @@ class EgressPolicy:
         sc = Scope.load(path)
         return cls(scope=sc, **kwargs)
 
-    def check_egress(self, method, url, headers=None):
+    def check_egress(self, method, url, headers=None, body=None):
         """Single decision point. Returns EgressDecision."""
         method = (method or "GET").upper()
         host = self._host_of(url)
 
         if not host:
             return self._deny("could not parse host from URL")
-
-        # Localhost always allowed (selftest, local dev)
         if host in _LOCALHOST or host.startswith("127."):
             return self._allow("localhost")
-
-        # Prohibited method check (applies to ALL destinations)
         if method in self._prohibited_methods:
             return self._deny(f"method {method} prohibited by engagement policy")
-
-        # Scope-based decision (target traffic)
         if self._scope:
             reason = self._scope.reject_reason(url)
             if reason is None:
-                # In-scope: enforce non-intrusive mode (block state-changing methods unless intrusive allowed)
-                if (not self._allow_intrusive
-                        and method in self._STATE_CHANGING_METHODS):
+                if (not self._allow_intrusive and method in self._STATE_CHANGING_METHODS
+                        and not self._read_only_post(method, url, body)):
                     return self._deny(f"state-changing method {method} blocked (non-intrusive mode)")
                 return self._allow(f"in-scope target ({host})")
-            # Not in target scope — check OSINT allowlist
             if self._osint_allowed and self._is_osint(method, host):
                 return self._allow(f"OSINT research ({host})")
             return self._deny(f"scope: {reason}")
-
-        # No scope loaded — fail closed
         return self._deny("no scope policy loaded (fail-closed)")
+
+    def _read_only_post(self, method, url, body):
+        if method != "POST":
+            return False
+        try:
+            from urllib.parse import urlparse
+            path = (urlparse(url).path or "").lower()
+            text = body if isinstance(body, str) else json.dumps(body or {})
+            if "graphql" in path or path.endswith("/gql") or '"query"' in text:
+                stripped = re.sub(r"#.*", "", text)
+                return not re.search(r"\bmutation\b", stripped, re.I)
+            allowed = (self._scope.policy or {}).get("read_only_post_paths") or []
+            return any(path == p or path.startswith(p.rstrip("/") + "/") for p in allowed)
+        except Exception:
+            return False
 
     def inject_required_headers(self, headers):
         """Return headers dict with required headers merged in. Does not overwrite existing."""
@@ -200,7 +205,7 @@ def get_egress_policy():
         return _EGRESS_POLICY
 
 
-def check(method, url, headers=None):
+def check(method, url, headers=None, body=None):
     """Module-level convenience: check egress using the active policy."""
     pol = get_egress_policy()
     if pol is None:
@@ -208,7 +213,7 @@ def check(method, url, headers=None):
         if host in _LOCALHOST or (host and host.startswith("127.")):
             return EgressDecision(True, "localhost (no policy needed)")
         return EgressDecision(False, "no egress policy loaded (fail-closed)")
-    decision = pol.check_egress(method, url, headers)
+    decision = pol.check_egress(method, url, headers, body=body)
     pol.record_decision(method, url, decision)
     return decision
 

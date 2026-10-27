@@ -420,7 +420,8 @@ function loadSettings() { fetch("/api/v1/user-settings"); }
         if path == "/graphql" and self.command == "GET":
             q = qs.get("query", [""])[0]
             if "IntrospectionQuery" in q or "__schema" in q:
-                schema = {"data": {"__schema": {"types": [
+                schema = {"data": {"__schema": {"queryType": {"name": "Query"},
+                                                  "mutationType": {"name": "Mutation"}, "types": [
                     {"name": "Query", "fields": [
                         {"name": "user", "args": [{"name": "id"}]},
                         {"name": "users", "args": []},
@@ -538,7 +539,14 @@ function loadSettings() { fetch("/api/v1/user-settings"); }
             data = self._parse_body(raw)
             query = data.get("query", "")
             if "__schema" in query or "IntrospectionQuery" in query:
-                self._json(200, {"data": {"__schema": {"types": [{"name": "Query"}, {"name": "Mutation"}]}}})
+                self._json(200, {"data": {"__schema": {
+                    "queryType": {"name": "Query"}, "mutationType": {"name": "Mutation"},
+                    "types": [
+                        {"name": "Query", "fields": [{"name": "user", "args": [{"name": "id"}]},
+                                                     {"name": "users", "args": []}, {"name": "me", "args": []}]},
+                        {"name": "Mutation", "fields": [{"name": "updateUser", "args": [{"name": "id"}]},
+                                                        {"name": "transferFunds", "args": [{"name": "to"}, {"name": "amount"}]}]},
+                    ]}}})
                 return
             user = self._current_user()
             if "user(" in query and user:

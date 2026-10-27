@@ -9,7 +9,7 @@ The evidence pipeline (`evidence.py`) records two types of structured evidence:
 
 Storage: append-only JSONL files per engagement under `<engagement_dir>/evidence/`.
 
-Schema version: 1
+Schema version: 2 (readers remain compatible with version 1 records)
 
 ## HttpObservation
 
@@ -18,7 +18,7 @@ File: `evidence/observations.jsonl`
 ```json
 {
   "id": "obs_a1b2c3d4",
-  "schema_version": 1,
+  "schema_version": 2,
   "ts": "2026-10-26T12:00:00Z",
   "method": "GET",
   "url": "https://api.example.com/users/123/orders",
@@ -47,15 +47,17 @@ File: `evidence/observations.jsonl`
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique observation ID (UUID-based) |
-| `schema_version` | int | Always 1 for current schema |
+| `schema_version` | int | 2 for new records; version 1 remains readable |
 | `ts` | string | ISO 8601 timestamp |
 | `method` | string | HTTP method |
 | `url` | string | Full request URL |
 | `req_headers` | object | Request headers (sensitive values redacted) |
 | `req_body_hash` | string? | SHA-256 of first 64KB of request body |
+| `req_body_excerpt` | string | Private, size-bounded redacted request excerpt |
 | `resp_status` | int | HTTP response status code (0 = transport error) |
 | `resp_headers` | object | Response headers |
 | `resp_body_hash` | string? | SHA-256 of first 64KB of response body |
+| `resp_body_excerpt` | string | Private, size-bounded redacted response excerpt |
 | `resp_body_length` | int | Length of response body in bytes (0 if empty) |
 | `identity` | string? | Identity used (A, B, or null) |
 | `case_id` | string? | Test case ID this observation belongs to |
@@ -79,7 +81,7 @@ File: `evidence/attempts.jsonl`
 ```json
 {
   "id": "att_d4c3b2a1",
-  "schema_version": 1,
+  "schema_version": 2,
   "ts": "2026-10-26T12:00:01Z",
   "case_id": "f0e1d2c3b4a59687",
   "observation_ids": ["obs_a1b2c3d4"],
@@ -99,7 +101,7 @@ File: `evidence/attempts.jsonl`
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique attempt ID |
-| `schema_version` | int | Always 1 |
+| `schema_version` | int | 2 for new records; version 1 remains readable |
 | `ts` | string | ISO 8601 timestamp |
 | `case_id` | string | Test case this attempt belongs to |
 | `observation_ids` | string[] | HttpObservation IDs backing this attempt |
@@ -161,3 +163,25 @@ Zero real observations = invalid. Agent commentary without transport proof = rej
 ```
 
 Only cases with at least one real HTTP observation (status != 0) appear in coverage.
+
+## Hypothesis and trust-dimensional results
+
+Each dynamic test case may contain `hypothesis_results` in the agent response and a persisted `dimension_results` map in the test plan. Every result names one hypothesis and one applicable trust dimension:
+
+```json
+{
+  "hypothesis": "the parser accepts an unexpected amount representation",
+  "dimension": "input_variation",
+  "status": "disproved",
+  "observation_ids": ["obs_a1b2c3d4"],
+  "evidence": "server rejected the variation with 403"
+}
+```
+
+`testplan.apply_hypothesis_results()` verifies that each ID belongs to the same case and has a nonzero response status. Each hypothesis result must name exactly one dimension; multi-dimension results are blocked rather than reused as blanket coverage. Missing, forged, or cross-case IDs produce a blocked result, never coverage. A blocked result requires a reason. `tested`, `confirmed`, and `disproved` count as resolved; `pending`, `blocked`, `inconclusive`, and `unknown` remain unresolved. A case-level result never closes all dimensions. Old plans without `dimension_results` retain unknown dimensional coverage rather than receiving blanket credit.
+
+Vulnerability-specific skill references follow the same evidence rule: `skill_map.for_hypothesis()` returns methodology before a baseline and unlocks hypothesis-matched references only when supplied valid case-linked observation IDs.
+
+## Function and artifact evidence
+
+`function_profile.py` records protocol, action, resource, actors, inputs, outputs, effects, preconditions, relationships, workflow invariants, sensitivity, provenance, and residuals. `target_adapters.py` can derive these profiles from live HTTP behavior, operation/tool descriptors, infrastructure declarations, desktop and mobile metadata, and contract source. Static artifact profiles remain `inferred`; their matrix passes validate parsing and planning only, not live runtime safety or exploitability. Coverage is reported by source attempts, operations, workflows, independent dimensions, and residuals rather than target or vulnerability categories.

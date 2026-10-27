@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
 """
-discovery.py — exhaustive function/endpoint inventory before any testing.
+discovery.py — iterative function and relationship inventory.
 
-The #1 gap in bug bounty hunting: testing begins before the full surface is mapped.
-This module ensures EVERY function, endpoint, role, and boundary is discovered
-before a single test runs. "No function left behind."
+Safe protocol parsers, browser capture, artifact mining, and live response
+relationships are attempted as available. No schema, target type, or fixed
+category is required. Expansion stops after stable rounds or an explicit
+budget. Validated operations, source attempts, profiles, and unparsed
+residuals stay visible; the output never claims that all functions were found.
 
-Discovery methods (all used, not just one):
-  1. OpenAPI/Swagger schema parsing
-  2. JS bundle mining (routes, API calls, feature flags)
-  3. Browser capture (authenticated SPA XHR/fetch)
-  4. Platform probing (.well-known, robots, actuator, debug)
-  5. Authenticated exploration (walk every role's view)
-  6. GraphQL introspection (full schema)
-  7. Response mining (linked resources, IDs, nested endpoints)
-  8. Error-based discovery (405 methods, partial 404s)
-  9. Documentation/changelog crawl
-  10. Feature-flag enumeration
-
-Outputs:
-  discovery-inventory.json — structured inventory of ALL discovered functions
-  discovery-inventory.md  — human-readable summary
+Outputs: discovery-inventory.json and discovery-inventory.md.
 
 CLI:
   python3 engine/engine/discovery.py discover --slug <program> [--base <dir>]
@@ -40,65 +28,10 @@ sys.path.insert(0, ENGINE)
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
-# Categories of functions to discover — the checklist
-FUNCTION_CATEGORIES = [
-    "ui_features",           # buttons, forms, modals, tabs, workflows
-    "api_endpoints",         # REST, GraphQL, WebSocket, gRPC, internal
-    "user_roles",            # admin, member, viewer, guest, API consumer, service account
-    "auth_mechanisms",       # cookies, JWT, OAuth, API keys, SAML, MFA
-    "org_boundaries",        # orgs, projects, teams, workspaces, permissions
-    "sharing_flows",         # project sharing, transfers, invitations, collaboration
-    "integration_points",    # webhooks, OAuth apps, third-party, imports/exports
-    "storage_operations",    # CRUD on every resource, file upload/download
-    "admin_endpoints",       # actuator, debug, metrics, health, console, internal
-    "billing_flows",         # subscriptions, usage limits, spending controls
-    "credential_management", # API keys, tokens, secrets, connection strings, passwords
-]
+DISCOVERY_STABLE_ROUNDS = 2
+DISCOVERY_MAX_ROUNDS = 6
 
-# Paths that reveal admin/internal/debug surface
-ADMIN_PROBE_PATHS = [
-    "/admin", "/admin/", "/dashboard", "/console", "/internal",
-    "/debug", "/__debug__", "/_debug", "/trace", "/trace.axd",
-    "/actuator", "/actuator/health", "/actuator/env", "/actuator/beans",
-    "/actuator/configprops", "/actuator/mappings", "/actuator/metrics",
-    "/metrics", "/health", "/status", "/info", "/ready", "/live",
-    "/server-status", "/server-info", "/.env", "/.git/HEAD",
-    "/wp-admin", "/wp-login.php", "/elmah.axd",
-    "/graphql", "/graphiql", "/playground", "/altair",
-    "/swagger", "/swagger-ui", "/swagger-ui/", "/api-docs",
-    "/openapi.json", "/openapi.yaml", "/swagger.json", "/swagger.yaml",
-    "/v2/api-docs", "/v3/api-docs",
-    "/api/v1", "/api/v2", "/api/v3", "/api/v4",
-    "/_next/data", "/__nextjs_original-stack-frame",
-    "/rails/info", "/rails/mailers",
-    "/phpinfo.php", "/server-status",
-    "/manage", "/management", "/monitoring",
-]
-
-# API version prefixes to try
-API_PREFIXES = ["/api", "/api/v1", "/api/v2", "/api/v3", "/v1", "/v2", "/v3", "/rest", "/gw"]
-
-# Common resource paths that exist on most web apps
-RESOURCE_PATHS = [
-    "/users", "/accounts", "/organizations", "/orgs", "/teams", "/projects",
-    "/workspaces", "/groups", "/members", "/roles", "/permissions",
-    "/invitations", "/invites", "/transfers", "/sharing",
-    "/settings", "/preferences", "/notifications", "/webhooks",
-    "/integrations", "/connections", "/apps", "/oauth",
-    "/api-keys", "/tokens", "/credentials", "/secrets",
-    "/billing", "/subscriptions", "/invoices", "/payments", "/usage",
-    "/files", "/uploads", "/storage", "/buckets", "/objects",
-    "/databases", "/tables", "/schemas", "/queries",
-    "/functions", "/deployments", "/endpoints", "/domains",
-    "/branches", "/environments", "/releases", "/versions",
-    "/logs", "/audit", "/events", "/activity",
-    "/reports", "/exports", "/imports",
-    "/search", "/filters", "/tags", "/labels",
-    "/comments", "/reviews", "/feedback",
-    "/support", "/tickets",
-]
-
-# HTTP methods to try on discovered endpoints
+# HTTP methods accepted from live Allow/error evidence
 METHODS_TO_PROBE = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 
@@ -169,8 +102,47 @@ def _discover_methods(url, known_method="GET"):
     return sorted(methods)
 
 
+def _parse_openapi(body):
+    try:
+        return json.loads(body)
+    except Exception:
+        try:
+            import yaml
+            value = yaml.safe_load(body)
+            return value if isinstance(value, dict) else None
+        except Exception:
+            return None
+
+
+def _deref(spec, value):
+    if not isinstance(value, dict):
+        return value
+    ref = value.get("$ref")
+    if not ref:
+        return value
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return {}
+    current = spec
+    for part in ref[2:].split("/"):
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(part.replace("~1", "/").replace("~0", "~"), {})
+    return current if isinstance(current, dict) else {}
+
+
+def _template_example(param):
+    for key in ("example", "default"):
+        if param.get(key) not in (None, ""):
+            return str(param[key])
+    schema = param.get("schema") or {}
+    for key in ("example", "default"):
+        if schema.get(key) not in (None, ""):
+            return str(schema[key])
+    return ""
+
+
 def _discover_openapi(scope, log=print):
-    """Parse OpenAPI/Swagger specs for complete endpoint inventory."""
+    """Parse JSON/YAML OpenAPI with local refs and explicit template provenance."""
     endpoints = []
     openapi_paths = [
         "/openapi.json", "/swagger.json", "/api/openapi.json", "/v1/openapi.json",
@@ -183,13 +155,10 @@ def _discover_openapi(scope, log=print):
             host = "https://" + host
         for op_path in openapi_paths:
             code, body = _probe(host + op_path)[:2]
-            if code != 200 or not body.lstrip().startswith("{"):
+            if code != 200:
                 continue
-            try:
-                spec = json.loads(body)
-            except Exception:
-                continue
-            paths = spec.get("paths")
+            spec = _parse_openapi(body)
+            paths = (spec or {}).get("paths")
             if not paths:
                 continue
             title = spec.get("info", {}).get("title", "API")
@@ -202,131 +171,59 @@ def _discover_openapi(scope, log=print):
                 elif srv.startswith("/"):
                     base_url = host + srv.rstrip("/")
 
-            for path, methods in paths.items():
-                for method, op in methods.items():
+            for path, path_item in paths.items():
+                path_item = _deref(spec, path_item)
+                for method, op in path_item.items():
                     if method not in ("get", "post", "put", "patch", "delete", "head", "options"):
                         continue
+                    op = _deref(spec, op)
+                    raw_params = (path_item.get("parameters") or []) + (op.get("parameters") or [])
                     params = []
-                    for p in op.get("parameters", []):
-                        params.append({
-                            "name": p.get("name", ""),
-                            "in": p.get("in", ""),
-                            "required": p.get("required", False),
-                        })
-                    # Also check requestBody for POST/PUT/PATCH
-                    req_body = op.get("requestBody", {})
+                    examples = {}
+                    for raw in raw_params:
+                        p = _deref(spec, raw)
+                        if p.get("schema"):
+                            p["schema"] = _deref(spec, p["schema"])
+                        params.append({"name": p.get("name", ""), "in": p.get("in", ""),
+                                       "required": p.get("required", False)})
+                        if p.get("in") == "path":
+                            examples[p.get("name", "")] = _template_example(p)
+                    concrete_path = path
+                    unresolved = False
+                    for name in re.findall(r"\{([^}]+)\}", path):
+                        value = examples.get(name, "")
+                        if value:
+                            concrete_path = concrete_path.replace("{" + name + "}", value)
+                        else:
+                            unresolved = True
+                    req_body = _deref(spec, op.get("requestBody", {}))
                     body_params = []
-                    if req_body:
-                        content = req_body.get("content", {})
-                        for ct, schema_ref in content.items():
-                            schema = schema_ref.get("schema", {})
-                            if schema.get("properties"):
-                                for pname, pschema in schema["properties"].items():
-                                    body_params.append({
-                                        "name": pname,
-                                        "in": "body",
-                                        "type": pschema.get("type", ""),
-                                        "required": pname in (schema.get("required") or []),
-                                    })
-
-                    secured = bool(op.get("security") or spec.get("security"))
+                    for _ct, media in (req_body.get("content") or {}).items():
+                        schema = _deref(spec, (media or {}).get("schema", {}))
+                        for pname, raw_schema in (schema.get("properties") or {}).items():
+                            pschema = _deref(spec, raw_schema)
+                            body_params.append({"name": pname, "in": "body",
+                                                "type": pschema.get("type", ""),
+                                                "required": pname in (schema.get("required") or [])})
+                    secured = bool(op["security"]) if "security" in op else bool(spec.get("security"))
                     tags = op.get("tags", [])
                     summary = op.get("summary", "") or op.get("description", "")
-
+                    url = base_url + concrete_path
+                    if not scope.in_scope_host(url):
+                        continue
                     endpoints.append({
-                        "url": base_url + path,
-                        "method": method.upper(),
-                        "params": params,
-                        "body_params": body_params,
-                        "auth_required": secured,
-                        "tags": tags,
-                        "summary": summary[:200],
-                        "source": "openapi",
-                        "confidence": "high",
-                        "provenance": "documented",
+                        "url": url, "method": method.upper(), "params": params,
+                        "body_params": body_params, "auth_required": secured,
+                        "tags": tags, "summary": summary[:200], "source": "openapi",
+                        "confidence": "low" if unresolved else "high",
+                        "provenance": "documented_template" if unresolved else "documented",
+                        "unresolved_template": unresolved,
                         "category": _categorize_endpoint(path, method, tags, summary),
                     })
-
             log(f"discovery/openapi: {host}{op_path} → '{title}', {len(paths)} path(s), "
                 f"{len(endpoints)} endpoint(s) with full parameter info")
             break
     return endpoints
-
-
-def _discover_admin_internal(scope, log=print):
-    """Probe for admin, debug, internal, and monitoring endpoints."""
-    found = []
-    for seed in scope.seeds:
-        u = urlparse(seed if "://" in seed else "https://" + seed)
-        base = f"{u.scheme or 'https'}://{u.hostname}" + (f":{u.port}" if u.port else "")
-        for path in ADMIN_PROBE_PATHS:
-            code, body, headers = _probe(base + path)
-            if code and 200 <= code < 400 and code != 404:
-                content_type = (headers.get("content-type") or "").lower()
-                is_html_shell = bool(re.search(r'<!doctype html|<html[\s>]', (body or "")[:400], re.I))
-                # Skip SPA catch-all HTML shells
-                if is_html_shell and "json" not in content_type and path not in ("/admin", "/dashboard", "/console"):
-                    continue
-                found.append({
-                    "url": base + path,
-                    "method": "GET",
-                    "status": code,
-                    "source": "admin-probe",
-                    "confidence": "low",
-                    "provenance": "guessed_common_path",
-                    "category": "admin_endpoints",
-                    "content_type": content_type[:100],
-                })
-        log(f"discovery/admin: probed {len(ADMIN_PROBE_PATHS)} paths on {base}, "
-            f"{len(found)} live admin/internal endpoint(s)")
-    return found
-
-
-def _discover_api_resources(scope, log=print):
-    """Systematically probe common resource paths under each API prefix."""
-    found = []
-    for seed in scope.seeds:
-        u = urlparse(seed if "://" in seed else "https://" + seed)
-        base = f"{u.scheme or 'https'}://{u.hostname}" + (f":{u.port}" if u.port else "")
-        probed = 0
-        for prefix in API_PREFIXES:
-            for resource in RESOURCE_PATHS:
-                url = base + prefix + resource
-                code, body, headers = _probe(url)
-                probed += 1
-                if not code or code in (404, 410, 405, 502, 503):
-                    continue
-                # Skip SPA catch-all
-                if code == 200 and not _is_json(body) and re.search(
-                        r'<!doctype html|<html[\s>]', (body or "")[:400], re.I):
-                    continue
-                content_type = (headers.get("content-type") or "").lower()
-                found.append({
-                    "url": url,
-                    "method": "GET",
-                    "status": code,
-                    "source": "resource-probe",
-                    "confidence": "low",
-                    "provenance": "guessed_common_path",
-                    "category": _categorize_resource(resource),
-                    "content_type": content_type[:100],
-                    "has_data": bool(body and len(body) > 2 and body.strip() not in ("[]", "{}", "null", "")),
-                })
-                # Mine links from JSON responses
-                if _is_json(body) and scope:
-                    for linked in _extract_links_from_json(body, url, scope):
-                        if linked not in {f["url"] for f in found}:
-                            found.append({
-                                "url": linked,
-                                "method": "GET",
-                                "source": "response-mining",
-                                "confidence": "high",
-                                "provenance": "observed_in_live_traffic",
-                                "category": _categorize_endpoint(urlparse(linked).path, "get", [], ""),
-                            })
-        log(f"discovery/resources: probed {probed} resource paths on {base}, "
-            f"{len(found)} live endpoint(s)")
-    return found
 
 
 def _discover_error_based(scope, found_endpoints, log=print, allow_intrusive=False):
@@ -403,7 +300,7 @@ def _discover_browser_capture(scope, slug, base, log=print):
     except ImportError:
         log("discovery/browser: browser.py not available — skipping SPA capture")
         return found
-    for seed in scope.seeds:
+    for seed in scope.seeds[:3]:
         host = seed.rstrip("/")
         if "://" not in host:
             host = "https://" + host
@@ -433,7 +330,6 @@ def _discover_browser_capture(scope, slug, base, log=print):
                 log(f"discovery/browser: captured {len(caps or [])} endpoints as {ident} from {host}")
             except Exception as e:
                 log(f"discovery/browser: capture failed as {ident} ({type(e).__name__}: {e})")
-        break  # Only try one seed
     return found
 
 
@@ -476,37 +372,159 @@ def _discover_graphql(scope, log=print):
     return found
 
 
-def _categorize_endpoint(path, method, tags, summary):
-    """Categorize an endpoint into one of the function categories."""
-    p = (path or "").lower()
-    s = (summary or "").lower()
-    tag_str = " ".join(t.lower() for t in (tags or []))
-    combined = p + " " + s + " " + tag_str
+def _observation_operations(value, base_url, scope, inherited=None, depth=0):
+    """Turn nested response relationships into operations without interpreting their names."""
+    if depth > 10:
+        return []
+    inherited = dict(inherited or {})
+    operations = []
+    if isinstance(value, list):
+        for item in value[:100]:
+            operations.extend(_observation_operations(item, base_url, scope, inherited, depth + 1))
+        return operations
+    if not isinstance(value, dict):
+        return operations
+    context = dict(inherited)
+    for key in ("function", "protocol", "owner", "tenant", "role", "effects", "preconditions",
+                "relationships", "logic_invariants", "sensitivity"):
+        if key in value:
+            context[key] = value[key]
+    for key, item in value.items():
+        if not isinstance(item, str) or not item.startswith(("/", "http://", "https://")):
+            continue
+        linked = urljoin(base_url, item)
+        if not scope.in_scope_host(linked):
+            continue
+        method = str(value.get("method") or "GET").upper()
+        if method not in METHODS_TO_PROBE:
+            method = "GET"
+        operation = dict(context, url=linked, method=method, source="adaptive-response",
+                         confidence="high" if "method" in value else "medium",
+                         provenance="documented" if "method" in value else "relationship_lead")
+        raw_inputs = value.get("input") or value.get("inputs") or value.get("params") or {}
+        if isinstance(raw_inputs, dict):
+            raw_inputs = [dict(spec, name=name) if isinstance(spec, dict) else
+                          {"name": name, "type": str(spec)} for name, spec in raw_inputs.items()]
+        operation["body_params" if method != "GET" else "params"] = raw_inputs
+        operations.append(operation)
+    for item in value.values():
+        if isinstance(item, (dict, list)):
+            operations.extend(_observation_operations(item, base_url, scope, context, depth + 1))
+    return operations
 
-    if any(k in combined for k in ("admin", "manage", "internal", "debug", "actuator", "metrics")):
-        return "admin_endpoints"
-    if any(k in combined for k in ("auth", "login", "signin", "signup", "register", "oauth", "token", "session", "sso", "saml", "mfa", "2fa", "password", "reset")):
-        return "auth_mechanisms"
-    if any(k in combined for k in ("org", "organization", "team", "workspace", "member", "role", "permission", "group")):
-        return "org_boundaries"
-    if any(k in combined for k in ("share", "transfer", "invite", "invitation", "collaborat")):
-        return "sharing_flows"
-    if any(k in combined for k in ("webhook", "integration", "connect", "import", "export", "oauth/app")):
-        return "integration_points"
-    if any(k in combined for k in ("file", "upload", "storage", "bucket", "object", "download", "attachment")):
-        return "storage_operations"
-    if any(k in combined for k in ("billing", "subscription", "invoice", "payment", "usage", "spending", "plan", "pricing")):
-        return "billing_flows"
-    if any(k in combined for k in ("key", "token", "credential", "secret", "connection_uri", "password")):
-        return "credential_management"
-    if any(k in combined for k in ("user", "account", "profile", "setting", "preference", "notification")):
-        return "user_roles"
-    return "api_endpoints"
+
+def _html_operations(body, base_url, scope):
+    """Retain navigations, form actions, methods, and fields from arbitrary HTML."""
+    from html.parser import HTMLParser
+
+    class Parser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.references = []
+            self.forms = []
+            self.form = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form":
+                self.form = {"action": attrs.get("action", ""), "method": attrs.get("method", "GET"), "inputs": []}
+            elif tag in ("input", "select", "textarea") and self.form is not None and attrs.get("name"):
+                self.form["inputs"].append({"name": attrs["name"], "type": attrs.get("type", "scalar")})
+            elif tag in ("a", "link", "script", "img"):
+                target = attrs.get("href") or attrs.get("src")
+                if target:
+                    self.references.append(target)
+
+        def handle_endtag(self, tag):
+            if tag == "form" and self.form is not None:
+                self.forms.append(self.form)
+                self.form = None
+
+    parser = Parser()
+    try:
+        parser.feed(body or "")
+    except Exception:
+        return []
+    operations = []
+    for reference in parser.references:
+        linked = urljoin(base_url, reference)
+        if scope.in_scope_host(linked):
+            operations.append({"url": linked, "method": "GET", "source": "adaptive-html",
+                               "confidence": "medium", "provenance": "relationship_lead"})
+    for form in parser.forms:
+        linked = urljoin(base_url, form["action"] or base_url)
+        method = str(form["method"] or "GET").upper()
+        if method not in METHODS_TO_PROBE or not scope.in_scope_host(linked):
+            continue
+        operations.append({"url": linked, "method": method, "source": "adaptive-form",
+                           "confidence": "high", "provenance": "documented",
+                           "params" if method == "GET" else "body_params": form["inputs"]})
+    return operations
+
+
+def _discover_adaptive(scope, found_endpoints, log=print):
+    """Expand relationships, operations, forms, events, and behavior in live responses."""
+    discovered = []
+    seen = {(ep.get("method", "GET"), ep.get("url", ""),
+             json.dumps(ep.get("params") or [], sort_keys=True, default=str)) for ep in found_endpoints}
+    candidates = [ep for ep in found_endpoints if ep.get("url") and "{" not in ep["url"]][:60]
+    for ep in candidates:
+        url = ep["url"]
+        code, body, headers = _probe(url)
+        if not code:
+            continue
+        if code < 400:
+            ep["status"] = code
+            ep["confidence"] = "high"
+            ep["provenance"] = "confirmed_live"
+        allow = headers.get("allow", "") or headers.get("Allow", "")
+        for method in re.split(r"[,\s]+", allow):
+            method = method.strip().upper()
+            if method in METHODS_TO_PROBE and (method, url) not in {(d.get("method"), d.get("url")) for d in discovered}:
+                discovered.append({"url": url, "method": method, "status": code,
+                                   "source": "adaptive-allow", "confidence": "high",
+                                   "provenance": "confirmed_live", "category": "observed_operation"})
+        content_type = str(headers.get("content-type", "") or headers.get("Content-Type", "")).lower()
+        observed = []
+        if _is_json(body):
+            try:
+                observed = _observation_operations(json.loads(body), url, scope)
+            except json.JSONDecodeError:
+                observed = []
+        elif "text/event-stream" in content_type:
+            ep["protocol"] = "event-stream"
+            for line in (body or "").splitlines():
+                if line.startswith("data:") and _is_json(line[5:]):
+                    try:
+                        observed.extend(_observation_operations(json.loads(line[5:].strip()), url, scope))
+                    except json.JSONDecodeError:
+                        continue
+        elif "html" in content_type or "<html" in (body or "")[:1000].lower() or "<form" in (body or "").lower():
+            observed = _html_operations(body, url, scope)
+        for header in ("link", "location"):
+            value = headers.get(header, "") or headers.get(header.title(), "")
+            for match in re.finditer(r"<([^>]+)>|^(?!.*<)(https?://\S+|/\S*)", value):
+                linked = urljoin(url, match.group(1))
+                if scope.in_scope_host(linked):
+                    observed.append({"url": linked, "method": "GET", "source": "adaptive-header",
+                                     "confidence": "medium", "provenance": "relationship_lead"})
+        for operation in observed:
+            key = (operation.get("method", "GET"), operation.get("url", ""),
+                   json.dumps(operation.get("params") or operation.get("body_params") or [], sort_keys=True, default=str))
+            if operation.get("url") and key not in seen:
+                seen.add(key)
+                discovered.append(operation)
+    log(f"discovery/adaptive: {len(discovered)} operation(s) from live response relationships")
+    return discovered
+
+
+def _categorize_endpoint(path, method, tags, summary):
+    """Compatibility value only; no functional category is inferred from a name."""
+    return "observed_operation"
 
 
 def _categorize_resource(resource_path):
-    """Categorize a resource path."""
-    return _categorize_endpoint(resource_path, "get", [], "")
+    return "observed_operation"
 
 
 def _discover_js_bundles(scope, log=print):
@@ -562,71 +580,62 @@ def _discover_js_bundles(scope, log=print):
     return endpoints
 
 
-def _compute_coverage(inventory):
-    """Compute discovery coverage from endpoint depth, with category breadth as a bonus.
+def _compute_coverage(inventory, not_applicable=None):
+    """Measure observed operations and residuals; there is no category completeness checklist."""
+    provenance_ok = {"observed_in_live_traffic", "documented", "confirmed_live", "observed"}
 
-    The primary signal is endpoint depth — how many distinct endpoints were found
-    relative to the minimum threshold. Category breadth adds up to 10% bonus to
-    reward diverse discovery, but a pure API with 300 endpoints and only 2 categories
-    is NOT penalized.
+    def validated(ep):
+        return (ep.get("provenance") in provenance_ok or
+                ep.get("confidence") in ("high", "observed", "documented"))
 
-    When fewer than 5 endpoints exist and fewer than 2 categories, coverage is
-    reported as unknown rather than a fictional percentage.
-    """
-    coverage = {}
-    for cat in FUNCTION_CATEGORIES:
-        items = [ep for ep in inventory if ep.get("category") == cat]
-        coverage[cat] = {
-            "count": len(items),
-            "endpoints": [ep.get("url", "") for ep in items[:10]],
-            "covered": len(items) > 0,
-        }
-    total_cats = len(FUNCTION_CATEGORIES)
-    covered_cats = sum(1 for c in coverage.values() if c["covered"])
-    total_eps = len(inventory)
-    uncovered = [cat for cat in FUNCTION_CATEGORIES if not coverage.get(cat, {}).get("covered")]
-    blind_spots = len(uncovered)
-
-    # Source provenance breakdown
+    valid = [ep for ep in inventory if validated(ep)]
     sources = {}
+    confidence_counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
     for ep in inventory:
         src = ep.get("source", "unknown")
         sources[src] = sources.get(src, 0) + 1
-
-    # Confidence breakdown
-    confidence_counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
-    for ep in inventory:
-        c = ep.get("confidence", "unknown")
-        confidence_counts[c] = confidence_counts.get(c, 0) + 1
-
-    # Coverage formula: endpoint depth is primary (90%), category breadth is bonus (10%)
-    min_eps = max(1, int(os.environ.get("HUNT_MIN_DISCOVERY_ENDPOINTS", "15")))
-    coverage_unknown = total_eps < 5 and covered_cats < 2
-
-    if coverage_unknown:
-        coverage_pct = 0.0
-    else:
-        depth_score = min(100.0, 100.0 * total_eps / min_eps)
-        breadth_bonus = 10.0 * (covered_cats / total_cats) if total_cats else 0.0
-        coverage_pct = round(min(100.0, 0.9 * depth_score + breadth_bonus), 1)
-
-    coverage["_summary"] = {
-        "total_categories": total_cats,
-        "covered_categories": covered_cats,
-        "coverage_pct": coverage_pct,
-        "coverage_unknown": coverage_unknown,
-        "total_endpoints": total_eps,
-        "blind_spots": blind_spots,
-        "uncovered_categories": uncovered,
+        confidence = ep.get("confidence", "unknown")
+        confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
+    dimensions = {}
+    unprofiled = 0
+    import target_adapters as TA
+    profiles = TA.http_profiles(valid)
+    profiled_ids = set()
+    for profile in profiles:
+        profiled_ids.add(profile.get("profile_id"))
+        for dimension in profile.get("trust_dimensions") or []:
+            dimensions[dimension] = dimensions.get(dimension, 0) + 1
+    unprofiled = max(0, len(valid) - len(profiles))
+    residuals = [{"url": ep.get("url", ""), "reason": "unvalidated_lead"}
+                 for ep in inventory if ep not in valid]
+    residuals += [{"url": ep.get("url", ""), "reason": "unresolved_template"}
+                  for ep in valid if ep.get("unresolved_template") or "{" in (ep.get("url") or "")]
+    summary = {
+        "discovery_ready": bool(valid),
+        "coverage_unknown": not valid,
+        "total_endpoints": len(inventory),
+        "validated_endpoints": len(valid),
+        "lead_endpoints": len(inventory) - len(valid),
+        "validated_operation_pct": round(100 * len(valid) / max(len(inventory), 1), 1),
+        "profile_count": len(profiles),
+        "unprofiled_operations": unprofiled,
+        "trust_dimensions": dimensions,
+        "residuals": residuals,
+        "residual_count": len(residuals),
+        "blind_spots": len(residuals) + unprofiled,
         "coverage_sources": sources,
         "confidence_breakdown": confidence_counts,
+        "total_categories": 0,
+        "covered_categories": 0,
+        "not_applicable_categories": 0,
+        "coverage_pct": round(100 * len(valid) / max(len(inventory), 1), 1),
+        "uncovered_categories": [],
     }
-    return coverage
+    return {"_summary": summary, "function_profiles": profiles}
 
 
 def _detect_program_type(scope, log=print):
-    """Detect target type from live responses — adapts discovery methods.
-    Returns dict with type, traits, and recommended method priority."""
+    """Observe representation capabilities without assigning a product or target type."""
     seeds = getattr(scope, "seeds", []) or (scope.get("seeds", []) if isinstance(scope, dict) else [])
     traits = set()
     seed_responses = {}
@@ -639,85 +648,44 @@ def _detect_program_type(scope, log=print):
         except Exception:
             continue
 
-        hdr_str = " ".join(f"{k}: {v}" for k, v in (hdrs or {}).items()).lower()
-        body_lower = (body or "")[:10000].lower()
+        content_type = str((hdrs or {}).get("content-type", "") or (hdrs or {}).get("Content-Type", "")).lower()
 
-        if re.search(r"graphql|__typename|\/graphql", body_lower + hdr_str):
-            traits.add("graphql")
-        if re.search(r"__remixContext|x-remix|remix", body_lower + hdr_str):
-            traits.add("spa")
-            traits.add("remix")
-        if re.search(r"__NEXT_DATA__|_next/static", body_lower):
-            traits.add("spa")
-            traits.add("nextjs")
-        if re.search(r"react|vue|angular|ember|svelte", body_lower):
-            traits.add("spa")
-        if re.search(r"swagger|openapi|api-docs|swagger\.json", body_lower + hdr_str):
-            traits.add("has_openapi")
-        if re.search(r"application/json|content-type.*json", hdr_str):
-            traits.add("api_first")
-        if re.search(r"grpc|protobuf|application/grpc", body_lower + hdr_str):
-            traits.add("grpc")
-        if re.search(r"<html|<body|text/html", body_lower + hdr_str):
-            traits.add("web")
-        if re.search(r"wss?://|websocket|upgrade.*websocket", body_lower + hdr_str):
-            traits.add("websocket")
-        if re.search(r"/api/v\d|/rest/|/v\d/", body_lower):
-            traits.add("versioned_api")
-        if re.search(r"mobile|android|ios|app-version|x-app-id", hdr_str):
-            traits.add("mobile_api")
-        if re.search(r"wp-content|wordpress|wp-json", body_lower + hdr_str):
-            traits.add("wordpress")
-        if re.search(r"rails|x-runtime|turbo-frame", hdr_str):
-            traits.add("rails")
-        if re.search(r"django|csrfmiddleware", body_lower + hdr_str):
-            traits.add("django")
-        if re.search(r"x-powered-by.*express|x-powered-by.*next", hdr_str):
-            traits.add("nodejs")
 
-    # Classify from traits — one label for logging/metadata, NOT for branching logic
-    has_web = "web" in traits or "spa" in traits
-    has_api = "api_first" in traits or "versioned_api" in traits
-    ptype = ("spa_webapp" if "spa" in traits
-             else "pure_api" if has_api and not has_web
-             else "traditional_webapp" if has_web
-             else "unknown")
+        if "html" in content_type or re.search(r"<html|<body|<form", body or "", re.I):
+            traits.add("markup")
+        if re.search(r"<script|fetch\s*\(|xmlhttprequest|websocket\s*\(", body or "", re.I):
+            traits.add("executable_client")
+        if "json" in content_type or _is_json(body):
+            traits.add("structured_data")
+            try:
+                document = json.loads(body)
+                if isinstance(document, dict) and isinstance(document.get("paths"), dict):
+                    traits.add("operation_document")
+                if isinstance(document, dict) and ("__schema" in body or "__typename" in body):
+                    traits.add("schema_capable_operation")
+            except json.JSONDecodeError:
+                traits.add("unparsed_structured_data")
+        if "text/event-stream" in content_type:
+            traits.add("event_data")
 
-    # Method priority — trait-driven, not type-driven. Each detected trait boosts
-    # the methods most useful for it. No trait = balanced defaults.
-    method_priority = {
-        "openapi": 80,
-        "admin_probe": 50,
-        "resource_probe": 60,
-        "error_discovery": 40,
-        "response_mining": 55,
-        "browser_capture": 30,
-        "graphql": 20,
-        "js_bundle": 35,
-    }
-    # Trait-driven boosts — each observed trait raises the methods that work best
-    _TRAIT_BOOSTS = {
-        "has_openapi":   {"openapi": 95},
-        "spa":           {"js_bundle": 90, "browser_capture": 85},
-        "graphql":       {"graphql": 95},
-        "api_first":     {"openapi": 95, "resource_probe": 85, "browser_capture": 10},
-        "versioned_api": {"resource_probe": 85, "openapi": 90},
-        "mobile_api":    {"openapi": 90, "resource_probe": 85, "browser_capture": 10, "js_bundle": 10},
-        "grpc":          {"resource_probe": 85, "browser_capture": 10, "js_bundle": 10},
-        "websocket":     {"browser_capture": 85},
-    }
-    for trait in traits:
-        for method, prio in _TRAIT_BOOSTS.get(trait, {}).items():
-            if prio > method_priority.get(method, 0):
-                method_priority[method] = prio
 
-    log(f"discovery: detected program type={ptype}, traits={sorted(traits)}")
-    return {
-        "type": ptype,
-        "traits": sorted(traits),
-        "method_priority": method_priority,
-        "seed_responses": seed_responses,
-    }
+    method_priority = {"openapi": 20, "adaptive": 60, "error_discovery": 40,
+                       "response_mining": 55, "browser_capture": 30, "graphql": 20, "js_bundle": 35}
+    if "markup" in traits:
+        method_priority["browser_capture"] = 80
+    if "executable_client" in traits:
+        method_priority.update(js_bundle=85, browser_capture=85)
+    if "structured_data" in traits:
+        method_priority.update(adaptive=85, response_mining=80)
+    if "operation_document" in traits:
+        method_priority["openapi"] = 95
+    if "schema_capable_operation" in traits:
+        method_priority["graphql"] = 90
+    if "event_data" in traits:
+        method_priority["adaptive"] = 90
+    log(f"discovery: observed response capabilities={sorted(traits)}")
+    return {"type": "observed", "traits": sorted(traits),
+            "method_priority": method_priority, "seed_responses": seed_responses}
 
 
 def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
@@ -725,7 +693,7 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     # Scope guard — ensures netget enforces scope even when called from CLI
     try:
         import netget
-        netget.set_scope_guard(scope)
+        netget.set_scope_guard(scope, allow_intrusive=allow_intrusive)
     except Exception:
         pass
 
@@ -741,61 +709,76 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     traits = prog_info["traits"]
     priorities = prog_info["method_priority"]
 
-    inventory = []
-    source_counts = {}
-
-    # Run discovery methods ordered by priority (highest first)
+    inventory = [{"url": url, "method": "GET", "status": response[0], "source": "seed-observation",
+                  "confidence": "high", "provenance": "confirmed_live"}
+                 for url, response in prog_info.get("seed_responses", {}).items()
+                 if response[0] and response[0] < 400 and scope.in_scope_host(url)]
+    source_counts = {"seed_observation": len(inventory)}
     methods = [
         ("openapi", _discover_openapi),
-        ("admin_probe", _discover_admin_internal),
-        ("resource_probe", _discover_api_resources),
         ("js_bundle", _discover_js_bundles),
         ("browser_capture", lambda s, **kw: _discover_browser_capture(s, slug, base, **kw)),
         ("graphql", _discover_graphql),
     ]
-    methods.sort(key=lambda m: priorities.get(m[0], 50), reverse=True)
-
+    methods.sort(key=lambda method: priorities.get(method[0], 50), reverse=True)
+    source_status = {}
     for method_name, method_fn in methods:
-        if priorities.get(method_name, 50) < 10:
-            log(f"discovery/{method_name}: skipped (low priority for {ptype})")
-            source_counts[method_name] = 0
-            continue
         try:
             eps = method_fn(scope, log=log)
             inventory.extend(eps)
-            source_counts[method_name] = len(eps)
-            if eps:
-                log(f"discovery/{method_name}: found {len(eps)} endpoint(s)")
-        except Exception as e:
-            log(f"discovery/{method_name}: failed ({type(e).__name__}: {e})")
-            source_counts[method_name] = 0
+            source_counts[method_name] = source_counts.get(method_name, 0) + len(eps)
+            source_status[method_name] = "completed"
+        except ImportError as exc:
+            source_status[method_name] = "unavailable"
+            log(f"discovery/{method_name}: unavailable ({exc})")
+        except Exception as exc:
+            source_counts.setdefault(method_name, 0)
+            source_status[method_name] = "failed"
+            log(f"discovery/{method_name}: failed ({type(exc).__name__}: {exc})")
 
-    # Always run error-based and response-mining as they build on earlier results
-    try:
-        error_eps = _discover_error_based(scope, inventory, log=log, allow_intrusive=allow_intrusive)
-        inventory.extend(error_eps)
-        source_counts["error_discovery"] = len(error_eps)
-    except Exception as e:
-        log(f"discovery/error_discovery: failed ({type(e).__name__}: {e})")
-        source_counts["error_discovery"] = 0
+    def operation_keys(items):
+        return {(ep.get("method", "GET"), ep.get("url", ""),
+                 json.dumps(ep.get("params") or [], sort_keys=True, default=str))
+                for ep in items if ep.get("url")}
 
-    try:
-        response_eps = _discover_from_responses(scope, inventory, log=log)
-        inventory.extend(response_eps)
-        source_counts["response_mining"] = len(response_eps)
-    except Exception as e:
-        log(f"discovery/response_mining: failed ({type(e).__name__}: {e})")
-        source_counts["response_mining"] = 0
-
-    # Dedup by (url, method)
-    seen = set()
-    deduped = []
-    for ep in inventory:
-        key = (ep.get("url", ""), ep.get("method", "GET"))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(ep)
-    inventory = deduped
+    stable_rounds = 0
+    rounds = 0
+    max_rounds = int(os.environ.get("HUNT_DISCOVERY_MAX_ROUNDS", str(DISCOVERY_MAX_ROUNDS)))
+    budget_s = int(os.environ.get("HUNT_DISCOVERY_BUDGET_SEC", "300"))
+    convergence = "stable"
+    for rounds in range(1, max_rounds + 1):
+        if time.time() - t0 >= budget_s:
+            convergence = "budget"
+            break
+        before = operation_keys(inventory)
+        for method_name, probe in (
+                ("adaptive", lambda: _discover_adaptive(scope, inventory, log=log)),
+                ("error_discovery", lambda: _discover_error_based(scope, inventory, log=log, allow_intrusive=allow_intrusive)),
+                ("response_mining", lambda: _discover_from_responses(scope, inventory, log=log))):
+            try:
+                eps = probe()
+                inventory.extend(eps)
+                source_counts[method_name] = source_counts.get(method_name, 0) + len(eps)
+                source_status[method_name] = "completed"
+            except Exception as exc:
+                source_status[method_name] = "failed"
+                log(f"discovery/{method_name}: failed ({type(exc).__name__}: {exc})")
+        seen = set()
+        deduped = []
+        for ep in inventory:
+            key = (ep.get("url", ""), ep.get("method", "GET"),
+                   json.dumps(ep.get("params") or [], sort_keys=True, default=str))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(ep)
+        inventory = deduped
+        added = len(operation_keys(inventory) - before)
+        stable_rounds = stable_rounds + 1 if added == 0 else 0
+        log(f"discovery/convergence: round={rounds} new_operations={added} stable_rounds={stable_rounds}")
+        if stable_rounds >= DISCOVERY_STABLE_ROUNDS:
+            break
+    else:
+        convergence = "round_limit"
 
     # Auto-detect technologies from seed responses
     detected_tech = set()
@@ -818,8 +801,14 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     except ImportError:
         pass
 
-    # Compute coverage
-    coverage = _compute_coverage(inventory)
+    coverage = _compute_coverage(inventory, getattr(scope, "discovery_not_applicable", {}))
+    coverage["_summary"].update({
+        "required_methods": [], "failed_required_methods": [],
+        "source_status": source_status, "convergence": convergence,
+        "discovery_rounds": rounds, "stable_rounds": stable_rounds,
+        "failed_sources": sorted(name for name, status in source_status.items() if status == "failed"),
+        "unavailable_sources": sorted(name for name, status in source_status.items() if status == "unavailable"),
+    })
     elapsed = round(time.time() - t0, 1)
 
     result = {
@@ -832,6 +821,9 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
         "coverage": coverage,
         "detected_tech": sorted(detected_tech),
         "sources": source_counts,
+        "source_status": source_status,
+        "convergence": convergence,
+        "discovery_rounds": rounds,
     }
 
     # Write artifacts
@@ -845,19 +837,14 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     log(f"discovery: wrote {md_path}")
 
     summary = coverage["_summary"]
-    log(f"discovery: DONE in {elapsed}s — {summary['total_endpoints']} endpoint(s), "
-        f"{summary['covered_categories']}/{summary['total_categories']} categories covered "
-        f"({summary['coverage_pct']}%)")
+    log(f"discovery: DONE in {elapsed}s — {summary['validated_endpoints']} validated operation(s), "
+        f"{summary['profile_count']} profile(s), {summary['residual_count']} residual(s), "
+        f"convergence={convergence}, rounds={rounds}")
 
-    # Coverage gate
-    if summary["coverage_pct"] < 80:
-        log(f"discovery: GATE FAIL — coverage {summary['coverage_pct']}% < 80% threshold. "
-            "Hunt phase will BLOCK until coverage improves. "
-            "Try: authenticated browser exploration, documentation crawl, or JS bundle mining.")
-        uncovered = [cat for cat, data in coverage.items()
-                     if cat != "_summary" and not data.get("covered")]
-        if uncovered:
-            log(f"discovery: uncovered categories: {', '.join(uncovered)}")
+    if not summary["discovery_ready"]:
+        log("discovery: GATE FAIL — no validated operation. Guessed paths remain leads; hunting stays blocked.")
+    elif summary["residual_count"] or summary["failed_sources"] or summary["unavailable_sources"]:
+        log("discovery: PARTIAL — residuals, failed sources, or unavailable capabilities remain visible")
 
     return result
 
@@ -870,56 +857,34 @@ def _write_markdown(result, path):
     sources = result.get("sources", {})
 
     lines = [
-        f"# Discovery Inventory — {result.get('slug', '?')}",
-        f"",
+        f"# Discovery Inventory — {result.get('slug', '?')}", "",
         f"**Time:** {result.get('timestamp', '?')} ({result.get('elapsed_seconds', '?')}s)",
-        f"**Total endpoints:** {summary.get('total_endpoints', 0)}",
-        f"**Category coverage:** {summary.get('covered_categories', 0)}/{summary.get('total_categories', 0)} "
-        f"({summary.get('coverage_pct', 0)}%)",
-        f"",
-        f"## Sources",
-        f"",
+        f"**Validated operations:** {summary.get('validated_endpoints', 0)}",
+        f"**Function profiles:** {summary.get('profile_count', 0)}",
+        f"**Convergence:** {result.get('convergence', '?')} after {result.get('discovery_rounds', 0)} round(s)",
+        f"**Residuals:** {summary.get('residual_count', 0)}", "",
+        "## Source attempts", "",
     ]
-    for src, count in sorted(sources.items(), key=lambda x: -x[1]):
-        lines.append(f"- **{src}:** {count} endpoint(s)")
-    lines.append("")
-
-    lines.append("## Coverage by Category")
-    lines.append("")
-    for cat in FUNCTION_CATEGORIES:
-        data = cov.get(cat, {})
-        status = "covered" if data.get("covered") else "MISSING"
-        count = data.get("count", 0)
-        lines.append(f"- **{cat}:** {count} endpoint(s) [{status}]")
-    lines.append("")
-
-    # Group endpoints by category
-    by_cat = {}
+    statuses = result.get("source_status") or {}
+    for src in sorted(set(sources) | set(statuses)):
+        lines.append(f"- **{src}:** {sources.get(src, 0)} operation(s) [{statuses.get(src, 'unknown')}]")
+    lines += ["", "## Trust dimensions", ""]
+    for name, count in sorted((summary.get("trust_dimensions") or {}).items()):
+        lines.append(f"- **{name}:** {count} profile(s)")
+    lines += ["", "## Residuals", ""]
+    for residual in summary.get("residuals") or []:
+        lines.append(f"- `{residual.get('url', '')}` — {residual.get('reason', 'unparsed')}")
+    lines += ["", "## Operations", ""]
     for ep in inv:
-        cat = ep.get("category", "api_endpoints")
-        by_cat.setdefault(cat, []).append(ep)
-
-    for cat in FUNCTION_CATEGORIES:
-        eps = by_cat.get(cat, [])
-        if not eps:
-            continue
-        lines.append(f"## {cat} ({len(eps)} endpoint(s))")
-        lines.append("")
-        for ep in eps[:50]:
-            method = ep.get("method", "GET")
-            url = ep.get("url", "")
-            src = ep.get("source", "")
-            note = ep.get("summary", "") or ep.get("note", "")
-            line = f"- `{method}` `{url}`"
-            if note:
-                line += f" — {note[:100]}"
-            if src:
-                line += f" _{src}_"
-            lines.append(line)
-        if len(eps) > 50:
-            lines.append(f"- ... and {len(eps) - 50} more")
-        lines.append("")
-
+        method = ep.get("method", "GET")
+        url = ep.get("url", "")
+        note = ep.get("summary", "") or ep.get("note", "")
+        line = f"- `{method}` `{url}`"
+        if note:
+            line += f" — {note[:100]}"
+        if ep.get("source"):
+            line += f" _{ep['source']}_"
+        lines.append(line)
     with open(path, "w") as f:
         f.write("\n".join(lines))
 
@@ -974,33 +939,17 @@ def inventory_to_surface(inventory_data):
             item["confidence"] = ep["confidence"]
         if ep.get("provenance"):
             item["provenance"] = ep["provenance"]
+        if ep.get("unresolved_template"):
+            item["unresolved_template"] = True
+            item["blocked_reason"] = "unresolved_path_template"
         items.append(item)
     return items
 
 
 def _discovery_priority(ep):
-    """Assign priority based on category and characteristics."""
-    cat = ep.get("category", "api_endpoints")
-    base = 50
-    # High-value categories get a boost
-    boosts = {
-        "credential_management": 40,
-        "admin_endpoints": 35,
-        "org_boundaries": 30,
-        "sharing_flows": 30,
-        "auth_mechanisms": 25,
-        "billing_flows": 25,
-        "storage_operations": 20,
-        "integration_points": 20,
-    }
-    base += boosts.get(cat, 10)
-    if ep.get("auth_required"):
-        base += 15
-    if ep.get("body_params"):
-        base += 10
-    if ep.get("method", "GET") in ("POST", "PUT", "PATCH", "DELETE"):
-        base += 10
-    return base
+    """Rank observed impact and unresolved trust, never a functional category name."""
+    import function_profile as FP
+    return FP.impact_score(FP.from_endpoint(ep))
 
 
 # ---------------------------------------------------------------- CLI
@@ -1023,61 +972,48 @@ def _cmd_show(a):
         return 1
     cov = inv.get("coverage", {}).get("_summary", {})
     print(f"Slug: {a.slug}")
-    print(f"Endpoints: {cov.get('total_endpoints', 0)}")
-    print(f"Coverage: {cov.get('covered_categories', 0)}/{cov.get('total_categories', 0)} "
-          f"({cov.get('coverage_pct', 0)}%)")
+    print(f"Validated operations: {cov.get('validated_endpoints', 0)}")
+    print(f"Function profiles: {cov.get('profile_count', 0)}")
+    print(f"Residuals: {cov.get('residual_count', 0)}")
+    print(f"Convergence: {inv.get('convergence', '?')} ({inv.get('discovery_rounds', 0)} rounds)")
     print(f"Timestamp: {inv.get('timestamp', '?')}")
-    for cat, data in inv.get("coverage", {}).items():
-        if cat.startswith("_"):
-            continue
-        print(f"  {cat}: {data.get('count', 0)} endpoint(s)")
+    for name, status in (inv.get("source_status") or {}).items():
+        print(f"  {name}: {status}")
     return 0
 
 
 def _cmd_selftest(_a):
     """Basic self-test."""
-    # Test categorization
-    assert _categorize_endpoint("/api/organizations/123/members", "get", [], "") == "org_boundaries"
-    assert _categorize_endpoint("/auth/login", "post", [], "") == "auth_mechanisms"
-    assert _categorize_endpoint("/admin/users", "get", ["admin"], "") == "admin_endpoints"
-    assert _categorize_endpoint("/billing/invoices", "get", [], "") == "billing_flows"
-    assert _categorize_endpoint("/files/upload", "post", [], "") == "storage_operations"
-    assert _categorize_endpoint("/webhooks", "post", [], "") == "integration_points"
-    assert _categorize_endpoint("/projects/transfer", "post", [], "") == "sharing_flows"
-    assert _categorize_endpoint("/credentials/rotate", "post", [], "") == "credential_management"
-
-    # Test coverage computation
+    assert _categorize_endpoint("/anything", "post", [], "") == "observed_operation"
     test_inv = [
-        {"url": "/admin", "category": "admin_endpoints", "source": "admin-probe", "confidence": "low"},
-        {"url": "/login", "category": "auth_mechanisms", "source": "openapi", "confidence": "high"},
-        {"url": "/orgs", "category": "org_boundaries", "source": "browser-capture", "confidence": "high"},
+        {"url": "/unvalidated", "source": "lead", "confidence": "low"},
+        {"url": "/one", "source": "openapi", "confidence": "high"},
+        {"url": "/two", "source": "browser-capture", "confidence": "high"},
     ]
     cov = _compute_coverage(test_inv)
-    assert cov["_summary"]["covered_categories"] == 3
-    assert cov["_summary"]["total_categories"] == len(FUNCTION_CATEGORIES)
-    assert cov["admin_endpoints"]["count"] == 1
-    assert not cov["billing_flows"]["covered"]
-    assert "coverage_sources" in cov["_summary"]
-    assert "confidence_breakdown" in cov["_summary"]
+    assert cov["_summary"]["validated_endpoints"] == 2
+    assert cov["_summary"]["residual_count"] == 1
+    assert cov["_summary"]["total_categories"] == 0
+    assert cov["_summary"]["profile_count"] == 2
     assert cov["_summary"]["confidence_breakdown"]["high"] == 2
     assert cov["_summary"]["confidence_breakdown"]["low"] == 1
 
-    # A pure API with many endpoints but few categories should NOT be penalized
-    big_api = [{"url": f"/api/v1/resource{i}", "category": "api_endpoints",
-                "source": "openapi", "confidence": "high"} for i in range(50)]
+    big_api = [{"url": f"/operation/{i}", "source": "openapi", "confidence": "high"} for i in range(50)]
     big_cov = _compute_coverage(big_api)
-    assert big_cov["_summary"]["coverage_pct"] >= 80, (
-        f"50-endpoint pure API should pass 80% gate, got {big_cov['_summary']['coverage_pct']}")
-    assert big_cov["_summary"]["covered_categories"] == 1
+    assert big_cov["_summary"]["discovery_ready"] is True
+    assert big_cov["_summary"]["validated_operation_pct"] == 100.0
+    assert big_cov["_summary"]["profile_count"] == 50
 
-    # Unknown coverage for very sparse results
-    tiny_inv = [{"url": "/x", "category": "api_endpoints"}]
-    tiny_cov = _compute_coverage(tiny_inv)
+    guessed = [{"url": f"/api/{i}", "confidence": "low",
+                "provenance": "guessed_common_path"} for i in range(15)]
+    guessed_cov = _compute_coverage(guessed)
+    assert guessed_cov["_summary"]["discovery_ready"] is False
+    assert guessed_cov["_summary"]["coverage_unknown"] is True
+    tiny_cov = _compute_coverage([{"url": "/x"}])
     assert tiny_cov["_summary"]["coverage_unknown"] is True
 
-    # Test priority
-    high_ep = {"category": "credential_management", "auth_required": True, "method": "POST", "body_params": [{"name": "x"}]}
-    low_ep = {"category": "api_endpoints", "method": "GET"}
+    high_ep = {"auth_required": True, "method": "POST", "body_params": [{"name": "x"}]}
+    low_ep = {"method": "GET"}
     assert _discovery_priority(high_ep) > _discovery_priority(low_ep)
 
     # Test inventory_to_surface

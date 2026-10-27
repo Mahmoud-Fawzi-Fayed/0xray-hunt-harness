@@ -40,11 +40,42 @@ def diff_one(method, url, body, slug, _get=None, owner="A", accessor="B"):
     sb, tb, _ = g(url, method=method, data=body, ident=accessor, slug=slug)
     sim = round(_similar(ta or "", tb or ""), 3)
     has_id = bool(ID_SEG.search(url))
-    flag = (200 <= (sb or 0) < 300) and (200 <= (sa or 0) < 300) and sim >= 0.9 and has_id
+    generic = bool(re.fullmatch(r"\s*(?:\{[^}]{0,300}\})?\s*(?:ok|success|resource found)?\s*", ta or "", re.I))
+    generic = generic and bool(re.fullmatch(r"\s*(?:\{[^}]{0,300}\})?\s*(?:ok|success|resource found)?\s*", tb or "", re.I))
+    flag = (200 <= (sb or 0) < 300) and (200 <= (sa or 0) < 300) and sim >= 0.9 and has_id and not generic
     return {"url": url, "method": method, "owner": owner, "accessor": accessor,
             "A_status": sa, "B_status": sb,
             "A_len": len(ta or ""), "B_len": len(tb or ""), "similarity": sim,
-            "id_bearing": has_id, "bola_suspect": flag}
+            "id_bearing": has_id, "bola_suspect": flag, "ownership_proven": False,
+            "proof_level": "similarity_lead" if flag else "none"}
+
+
+def prove_ownership(method, url, body, slug, owner_marker, control_url=None,
+                    _get=None, owner="A", accessor="B"):
+    """Prove B received A's unique marker with a separate negative control."""
+    marker = str(owner_marker or "")
+    if len(marker) < 8:
+        return {"confirmed": False, "reason": "an A-owned unique marker of at least 8 characters is required"}
+    if not control_url:
+        return {"confirmed": False, "reason": "a negative public/shared-resource control URL is required"}
+    g = _get or netget.get
+    sa, ta, _ = g(url, method=method, data=body, ident=owner, slug=slug)
+    sb, tb, _ = g(url, method=method, data=body, ident=accessor, slug=slug)
+    if not (200 <= (sa or 0) < 300 and 200 <= (sb or 0) < 300):
+        return {"confirmed": False, "reason": f"owner/accessor controls failed: {sa}/{sb}"}
+    if marker not in (ta or ""):
+        return {"confirmed": False, "reason": "owner response does not contain the declared A-owned marker"}
+    if marker not in (tb or ""):
+        return {"confirmed": False, "reason": "accessor response does not contain A's marker; isolation held"}
+    control = None
+    if control_url:
+        sc, tc, _ = g(control_url, method="GET", ident=accessor, slug=slug)
+        control = {"url": control_url, "status": sc, "marker_absent": marker not in (tc or "")}
+        if 200 <= (sc or 0) < 300 and marker in (tc or ""):
+            return {"confirmed": False, "reason": "marker is shared/public rather than A-owned", "control": control}
+    return {"confirmed": True, "method": method, "url": url, "owner": owner,
+            "accessor": accessor, "marker": marker, "A_status": sa, "B_status": sb,
+            "control": control, "proof_level": "ownership_marker"}
 
 
 def diff(reqs, slug, _get=None, owner="A", accessor="B"):

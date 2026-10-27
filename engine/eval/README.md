@@ -27,7 +27,7 @@ docker run -d -p 3001:3000 --name juiceshop bkimminich/juice-shop
 # 2. Burp running with the MCP proxy on :9876
 cp eval/burp-mcp.json.example eval/burp-mcp.json   # then set your mcp-proxy jar path
 
-# 3. claude CLI authed (it is, if you use Claude Code)
+# 3. HUNT_AGENT_CMD set to the active non-interactive AI command
 ```
 
 ## Run
@@ -35,7 +35,7 @@ cp eval/burp-mcp.json.example eval/burp-mcp.json   # then set your mcp-proxy jar
 python3 eval/run_eval.py --limit 1                  # quick proof: 1 challenge, both conditions
 python3 eval/run_eval.py                            # full challenge set, skills vs baseline
 python3 eval/run_eval.py --conditions skills        # skills-on only
-python3 eval/run_eval.py --model claude-opus-4-8    # change model (constant across conditions)
+python3 eval/run_eval.py --model opaque-label       # optional label passed to the active command
 ```
 Results stream to `eval/results/run.jsonl`; a summary table prints at the end.
 

@@ -2,13 +2,12 @@
 """
 yieldrank.py — order THIS program's live surface from its own outcomes.
 
-No global vuln-class menu. Bonus comes only from hunt-memory/journal.jsonl and
-this program's dedup corpus: classes you confirmed recently rise; classes you
-keep duplicating sink. rank() lists classes that actually appeared in that
-journal — it does not emit a canned OWASP list.
+No global vulnerability menu. Bonus comes only from hunt-memory/journal.jsonl
+and this program's dedup corpus: confirmed trust dimensions or profile IDs rise;
+repeated duplicates sink. rank() lists only keys that appeared in those records.
 
 Learning sources (all optional, read-only, offline):
-  - hunt-memory/journal.jsonl   -> per-class confirmed / duplicate counts (your real outcomes)
+  - hunt-memory/journal.jsonl   -> per-dimension/profile confirmed and duplicate outcomes
   - _dedup/corpus/*.jsonl       -> your own-source reports + any status=="duplicate"
 
 CLI:
@@ -55,9 +54,9 @@ def _learn(base):
                 j = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            c = j.get("vuln_class") or j.get("class")
+            c = j.get("trust_dimension") or j.get("profile_id")
             res = (j.get("result") or j.get("status") or "").lower()
-            if res.startswith("confirm"):
+            if res == "confirmed" and j.get("reproduction_status", "reproduced") == "reproduced":
                 bump(c, "confirmed")
             elif res.startswith("dup"):
                 bump(c, "dup")
@@ -76,9 +75,9 @@ def _learn(base):
                     continue
                 src = (r.get("source") or "").lower()
                 if src in ("ywh-own", "own-memory"):
-                    bump(r.get("vuln_class"), "reported")
+                    bump(r.get("trust_dimension") or r.get("profile_id"), "reported")
                 if (r.get("status") or "").lower() == "duplicate":
-                    bump(r.get("vuln_class"), "dup")
+                    bump(r.get("trust_dimension") or r.get("profile_id"), "dup")
     return stats
 
 
@@ -143,9 +142,12 @@ def rank_targets(base=DEFAULT_BASE, running=None, include_running=False):
         except Exception:  # noqa: BLE001
             st = {}
         surface = len(st.get("surface") or [])
-        tested = st.get("tested")
-        ntested = len(tested) if isinstance(tested, (list, dict)) else 0
-        untested = max(0, surface - ntested)
+        plan = st.get("test_plan") or []
+        if isinstance(plan, dict):
+            plan = plan.get("cases") or plan.get("test_cases") or []
+        import testplan as TP
+        dimensional = TP.plan_coverage(plan)
+        untested = dimensional["dimension_total"] - dimensional["dimension_tested"] if plan else surface
         confirmed = len(st.get("confirmed") or [])
         candidates = len(st.get("candidates") or [])
         authed = False
@@ -155,15 +157,13 @@ def rank_targets(base=DEFAULT_BASE, running=None, include_running=False):
         except Exception:  # noqa: BLE001
             pass
         never = surface == 0
-        # queued work dominates; confirms/candidates are strong signals; auth = deeper reach; a never-hunted
-        # target gets an exploration baseline so fresh surface gets a turn before a picked-over one is re-run.
-        score = (min(untested, 500) * 1.0 + surface * 0.05 + confirmed * 60 + candidates * 12
+        score = (min(untested, 1000) * 1.5 + surface * 0.05 + confirmed * 60 + candidates * 12
                  + (25 if authed else 0) + (40 if never else 0))
         reasons = []
         if never:
             reasons.append("never hunted (explore)")
         if untested:
-            reasons.append(f"{untested} untested")
+            reasons.append(f"{untested} unresolved dimension(s)")
         if authed:
             reasons.append("authed")
         if confirmed:
@@ -171,6 +171,8 @@ def rank_targets(base=DEFAULT_BASE, running=None, include_running=False):
         if candidates:
             reasons.append(f"{candidates} candidate(s)")
         out.append({"program": prog, "score": round(score, 1), "surface": surface, "untested": untested,
+                    "dimension_total": dimensional["dimension_total"],
+                    "dimension_tested": dimensional["dimension_tested"],
                     "authed": authed, "confirmed": confirmed, "candidates": candidates,
                     "running": prog in running, "reasons": reasons or ["no state yet"]})
     out.sort(key=lambda x: -x["score"])
@@ -218,17 +220,18 @@ def _selftest():
     base = tempfile.mkdtemp()
     os.makedirs(os.path.join(base, "hunt-memory"))
     with open(os.path.join(base, "hunt-memory", "journal.jsonl"), "w") as fh:
-        # you confirm ssrf a lot, and keep getting dup'd on xss
-        fh.write(json.dumps({"vuln_class": "ssrf", "result": "confirmed"}) + "\n")
-        fh.write(json.dumps({"vuln_class": "ssrf", "result": "confirmed"}) + "\n")
+        fh.write(json.dumps({"trust_dimension": "ownership_boundary", "result": "confirmed"}) + "\n")
+        fh.write(json.dumps({"trust_dimension": "ownership_boundary", "result": "confirmed"}) + "\n")
         for _ in range(4):
-            fh.write(json.dumps({"vuln_class": "xss", "result": "duplicate"}) + "\n")
+            fh.write(json.dumps({"trust_dimension": "input_variation", "result": "duplicate"}) + "\n")
+        fh.write(json.dumps({"vuln_class": "ignored-class", "result": "confirmed"}) + "\n")
     m = Model.load(base)
     rows = m.rank()
     order = [r["class"] for r in rows]
-    assert order == ["ssrf", "xss"], order
-    assert m.bonus("ssrf") > m.bonus("xss") and m.bonus("") == 0.0
-    assert m.score("graphql", ["graphql"]) == m.score("graphql", None)
+    assert order == ["ownership_boundary", "input_variation"], order
+    assert "ignored-class" not in m.learned
+    assert m.bonus("ownership_boundary") > m.bonus("input_variation") and m.bonus("") == 0.0
+    assert m.score("workflow_logic", ["graphql"]) == m.score("workflow_logic", None)
     print("yieldrank.py self-test: PASS")
     return 0
 

@@ -5,7 +5,7 @@
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
-An autonomous, **anti-duplicate** bug-bounty hunting harness. It runs on **OpenCode + Claude Code** agents, tests
+An autonomous, **anti-duplicate** bug-bounty hunting harness. It uses the active AI command configured through `HUNT_AGENT_CMD`, tests
 **read-only by default**, stays **in-scope**, and **stops at draft — it never submits for you**.
 
 Integrates with **Burp Suite Professional** (MCP), **ContextPilot** (research), and a **self-learning skill system** that evolves playbooks from hunt outcomes.
@@ -32,7 +32,7 @@ one **config file (the "scope")**, so adding a new program never means changing 
 
 ```mermaid
 flowchart TB
-    U["You<br/>(Cursor chat + dashboard)"]
+    U["You<br/>(active AI host + dashboard)"]
     N["n8n monitor<br/>watches for NEW surface"]
     BR["Host bridge :8899<br/>token-gated control"]
     EN["Engine<br/>recon → rank → hunt → validate → dedup"]
@@ -117,7 +117,7 @@ qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent �
 
 ## Quick start
 
-Prereqs: Linux/WSL, Python 3.10+, Go recon tools (`~/go/bin/`), and [OpenCode](https://github.com/opencode-ai/opencode) or Claude Code.
+Prereqs: Linux/WSL, Python 3.10+, Go recon tools (`~/go/bin/`), and a non-interactive active AI command in `HUNT_AGENT_CMD` for LLM stages. Deterministic stages do not require an AI command.
 
 ```bash
 make setup        # copy harness/.env.example -> harness/.env, then edit it
@@ -174,10 +174,10 @@ When Burp Pro is running (locally or via WSL→Windows port forwarding), agents 
 
 The harness teaches itself. When it encounters an unknown stack, vuln class, or bypass:
 
-1. `learn.py auto --kind <tech|vuln|bypass|program>` — researches and drafts a new SKILL.md
-2. Hunt outcomes (`confirmed`, `false-positive`, `duplicate`) feed back into the journal
-3. `evolve_skill()` auto-refines learned skills with proven vectors and FP patterns
-4. Skills are pull-on-demand references — agents reason from the live response first
+1. `learn.py auto --kind <tech|vuln|bypass|program>` — researches and drafts a proposed SKILL.md
+2. Hunt outcomes (`confirmed`, `false-positive`, `duplicate`) feed back into the journal; unreproduced claims do not boost yield
+3. `evolve_skill()` refines reviewed learned skills with validated vectors and FP patterns
+4. Skills are pull-on-demand references — new auto-authored skills remain quarantined until review; agents reason from live responses first
 
 ## Program Intake
 

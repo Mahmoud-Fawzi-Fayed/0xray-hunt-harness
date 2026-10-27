@@ -1,12 +1,12 @@
 # 0xRay Hunt Harness — Operator Manual
 
-Autonomous, **anti-duplicate** bug-hunting harness. Runs on **Cursor agents** (not Claude), hunts
+Autonomous, **anti-duplicate** bug-hunting harness. Uses the active AI command you configure, hunts
 read-only by default, and **stops at draft — it never submits without you**.
 
 - **Engine:** `~/0xray-hunt-harness/engine/engine/`  ·  **Config/secrets:** `~/0xray-hunt-harness/harness/.env`
 - **Dashboard:** https://finding.redtracefai.com/panel/  (Basic-Auth)
 - **Findings viewer + email:** `finding.redtracefai.com` · `x00xrayx00x@gmail.com`
-- **Runtime models (pool):** `kimi-k3-max`, `cursor-grok-4.6-high`, `grok-4.7-high`, `claude-fable-5-1-high`
+- **Runtime:** one generic `HUNT_AGENT_CMD`; optional opaque labels in `HUNT_MODELS`; no fallback AI
 
 ---
 
@@ -68,44 +68,39 @@ Change the schedule with the `interval` seconds on `/hunt` (default 3h = `10800`
 
 ## 4. How a hunt works (the pipeline)
 
-`novelty → recon → rank → map → hunt → validate → DRAFT-GATE → STOP`
+`novelty → recon → discover → explore → rank → map → plan → hunt → validate → chain → DRAFT-GATE → STOP`
 
 1. **Novelty first** — diff the target's surface vs the last snapshot; new/changed surface is hunted first.
-2. **Recon** — service/tech fingerprint, platform (.well-known/OAuth), JS endpoint+secret mining, and
-   `gau`+`katana` param mining (**cached per target for 6h** so it doesn't re-hammer the target each round).
-3. **Rank (yield + dedup)** — cover all classes, most-findable first; known-issue surface is down-ranked.
-4. **Hunt** — Cursor agents test each `(endpoint, class)`; they `cat` the matching `hunt-*` skills, use
-   curl, and only claim a vuln with **demonstrated impact** (never reflection/error-only).
-5. **Validate** — an adversarial second pass; defaults to false-positive unless proven.
-6. **Dedup gate** — every confirmed finding is scored; `LIKELY_DUP` is held, `NOVEL`/`REVIEW` is drafted.
+2. **Recon + discovery** — service/tech fingerprint, scoped browser/API mapping, JS and parameter mining.
+   Active tools without per-request containment stay disabled; validated surface is separated from guessed leads.
+3. **Rank (yield + dedup + novelty)** — cover applicable hypotheses, fresh surface first; known-issue surface is down-ranked.
+4. **Hunt** — agents test dynamic cases; they read matching `hunt-*` skills and only claim vulns with demonstrated impact.
+5. **Validate** — an adversarial pass plus independent reproduction; LLM-only and similarity-only claims stay in manual review.
+6. **Dedup + report-ready gate** — `LIKELY_DUP` and `UNKNOWN` are held, `REVIEW` needs a concrete differentiator, and only reproduced `NOVEL` findings with complete evidence are drafted.
 7. **STOP** — drafts + an `approval.md` are written, the finding is **published + emailed**. Nothing is
    submitted. "No finding this round" is a **status, not a stop** — it re-recons and rotates classes.
 
 ---
 
-## 5. Models
+## 5. Models and active runtime
 
-Hunting rotates **only** across the approved pool in `CURSOR_HUNT_MODELS`. An off-pool model (e.g. a
-stale default) is forced back into the pool in code — it can never be used. Verify each live:
+Set `HUNT_AGENT_CMD` to the non-interactive command for the AI you intend to use. `{task}`, `{model}`, and `{resume}` are optional argv placeholders; without `{task}`, the prompt is read from stdin. Prefer `--model={model}` and `--resume={resume}` forms for empty defaults. `HUNT_MODELS` is an optional comma-separated pool of opaque labels; empty uses the host default. No other AI command is tried, and a missing runtime fails closed.
 
 ```bash
-python3 scripts/e2e.py --ping          # pings each pool model once
+python3 scripts/e2e.py --ping          # pings each configured label, or the host default
 ```
 
 ---
 
 ## 6. Sessions (minimal chat churn)
 
-The harness keeps a **small pooled set of cursor-agent sessions per target** and **resumes** them across
-every step, phase, and round — instead of opening a new chat per step.
+When the command contains `{resume}`, the harness keeps a small pool of sessions per target and resumes them across steps, phases, and rounds. Commands without `{resume}` use fresh calls.
 
 - **Pool size:** `HUNT_SESSION_POOL` (default 3, matches parallelism).
-- **Refresh:** after `HUNT_SESSION_MAX_USES` turns (default 25) or on error/limit (then it rotates model).
-- **Per-target state:** `~/.bughunter-engagements/_sessions/<slug>/state.json` — the last session ids.
-- **Stop** keeps that state → **rerun resumes**; **remove** purges it (and the chats).
+- **Refresh:** after `HUNT_SESSION_MAX_USES` turns (default 25) or on error/limit (then it rotates label).
+- **Per-target state:** `~/.bughunter-engagements/_sessions/<slug>/state.json` — session ids plus the runtime command fingerprint.
+- **Runtime isolation:** a changed command never receives the previous command's session id.
 - Watch the count on the panel: *Capabilities → System → Chat sessions*.
-
-If a resumed session was pruned by Cursor, the harness self-heals by opening a fresh one.
 
 ---
 
@@ -159,7 +154,8 @@ into authenticated hunt steps.
 | Key | Meaning |
 |-----|---------|
 | `HUNT_BRIDGE_TOKEN` / `BRIDGE_PORT` / `HUNT_BRIDGE_HOST` | host bridge auth + bind |
-| `CURSOR_HUNT_MODELS` | the approved model pool (comma list) |
+| `HUNT_AGENT_CMD` | active non-interactive AI argv template; no fallback command |
+| `HUNT_MODELS` / `HUNT_MODEL_OVERRIDE` | optional opaque label pool / single-label override |
 | `HUNT_SESSION_POOL` / `HUNT_SESSION_MAX_USES` | sessions per target / turns before refresh |
 | `HUNT_AGENT_TIMEOUT` | per-step agent timeout (default 300s) |
 | `HUNT_MAX_HUNTS` | items tested per round (default 24) |
@@ -206,7 +202,8 @@ Run both before trusting any change. Each engine module also has `python3 engine
 | Target `[429]` in logs | the target is rate-limiting recon; backoff + the 6h params cache handle it; it recovers next round |
 | Chats piling up | shouldn't — the pool bounds them; a restart leaves a few that prune on their own. Check *Capabilities → Chat sessions* |
 | "no finding" on a target | expected on hardened/unauthenticated surface — the harness won't fabricate. Enable `HUNT_AUTH` / provide creds, or pick a target with more surface |
-| Model shows something off-pool | can't happen now (enforced); if `CURSOR_HUNT_MODELS` is empty, set it in `.env` |
+| `runtime-not-configured` | set `HUNT_AGENT_CMD` to the active non-interactive AI command; no other command is tried |
+| Model shows something off-pool | an unlisted label is forced back into `HUNT_MODELS`; empty pool uses the host default |
 
 ---
 

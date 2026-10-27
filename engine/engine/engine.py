@@ -75,32 +75,10 @@ def _deepen(items):
     return out
 
 
-# ---- endpoint quality (signal-based, target-agnostic) ----------------------------------------
-# Rank by URL shape (API vs brochure), never by a vuln-class menu and never by hostname.
-_Q_API_PATH = re.compile(r"/(api|graphql|gql|rest|v[0-9]+|internal|admin|oauth|auth|authorize|token|"
-                         r"session|logout|sso|account|users?|me|profile|orders?|payments?|invoices?|"
-                         r"transactions?|wallet|cards?|transfers?|balance|upload|files?|export|import|"
-                         r"webhooks?|callback|redirect|search|query|filter|settings|billing|"
-                         r"subscriptions?|teams?|projects?|reports?|integrations?|keys?|tokens?)\b", re.I)
-_Q_API_HOST = re.compile(r"^(api|apis|gateway|rest|gql|graphql|admin|account|accounts|my|portal|merchant|"
-                         r"customer|app|apps|dashboard|secure|auth|login|sso|id|oauth|connect|rest)[.-]", re.I)
+# Static assets are excluded by transport type, never by vulnerability or URL naming.
 _Q_STATIC = re.compile(r"\.(js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|pdf|mp4|webm|avif|"
                        r"xml)(\?|$)", re.I)
 _Q_CDN_HOST = re.compile(r"(^|\.)cdn[\d.-]", re.I)
-_Q_MARKETING = re.compile(r"/(pricing|blog|about|contact|careers?|press|news(room)?|legal|terms|privacy|"
-                          r"cookies?|faq|features?|resources?|case-stud\w*|customers?|partners?|events?|"
-                          r"webinars?|ebooks?|guides?|academy|community|company|jsi18n|sitemap\w*|robots|"
-                          r"favicon|solutions?|testimonial\w*|reviews?)\b", re.I)
-# Pages the workflow review tells a hunt to skip. Narrower than _Q_MARKETING so /api/customers/123 stays huntable.
-_REVIEW_JUNK = re.compile(
-    r"/(blog|legal|careers?|customer-stories|events|pricing|whats-new|about|press|news(room)?|"
-    r"terms|privacy|cookies|faq|features|resources|solutions|webinars?|ebooks?|academy|community|"
-    r"company|docs|integrations|team|jobs|compare|compliance|switch|support|enterprise)"
-    r"(/|$|\?)|robots\.txt|security\.txt|/\.well-known/|/healthz?\b|manifest\.json|favicon|[?&]_rsc=",
-    re.I)
-_Q_OBJID = re.compile(r"/(\d{2,}|[0-9a-f]{8}-[0-9a-f]{4}|[0-9a-f]{16,})(/|\?|$)", re.I)
-_Q_DISCOVERED = {"graphql-op", "graphql", "graphql-recon", "browser", "browser-capture",
-                 "agent-found", "authed", "deep-recon"}
 
 
 def _skip_static_url(url):
@@ -131,42 +109,9 @@ def _logged_out_result(analysis):
 
 
 def _endpoint_quality(s):
-    """Bug-likelihood delta for ranking (roughly -85..+175). Pure function of the item's URL + metadata."""
-    from urllib.parse import urlparse
-    url = s.get("url", "") or ""
-    try:
-        p = urlparse(url)
-        host, path, query = (p.hostname or ""), (p.path or ""), (p.query or "")
-    except Exception:  # noqa: BLE001
-        return 0
-    q = 0
-    if _Q_API_PATH.search(path):
-        q += 45
-    if _Q_API_HOST.search(host):
-        q += 35
-    if query:
-        q += 25                                    # injectable params = live input
-    if _Q_OBJID.search(path):
-        q += 30                                    # object id in path = IDOR/BOLA surface
-    if s.get("param"):
-        q += 10
-    if (s.get("source") or "").lower() in _Q_DISCOVERED:
-        q += 30                                    # a discovered real endpoint, not a static crawl hit
-    if s.get("authed") or "authenticated" in (s.get("note", "") or "").lower():
-        q += 25
-    if _Q_STATIC.search(path):
-        q -= 70                                    # static asset: nothing to pentest
-    # /files/<uuid> is a capability URL the product already handed out, not an IDOR job.
-    if re.search(r"/files?/[0-9a-f-]{16,}(?:/|$)", path, re.I) and s.get("source") != "session-mine":
-        q -= 60
-    if _Q_MARKETING.search(path):
-        q -= 40                                    # brochure page
-    if path in ("", "/"):
-        q -= 15                                    # bare homepage shell
-    # Logout, health, and discovery docs are not where a paid bug lives.
-    if re.search(r"/(logout|health|ready|live|robots\.txt|security\.txt|\.well-known)(/|$)", path, re.I):
-        q -= 80
-    return q
+    """Score observed business impact and trust dimensions, never URL or vulnerability names."""
+    import function_profile as FP
+    return FP.impact_score(FP.from_endpoint(s))
 # DEFAULT = recon -> rank -> map (deterministic, ~free): map the surface to the skill arsenal and
 # SHOW it. The operator focuses their effort from there. hunt/validate/report are OPT-IN (--hunt).
 ALL_PHASES = ["recon", "discover", "explore", "rank", "map", "plan", "hunt", "validate", "chain", "report"]
@@ -273,6 +218,9 @@ class Engine:
             roe += (f"- MANDATORY USER-AGENT: EVERY HTTP request (curl and any tool) MUST send "
                     f"'User-Agent: {self.scope.user_agent}' (e.g. curl -A '<UA>'). It tags traffic for the "
                     "client SOC; an untagged request violates the program rules.\n")
+        roe += (f"- CONTROLLED TRANSPORT: send every target request through `python3 {ENGINE_DIR}/netget.py` "
+                "with `--slug` or `--scope-file`; never use raw curl/wget/httpx. Prompt rules are guidance, "
+                "not a substitute for the transport's scope checks.\n")
         if getattr(self.scope, "proxy", "") or getattr(self.scope, "impersonate", ""):
             roe += (f"- EDGE-GATED TARGET: plain curl/wget is RESET by the edge (source-IP / TLS gating). For "
                     f"EVERY request to this target use the harness fetch helper INSTEAD of curl:\n"
@@ -290,10 +238,11 @@ class Engine:
             roe += (f"- AUTHENTICATED SESSIONS available: {', '.join(_ids)}. Reach the behind-login surface with the "
                     f"fetch helper: `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A`.\n")
             if "B" in _ids:
-                roe += (f"  TWO accounts → hunt IDOR/BOLA (OWASP #1): get an object id as A, request it as B, diff. "
-                        f"Automate the sweep: `python3 {ENGINE_DIR}/authz.py diff --slug {_AN._slug(self.scope.name)} "
-                        f"--url \"<A-owned url>\"` — confirm any bola_suspect with a real two-account PoC before drafting.\n")
-            roe += "  Prefer authenticated testing — the paid bugs (IDOR/BOLA, business logic, GraphQL authz) are behind login.\n"
+                roe += (f"  TWO actors → compare owned resources and effects across actor/tenant boundaries: "
+                        f"observe an object as its owner, request the same operation as the accessor, and compare "
+                        f"content and state. `python3 {ENGINE_DIR}/authz.py diff --slug {_AN._slug(self.scope.name)} "
+                        f"--url \"<owner-observed url>\"` — require ownership-marker proof before drafting.\n")
+            roe += "  Prefer authenticated observation whenever the target exposes actor-dependent behavior.\n"
         if not self.allow_intrusive:
             roe += ("- READ-ONLY / NON-DESTRUCTIVE: do NOT perform any state-changing or intrusive action — no sending "
                     "emails, no writes/updates/deletes, no cache purge/revalidate, no account creation, no spam, no "
@@ -646,8 +595,8 @@ class Engine:
                 f"You are mining a logged-in session for NEW object URLs on program {self.scope.name}. "
                 "Do not crawl the public site and do not run gau or katana.\n"
                 f"Identities: {who}. Fetch with `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A`{b}.\n"
-                "Open the APIs this session can actually see (profile, bookings, orders, trips, payments, "
-                "seats, documents). Collect concrete object URLs the responses returned, with the real id.\n"
+                "Follow the operations and object relationships this session actually exposes. Collect concrete "
+                "operation URLs and resource identifiers observed in responses; do not infer them from product names.\n"
                 "Return ONLY a fenced json object: {\"discovered\": [\"https://host/path/with-real-id\", ...]}.\n"
                 "Every URL must be one you saw in an authenticated response. Do not invent URLs. "
                 "At most 15 URLs, in-scope hosts only."
@@ -724,30 +673,30 @@ class Engine:
             "next phase can attack intelligently, not blindly.\n\n"
             f"Session host: {host or '?'}. Seeds: {', '.join(seeds) or '(none)'}.\n"
             f"Known surface so far:\n{surface_hint}\n\n"
-            "PHASE 1 — DISCOVER (use all of these):\n"
-            f"  `python3 {e}/netget.py GET \"<url>\" --as A` — fetch any page/API as logged-in user\n"
+            "PHASE 1 — OBSERVE AND EXPAND:\n"
+            f"  `python3 {e}/netget.py GET \"<url>\" --as A` — fetch observed operations as the current actor\n"
             f"  `python3 {e}/browser.py capture --url <seed> --slug {self.scope.name} --as A "
-            f"--scope {host or '<host>'}` — capture SPA XHR/fetch/GraphQL calls\n"
-            f"  `python3 {e}/recon.py graphql --scope <scope-file>` — GraphQL introspection\n"
-            "  Read robots.txt, sitemap.xml, .well-known/*, /api/docs, /swagger*, /openapi*\n"
-            "  Check for: /admin, /dashboard, /settings, /internal, /debug, /graphql, /api/v*/\n"
-            "  Read JS bundles for API routes: grep for '/api/', 'fetch(', 'axios.', endpoint patterns\n\n"
-            "PHASE 2 — MAP (build a complete picture):\n"
-            "  For each feature/endpoint found, note: what it does, what data it touches, "
-            "what role can access it, what parameters it takes.\n\n"
+            f"--scope {host or '<host>'}` — capture actual runtime calls and forms\n"
+            "  Follow links, forms, scripts, schemas, calls, objects, and state transitions disclosed by responses. "
+            "Use a protocol parser only when its schema or negotiation is actually present. Do not suggest paths "
+            "from a conventional checklist or assume any API style.\n\n"
+            "PHASE 2 — MODEL BEHAVIOR:\n"
+            "  For each observed operation record its action, resource, actors, inputs, outputs, effects, "
+            "preconditions, relationships, state changes, and invariants. Keep unparsed or inaccessible behavior "
+            "as unknown; never infer completeness from URL count.\n\n"
             "PHASE 3 — RETURN a fenced ```json``` object:\n"
-            '{"narrative":"<2-3 sentences: what this product is and who uses it>",'
-            '"tech_stack":["detected technologies"],'
-            '"roles":["every user role found (admin, user, guest, api-consumer, ...)"],'
-            '"auth_mechanism":"cookie|jwt|oauth|apikey|saml|...",'
-            '"crown_jewels":["highest-value data/actions — PII, payments, admin, exports"],'
-            '"api_surface":[{"method":"GET|POST|...","url":"https://...","function":"what it does",'
-            '"params":["param names"],"auth_required":true}],'
-            '"flows":[{"what":"<user flow>","url":"https://in-scope/...","why":"<why this flow is dangerous>"}],'
-            '"hidden_endpoints":["admin/debug/internal URLs found"],'
-            '"deprioritized":["static/marketing/CDN things to skip"]}\n'
-            "List EVERY endpoint you find in api_surface — the more complete, the better the hunt. "
-            "URLs must be in-scope and real. Do not guess endpoints you didn't verify exist."
+            '{"narrative":"<observed product behavior and actors>",'
+            '"tech_stack":["technologies evidenced by responses"],'
+            '"roles":["roles actually observed"],'
+            '"auth_mechanism":"<observed mechanism or unknown>",'
+            '"crown_jewels":["resources whose observed sensitivity or effects justify priority"],'
+            '"api_surface":[{"method":"GET|POST|...","url":"https://...","function":"observed action",'
+            '"params":["observed inputs"],"auth_required":true}],'
+            '"flows":[{"what":"<observed transition>","url":"https://in-scope/...",'
+            '"why":"<observed precondition, effect, or invariant>"}],'
+            '"hidden_endpoints":["real operations found outside navigation"],'
+            '"deprioritized":["content shown by transport and behavior to be static"]}\n'
+            "List only real in-scope operations supported by observations. Do not guess endpoints or behavior."
         )
         r = A.run_agent(task, context=self.scope.name, max_turns=20,
                         timeout=int(os.environ.get("HUNT_PROFILE_TIMEOUT", "400")),
@@ -883,9 +832,9 @@ class Engine:
                 f"You are inventing the NEXT tests for program {self.scope.name}. "
                 "The worklist is empty. Do not recrawl the public site. Do not pick from a vuln class list.\n"
                 f"Identities: {who}. Fetch with `python3 {ENGINE_DIR}/netget.py GET \"<url>\" --as A`{b}.\n"
-                "Open what this session can actually see (whatever the product calls it — profile, docs, "
-                "files, orgs, bookings, payments, admin). From the JSON/HTML, name concrete in-scope URLs "
-                "with real ids, plus one sentence each of what to try that was NOT already tried below.\n"
+                "Follow the operations, resources, and relationships visible to this session. From actual response "
+                "data, name concrete in-scope operation URLs and observed resource IDs, plus one hypothesis per "
+                "unresolved behavior that was NOT already tried below. Do not infer paths from product conventions.\n"
                 + (memory or "")
                 + ("Already looked:\n" + "\n".join(prior[:10]) + "\n" if prior else "")
                 + "Return ONLY a fenced json object: "
@@ -936,7 +885,10 @@ class Engine:
             if obs:
                 EV.record_attempt(edir, case_id=case_key,
                                   observation_ids=[o["id"] for o in obs[-10:]],
-                                  outcome=outcome)
+                                  outcome=outcome, method=method, url=url,
+                                  identity=it.get("accessor") or it.get("role"),
+                                  owner=it.get("owner"), accessor=it.get("accessor"),
+                                  confidence="candidate" if outcome == "CONFIRMED" else "validated_by_rule")
                 valid, _reason = EV.validate_evidence(
                     edir, case_key, method=method, url=url)
                 return valid
@@ -944,15 +896,18 @@ class Engine:
         except Exception:  # noqa: BLE001
             return False
 
-    def _needs_authz_gate(self, url):
-        """True when a deep nothing on this URL would be a guess: A and B are live and the URL
-        is an in-scope endpoint worth an object-level diff. Health/logout checks are not."""
+    def _needs_authz_gate(self, url, item=None):
+        """Require actor-boundary proof only when the observed profile has that boundary."""
         if self.mock or not url or not str(url).startswith("http"):
             return False
         if not self.scope.in_scope_host(url):
             return False
-        if re.search(r"/(logout|health|ready|live|robots\.txt|\.well-known)(/|$)", url, re.I):
-            return False
+        if item is not None:
+            import testplan as TP
+            profile = TP.analyze_endpoint(item).get("function_profile") or {}
+            dimensions = set(profile.get("trust_dimensions") or [])
+            if not dimensions & {"actor_variation", "ownership_boundary", "tenant_boundary", "role_transition"}:
+                return False
         try:
             import authn
             ids = authn.identities(self.scope.name, self.base)
@@ -1098,7 +1053,10 @@ class Engine:
         """Run exhaustive discovery before any testing — map ALL functions, endpoints, roles, boundaries."""
         self.eng.set_phase("discover")
         if self.mock:
-            self.eng.log("discover(mock): skipped")
+            self.eng.state["discovery"] = {"discovery_ready": True, "coverage_pct": 100.0,
+                                           "validated_endpoints": len(self.eng.state.get("surface") or [])}
+            self.eng.save()
+            self.eng.log("discover(mock): fixture surface ready")
             return
         total_added = 0
         try:
@@ -1117,6 +1075,7 @@ class Engine:
             self.eng.log(f"discover: traceback: {traceback.format_exc()[-500:]}")
             self.eng.state["discovery"] = {"error": f"{type(e).__name__}: {e}"}
             self.eng.save()
+            raise
 
         # Browser capture — SPA apps expose their real API surface at runtime via JS
         try:
@@ -1159,12 +1118,10 @@ class Engine:
             import recon as R
             gql = R.graphql_recon(self.scope, slug=self.scope.name, log=self.eng.log)
             gql_items = []
-            seed_host = ""
-            if self.scope.seeds:
-                s = self.scope.seeds[0].rstrip("/")
-                seed_host = s if "://" in s else "https://" + s
             for ep in (gql or []):
-                url = ep.get("url") or (seed_host + "/graphql") if seed_host else "/graphql"
+                url = ep.get("url") or ""
+                if not url:
+                    continue
                 args = [a.get("name", "") for a in (ep.get("args") or []) if a.get("name")]
                 gql_items.append({
                     "url": url, "method": "POST",
@@ -1229,16 +1186,11 @@ class Engine:
             import traceback
             self.eng.log(f"explore: ERROR — functional discovery failed ({type(e).__name__}: {e})")
             self.eng.log(f"explore: traceback: {traceback.format_exc()[-500:]}")
+            raise
 
     # ---------------- rank ----------------
     def rank(self):
         self.eng.set_phase("rank")
-        ym = None
-        try:
-            import yieldrank as Y
-            ym = Y.Model.load(self.base)     # yield priors + learned (your confirms up, your dups down)
-        except Exception:
-            ym = None
         session_host = ""
         from urllib.parse import urlparse
         try:
@@ -1249,14 +1201,11 @@ class Engine:
         except Exception:
             session_host = ""
         for s in self.eng.state["surface"]:
-            s["priority"] = 50 + (5 if s.get("param") else 0) + (55 if s.get("source") == "secret" else 0)
-            s["priority"] += _endpoint_quality(s)    # float REAL attack surface above brochure/asset pages
-            # The logged-in host is the one the operator can actually test. Do not
-            # let a shared marketing apex outrank it.
+            s["priority"] = _endpoint_quality(s)
+            if s.get("source") == "novelty":
+                s["priority"] += 140
             if session_host and (urlparse(s.get("url") or "").hostname or "") == session_host:
                 s["priority"] += 120
-            if ym:
-                s["priority"] += ym.bonus(s.get("vuln_class", ""))
         self._dedup_downrank()   # known-issue surface sinks below novel surface (no-op w/o corpus)
         self.eng.save()
         wl = self.eng.worklist()
@@ -1310,7 +1259,6 @@ class Engine:
             for sig in profile["signals"]:
                 if sig not in g["signals"]:
                     g["signals"].append(sig)
-        tech_sk = SM.tech_skills(tech)
         learned_now = 0
         for t in ([] if self.mock else tech):
             tl = (t or "").lower()
@@ -1327,11 +1275,10 @@ class Engine:
                              f"(self-authored, review before relying on it)")
         lines = [f"# Attack surface — {self.scope.name}", "",
                  f"**Service / tech:** {', '.join(tech) or '?'}  ",
-                 f"**Reference skills:** {', '.join('`'+s+'`' for s in tech_sk) or 'none'}  ",
                  f"**Endpoints:** {len(groups)} target(s). Dynamic analysis — hunt agent reasons per-endpoint.",
-                 "", "> Testing is hypothesis-driven: the agent reads the endpoint, understands what it does, "
-                 "and invents tests from live behavior. No static vuln matching.", ""]
-        self.eng.log(f"map: SURFACE — tech: {', '.join(tech_sk) or 'none'} | {len(groups)} endpoint(s):")
+                 "", "> Baseline observations come first; vulnerability references are selected only after "
+                 "a concrete, case-linked hypothesis. No static vuln matching.", ""]
+        self.eng.log(f"map: SURFACE — tech: {', '.join(tech) or 'none'} | {len(groups)} endpoint(s):")
         for (url, param), g in groups.items():
             label = param if param else "(endpoint)"
             sigs = ", ".join(g["signals"]) if g["signals"] else "general"
@@ -1339,9 +1286,6 @@ class Engine:
             lines.append(f"## `{label}`  —  {g['method']}  [{g['priority']}]")
             lines.append(f"- **URL:** `{url}`" + (f"  ·  source: {g['src']}" if g["src"] else ""))
             lines.append(f"- **Signals:** {sigs}")
-            ref_skills = SM.matching(url=url, tech=tech, analysis=sigs)
-            if ref_skills:
-                lines.append(f"- **Reference:** {', '.join('`'+s+'`' for s in ref_skills[:3])}")
             lines.append(f"- **Probe:** `{SM.probe_for('deep', url, param)}`")
             lines.append("")
         path = os.path.join(self.eng.dir, "arsenal.md")
@@ -1406,11 +1350,10 @@ class Engine:
             f"`python3 {e}/netget.py GET \"<URL>\" --as B`. "
             "analysis must contain `authz:` plus both HTTP statuses and whether B saw A's marker.\n")
         parts.append(
-            "PROOF STANDARD: claim a vuln ONLY with demonstrated, exploitable impact (not reflection, "
-            "error, or permissive header). IDOR/BOLA: vulnerable:true ONLY with A-vs-B body-diff showing "
-            "B received A's unique marker on an attacker-enumerated id. Do NOT nominate: public CDN/UUID "
-            "static files, unauthenticated WordPress field-title leaks. "
-            "HOLD_RTFS/HOLD_INFORMATIVE still apply.\n")
+            "PROOF STANDARD: claim a vulnerability only with demonstrated, exploitable impact—not reflection, "
+            "an error, or a permissive header. For actor/resource boundaries, require a positive owner control, "
+            "an accessor control, and an owner-specific marker or state effect; similar responses are only leads. "
+            "Do not nominate behavior without attacker-relevant impact. HOLD_RTFS/HOLD_INFORMATIVE still apply.\n")
         parts.append(
             f"OOB TESTING: `python3 {e}/oob.py payload --tag <tag>` → inject → "
             f"`python3 {e}/oob.py poll --tag <tag> --timeout 30`.\n")
@@ -1419,9 +1362,14 @@ class Engine:
         parts.append(
             "OUTPUT: End with a fenced ```json``` object: "
             '{"vulnerable":true|false,"vuln_class":"<class>","severity":"low|medium|high|critical",'
-            '"analysis":"<what endpoint does>","classes_considered":["<tested>"],'
+            '"analysis":"<observed action, resources, actors, and effects>","dimensions_considered":["<dimension>"],'
+            '"baseline_observation_ids":["<observation id>"],"skill_references":["<selected after hypothesis>"],'
             '"hypotheses":["<next tests>"],"signals_missed":["<seen not proved>"],'
-            '"evidence":"<proof>","request":"<winning request>",'
+            '"hypothesis_results":[{"hypothesis":"<tested assumption>","dimension":"<trust dimension>",'
+            '"status":"tested|confirmed|disproved|inconclusive|blocked","observation_ids":["<observation id>"],'
+            '"evidence":"<result or blocked reason>"}],'
+            '"evidence":"<proof>","request":"<winning request>","response":"<winning response>",'
+            '"owner_marker":"<A-owned unique value for authz proof>","control_url":"<negative control URL>",'
             '"hosts_contacted":["<hosts>"],"attacker_holds":"nothing|own_session|'
             'link_issued_by_product|foreign_id_shown","id_source":"not_required|enumerated|product_link|'
             'archive|in_scope_oracle|own_only|asserted_leak",'
@@ -1501,13 +1449,19 @@ class Engine:
             self.eng.state["hunt_blocked"] = "empty_surface"
             self.eng.save()
             return
-        cov_pct = disc.get("coverage_pct", 0)
-        if cov_pct < 80 and not os.environ.get("HUNT_SKIP_COVERAGE_GATE"):
-            self.eng.log(f"hunt: BLOCKED — discovery coverage {cov_pct}% < 80% threshold. "
-                         "Fill gaps before hunting (set HUNT_SKIP_COVERAGE_GATE=1 to override).")
+        ready = disc.get("discovery_ready",
+                         disc.get("validated_endpoints", disc.get("total_endpoints", 0)) > 0)
+        failed_required = disc.get("failed_required_methods") or []
+        if (not ready or failed_required) and not os.environ.get("HUNT_SKIP_COVERAGE_GATE"):
+            reason = ("required discovery methods failed: " + ", ".join(failed_required) if failed_required
+                      else "no validated endpoints; guessed paths are leads only")
+            self.eng.log(f"hunt: BLOCKED — discovery not ready ({reason}).")
             self.eng.state["hunt_blocked"] = "coverage_gate"
             self.eng.save()
             return
+        if disc.get("uncovered_categories"):
+            self.eng.log(f"hunt: discovery PARTIAL — {len(disc['uncovered_categories'])} categories remain "
+                         "missing/unknown; they are not counted as covered")
         # --- GATE: auth check — refuse to hunt when majority needs auth and no session exists ---
         auth_walled = sum(1 for s in surface if s.get("auth_required"))
         auth_pct = (auth_walled / len(surface) * 100) if surface else 0
@@ -1621,6 +1575,8 @@ class Engine:
                     "owner": c.get("owner", ""),
                     "accessor": c.get("accessor", ""),
                     "vuln_class": c.get("category", "deep"),
+                    "function_profile": c.get("function_profile") or {},
+                    "trust_dimensions": c.get("trust_dimensions") or [],
                     "source": "test-plan",
                     "priority": prio_order.get(c.get("priority", "low"), 3),
                     "_plan_key": sk,
@@ -1629,12 +1585,10 @@ class Engine:
                     plan_keys.add(sk)
                     plan_items.append(item)
             raw_wl = self.eng.worklist()
-            other_items = [it for it in raw_wl
-                           if TP.case_id({"endpoint": it.get("url", ""), "method": it.get("method", "GET"),
-                                            "params": it.get("params") or ([it["param"]] if it.get("param") else []),
-                                            "category": it.get("vuln_class", ""), "role": it.get("role", ""),
-                                            "owner": it.get("owner", ""), "accessor": it.get("accessor", "")})
-                           not in plan_keys]
+            plan_operations = {(it.get("method", "GET"), it.get("url", "")) for it in plan_items}
+            other_items = (list(raw_wl) if self.mock or os.environ.get("HUNT_DEEP", "1") != "1"
+                           else [it for it in raw_wl
+                                 if (it.get("method", "GET"), it.get("url", "")) not in plan_operations])
             wl = (plan_items + other_items)[: self.max_hunts]
             self.eng.log(f"hunt: {len(plan_items)} cases from test plan, {len(other_items)} extra from worklist")
         else:
@@ -1680,7 +1634,10 @@ class Engine:
                 if cs and cs.get("status") == "failed":
                     attempt = cs.get("attempt", 0)
                     max_r = cs.get("max_retries", 3)
-                    if attempt >= max_r and not cs.get("idempotent", True):
+                    if attempt >= max_r:
+                        self.eng.mark_skipped(it, "scheduler_retries_exhausted")
+                        continue
+                    if not cs.get("idempotent", True):
                         continue
                 _filtered.append(it)
             if _pre != len(_filtered):
@@ -1691,9 +1648,10 @@ class Engine:
         self._round_learnings = []
         for it, f in self._run_parallel(self._scheduled_hunt, todo):
             if f and f.get("error") == "timeout":
-                # MODEL-FAILOVER: a timeout usually clears on a DIFFERENT model — try ONCE more with a generous
-                # budget. If it times out AGAIN, the endpoint is too heavy: mark it tested (INCONCLUSIVE) and move
-                # on, so it can't starve the queue by re-timing-out every round forever.
+                if not self._timeout_retry_allowed(it):
+                    self.eng.mark_skipped(it, "uncertain_non_idempotent_timeout")
+                    self.eng.log(f"hunt: INCONCLUSIVE non-idempotent timeout on {it['url']} — NOT replaying")
+                    continue
                 alt = self._alt_model(f.get("model"))
                 fbt = int(os.environ.get("HUNT_FAILOVER_TIMEOUT", "900"))
                 self.eng.log(f"hunt: timeout on {it.get('vuln_class')}@{it['url']} (model {f.get('model')}) "
@@ -1765,11 +1723,21 @@ class Engine:
             if f and f.get("vulnerable"):
                 oos = self._scope_audit(f)
                 cand = {"url": it["url"], "param": it.get("param", ""),
+                        "params": list(it.get("params") or []),
+                        "method": it.get("method", "GET"), "body": it.get("body"),
+                        "role": it.get("role", ""), "owner": it.get("owner", ""),
+                        "accessor": it.get("accessor", ""), "case_id": self.eng._key(it),
                         "vuln_class": f.get("vuln_class") or it.get("vuln_class"),
                         "severity": f.get("severity", "unknown"), "evidence": f.get("evidence", ""),
+                        "response": f.get("response", ""),
+                        "owner_marker": f.get("owner_marker") or it.get("owner_marker", ""),
+                        "control_url": f.get("control_url") or it.get("control_url", ""),
                         "request": f.get("request", ""), "proof_note": f.get("proof_note", ""),
                         "attacker_holds": f.get("attacker_holds", ""),
                         "id_source": f.get("id_source", ""),
+                        "trust_dimensions": list(it.get("trust_dimensions") or
+                                                   (it.get("function_profile") or {}).get("trust_dimensions") or
+                                                   TP.analyze_endpoint(it)["function_profile"]["trust_dimensions"]),
                         "disposition": f.get("disposition") or {},
                         "scope_warning": oos or None}
                 import disposition as _D
@@ -1790,6 +1758,7 @@ class Engine:
                     ev_valid = self._record_evidence_attempt(it, outcome="CONFIRMED")
                     if ev_valid or self.mock:
                         self.eng.mark_tested(it)
+                        self.eng.record_endpoint_tested()
                         _plan_status = ("tested", f.get("evidence") or f.get("proof_note") or "candidate — awaiting validation")
                     else:
                         self.eng.log(f"hunt: candidate at {it['url']} has request text but no transport-verified observation — NOT marking tested")
@@ -1805,7 +1774,7 @@ class Engine:
                 classes = []
                 if isinstance(f, dict):
                     analysis = f.get("analysis") or ""
-                    classes = f.get("classes_considered") or []
+                    classes = f.get("hypothesis_results") or f.get("dimensions_considered") or []
                 if _logged_out_result(analysis):
                     self.eng.note_hunt(it, analysis, classes)
                     self._remember(it, analysis, classes, result="auth_wall", finding=f)
@@ -1815,7 +1784,7 @@ class Engine:
                 # Deep + two live accounts: hunt:nothing is refused until authz.py diff and
                 # netget --as B have actually run. The log line is the proof authz_logged reads.
                 if ((it.get("vuln_class") or "").lower() == "deep"
-                        and self._needs_authz_gate(it.get("url"))):
+                        and self._needs_authz_gate(it.get("url"), it)):
                     line = self._authz_closeout(
                         it.get("url"), method=it.get("method", "GET"),
                         body=it.get("body"), owner=it.get("owner", "A"),
@@ -1833,6 +1802,7 @@ class Engine:
                     ev_valid = self._record_evidence_attempt(it, outcome="TESTED")
                     if ev_valid or self.mock:
                         self.eng.mark_tested(it)
+                        self.eng.record_endpoint_tested()
                         _plan_status = ("tested", analysis[:300])
                     else:
                         self.eng.log(f"hunt: {it.get('vuln_class')}@{it['url']} has request text but no transport evidence — NOT marking tested")
@@ -1854,6 +1824,12 @@ class Engine:
                 _learning["note"] = str(f["analysis"])[:200]
             if _learning.get("note"):
                 self._round_learnings.append(_learning)
+            if _sched and f and not f.get("error") and not f.get("skipped"):
+                self._finalize_scheduled(
+                    it,
+                    self.mock or bool(_plan_status and _plan_status[0] in ("tested", "confirmed")),
+                    (_plan_status[1] if _plan_status else "no execution evidence"),
+                )
             # --- update test plan case status ---
             if _plan_status and self._plan_index:
                 _sk = it.get("_plan_key") or TP.case_id({
@@ -1863,6 +1839,19 @@ class Engine:
                     "owner": it.get("owner", ""), "accessor": it.get("accessor", "")})
                 _pc = self._plan_index.get(_sk)
                 if _pc:
+                    if isinstance(f, dict):
+                        TP.apply_hypothesis_results(
+                            _pc, f.get("hypothesis_results") or [],
+                            evidence_dir=self.eng.evidence_path(""), case_key=self.eng._key(it))
+                        _pc.setdefault("hypothesis_ledger", []).append({
+                            "status": _plan_status[0], "evidence": _plan_status[1],
+                            "dimensions_considered": list(f.get("dimensions_considered") or []),
+                            "hypotheses": list(f.get("hypotheses") or []),
+                            "signals_missed": list(f.get("signals_missed") or []),
+                            "baseline_observation_ids": list(f.get("baseline_observation_ids") or []),
+                            "skill_references": list(f.get("skill_references") or []),
+                            "case_id": self.eng._key(it), "ts": time.time(),
+                        })
                     try:
                         TP.mark_case(_pc, _plan_status[0], evidence=_plan_status[1])
                     except (ValueError, TypeError):
@@ -1875,7 +1864,6 @@ class Engine:
                          f"{cov.get('confirmed',0)} confirmed, {cov.get('disproved',0)} disproved")
         # --- record hunt metrics ---
         self.eng.record_hunt_end()
-        self.eng.record_endpoint_tested(len(todo))
         m = self.eng.metrics()
         self.eng.log(f"hunt: METRICS — {m['endpoints_tested']} endpoints tested, "
                      f"{m['hypotheses_formed']} hypotheses ({m['hypotheses_confirmed']} confirmed), "
@@ -1929,11 +1917,12 @@ class Engine:
         return "\n".join(lines) + "\n"
 
     def _hunt_deep(self, it, model=None, timeout=None):
-        """ANALYSIS-DRIVEN per-endpoint pentest: the agent reads the endpoint's source/JS, reasons about what
-        it actually is, decides which vuln classes are PLAUSIBLE, then exploits only those — a thinking
-        pentester, not a payload-sprayer. One smart agent per endpoint (not N mechanical per-class hunts)."""
+        """Analyze one observed function and test target-specific trust hypotheses with bounded evidence."""
         import agent as A
-        import skill_map as SM
+        import testplan as TP
+        it = dict(it)
+        it["params"] = TP._params(it)
+        it["body_params"] = TP._params({"params": it.get("body_params")})
         # Set case context so transport-level observations are tagged with this case
         case_key = self.eng._key(it)
         edir = self.eng.evidence_path("")
@@ -1958,31 +1947,16 @@ class Engine:
             memory = BR.prompt_block(p, url, self.base)
         except Exception:  # noqa: BLE001
             memory = ""
-        # Knowledge-driven guidance: what has gone wrong in similar endpoints before
         import testplan as TP
         endpoint_profile = TP.analyze_endpoint(it)
-        knowledge_text = endpoint_profile.get("guidance_text", "")
-        recommended = endpoint_profile.get("recommended_skills", [])
-
-        # Merge knowledge-recommended skills with keyword-matched skills
-        hinted_names = list(dict.fromkeys(
-            recommended + SM.matching(url, tech, extra=str(it.get("note") or ""))
-        ))[:8]
-        hinted_paths = []
-        for n in hinted_names:
-            sp = os.path.join(SM.SKILLS_DIR, n, "SKILL.md")
-            if os.path.isfile(sp):
-                hinted_paths.append(sp)
-        skill_hint = ("Read these ONLY if they match what the live response is: "
-                      + ", ".join(f"`{x}`" for x in hinted_paths[:6])
-                      + f". Any other hunt-* in {SM.SKILLS_DIR} may be Read. "
-                      "They are references, not a menu.")
-        knowledge_block = ""
-        if knowledge_text:
-            knowledge_block = (f"\nKNOWLEDGE — what has gone wrong in endpoints like this:\n"
-                               f"{knowledge_text}\n"
-                               "Use this as starting hypotheses, not a checklist. "
-                               "If the live response contradicts these patterns, trust the response.\n")
+        skill_hint = ("Fetch a baseline first and retain its observation IDs. Form a concrete hypothesis from those "
+                      "bytes, then call `skill_map.for_hypothesis(hypothesis, function_profile, "
+                      "evidence_dir=os.environ['HUNT_EVIDENCE_DIR'], case_id=os.environ['HUNT_CASE_ID'], "
+                      "observation_ids=[...])`. Without matching live observations only methodology is returned. "
+                      "Skills are optional references, never a worklist or coverage target. Return one "
+                      "hypothesis_results entry per tested dimension; unreported dimensions remain untested.")
+        knowledge_block = ("\nOBSERVED FUNCTION PROFILE (target-specific, not a vulnerability catalog):\n"
+                           + json.dumps(endpoint_profile.get("function_profile") or {}, default=str)[:5000] + "\n")
         # Rich endpoint metadata from discovery
         meta_parts = []
         if it.get("auth_required"):
@@ -2078,44 +2052,36 @@ class Engine:
             "except account creation which is guardrail-gated. NO bruteforce/cracking (refused by policy).\n"
             f"- Research: `python3 {e}/websearch.py search \"<query>\"`  (read a page: `... fetch <url>`). "
             "Use it to confirm a CVE, a framework's known bugs, or a disclosed report before claiming impact.\n"
-            f"- Authenticated testing (IDOR/auth need real accounts): mint a disposable, capped, in-scope-only "
-            f"test identity with a live inbox:\n"
+            f"- Actor-dependent testing: when observed boundaries require another identity, mint a disposable, "
+            f"capped, in-scope-only test identity with a live inbox:\n"
             f"    `python3 {e}/identity.py new  --program {p}`   then read the verify mail: "
             f"`python3 {e}/identity.py poll --program {p} --email <addr>`\n"
             f"  (phone-gated signups: SMS is {sms_state}.)\n"
             f"- No playbook for a stack/vuln/bypass? Teach the harness: "
             f"`python3 {e}/learn.py auto --kind <tech|vuln|bypass|program> --name \"<thing>\" --context \"<why>\"` — reads it after drafting.\n"
-            f"- Headless-browser capture (find the REAL API behind a SPA — biggest discovery win): "
-            f"`python3 {e}/browser.py capture --url <seed> --slug {p} [--as A] --scope <in-scope-host>` -> "
-            f"XHR/fetch/GraphQL endpoints, then test those.\n"
+            f"- Headless-browser capture (observe runtime calls, forms, and relationships): "
+            f"`python3 {e}/browser.py capture --url <seed> --slug {p} [--as A] --scope <in-scope-host>`.\n"
             f"- Authenticated fetch (carries your session, bypasses edge TLS/IP gating): "
-            f"`python3 {e}/netget.py GET \"<url>\" --as A` (second account: `--as B`).\n"
-            f"- IDOR/BOLA sweep (OWASP #1, best-paying): `python3 {e}/authz.py diff --slug {p} --url \"<A-owned url>\"` "
-            f"-> bola_suspect leads; confirm each with a real two-account PoC.\n"
+            f"`python3 {e}/netget.py GET \"<url>\" --as A` (second actor: `--as B`).\n"
+            f"- Actor/resource boundary diff: `python3 {e}/authz.py diff --slug {p} --url \"<owner-observed url>\"` "
+            f"-> leads only; confirm with ownership markers and positive/negative controls.\n"
             f"- App-backed program (esp. geo/IP-gated API)? Pull the API surface from the APK: "
             f"`python3 {e}/apkmap.py extract --apk <file>` -> hosts + endpoints + secrets.\n"
             "- All account/login/SMS actions pass engine/guardrails.py (scope + per-program cap) and are audited.\n")
 
     @staticmethod
+    def _timeout_retry_allowed(item):
+        return (item.get("method") or "GET").upper() in ("GET", "HEAD", "OPTIONS")
+
+    @staticmethod
     def _alt_model(current):
         """A pool model different from `current` — for timeout failover (a stuck model/endpoint often
         clears on another model)."""
-        import random
-        pool = []
-        for key in ("OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
-            pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
-            if pool:
-                break
-        alts = [m for m in pool if m and m != current] or pool
-        return random.choice(alts) if alts else None
+        import agent
+        return agent._next_model(current)
 
     def _scheduled_hunt(self, it, model=None, timeout=None):
-        """Scheduler-aware wrapper around _hunt_agent.
-        Claims work before the agent call. Sends periodic heartbeats to renew
-        the lease during long-running hunts. Completion is evidence-gated:
-        only results with execution evidence (request text or confirmed vulnerable)
-        are marked completed. Skipped/no-evidence results are marked failed so
-        the scheduler can retry them in a future round."""
+        """Claim and execute work; completion is finalized only after evidence validation."""
         _sched = self.scheduler
         if not _sched:
             return self._hunt_agent(it, model, timeout)
@@ -2133,7 +2099,6 @@ class Engine:
             cs = _sched.status(case_id)
             self.eng.log(f"hunt: scheduler skip {it.get('url','?')[:60]} (status={cs.get('status') if cs else '?'})")
             return {"skipped": "scheduler: already claimed or exhausted"}
-        # Background heartbeat thread keeps the lease alive during long agent runs
         import threading as _th
         _hb_stop = _th.Event()
         hb_interval = max(lease_sec // 3, 10)
@@ -2148,10 +2113,6 @@ class Engine:
                 _sched.fail(case_id, worker_id, error=f["error"])
             elif f and f.get("skipped"):
                 _sched.fail(case_id, worker_id, error=f"skipped: {f['skipped']}")
-            elif f and (f.get("request") or f.get("vulnerable")):
-                _sched.complete(case_id, worker_id)
-            else:
-                _sched.fail(case_id, worker_id, error="no execution evidence recorded")
             return f
         except Exception as exc:
             _sched.fail(case_id, worker_id, error=str(exc))
@@ -2160,16 +2121,24 @@ class Engine:
             _hb_stop.set()
             _hb_thread.join(timeout=2)
 
+    def _finalize_scheduled(self, it, evidence_valid, reason=""):
+        if not self.scheduler:
+            return
+        case_id = self.eng._key(it)
+        worker_id = f"pid-{os.getpid()}"
+        if evidence_valid:
+            self.scheduler.complete(case_id, worker_id)
+        else:
+            self.scheduler.fail(case_id, worker_id, error=reason or "no transport evidence")
+
     def _hunt_agent(self, it, model=None, timeout=None):
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
-        cls = (it.get("vuln_class") or "").lower()
-        original_class = cls
-        if os.environ.get("HUNT_DEEP", "1") == "1" and cls not in ("deep",):
-            it = dict(it)
-            it["vuln_class"] = "deep"
-            it["_original_vuln_class"] = original_class
-            cls = "deep"
+        try:
+            import netget as _ng
+            _ng.set_current_case(self.eng._key(it))
+        except Exception:
+            pass
         # DEAD-SURFACE PRE-PROBE: don't burn a ~2-min LLM hunt on an endpoint whose host is WAF/staging-walled.
         # A staging host that 403s every path wastes the whole budget if we hunt each URL.
         # Probe once with the authed session; a 403 or 5xx means walled/dead -> skip + mark tested (won't requeue).
@@ -2191,9 +2160,8 @@ class Engine:
                         return {"vulnerable": False, "skipped": f"host walled (HTTP {_st})"}
             except Exception:  # noqa: BLE001
                 pass
-        # DETERMINISTIC 2-account IDOR/BOLA shortcut — runs before the LLM call.
-        # Uses planned owner/accessor/method from test item, not hardcoded defaults.
-        if str(it.get("url", "")).startswith("http"):
+        # Similarity is only a lead. Deterministic confirmation requires an explicit A-owned marker.
+        if str(it.get("url", "")).startswith("http") and it.get("owner_marker"):
             try:
                 import authn as _AN
                 import authz as _AZ
@@ -2202,25 +2170,26 @@ class Engine:
                 _method = it.get("method") or "GET"
                 ids = _AN.identities(self.scope.name, self.base)
                 if _owner in ids and _accessor in ids:
-                    d = _AZ.diff_one(_method, it["url"], it.get("body"), self.scope.name,
-                                     owner=_owner, accessor=_accessor)
-                    s = d if d.get("bola_suspect") else (_AZ.id_oracle(
-                        it["url"], self.scope.name, owner=_owner, accessor=_accessor) or [None])[0]
-                    if s and s.get("bola_suspect"):
+                    proof = _AZ.prove_ownership(
+                        _method, it["url"], it.get("body"), self.scope.name,
+                        it["owner_marker"], control_url=it.get("control_url"),
+                        owner=_owner, accessor=_accessor)
+                    if proof.get("confirmed"):
                         return {"vulnerable": True, "severity": "high", "vuln_class": "idor",
-                                "evidence": (f"Cross-account {_method} (authz 2-account): identity {_accessor} requested "
-                                             f"{_owner}'s object {s['url']} and received HTTP {s['B_status']} with "
-                                             f"{s['similarity']:.0%}-identical id-bearing content "
-                                             f"({_owner}={s['A_status']}/{s['A_len']}B, "
-                                             f"{_accessor}={s['B_status']}/{s['B_len']}B) — object-level authorization missing."),
-                                "request": f"{_method} {s['url']}  — as {_owner} vs as {_accessor} (two-account diff)",
+                                "evidence": (f"Cross-account {_method}: {_accessor} received {_owner}'s unique marker "
+                                             f"from {it['url']} (A={proof['A_status']}, B={proof['B_status']})."),
+                                "request": f"{_method} {it['url']} — as {_owner} vs {_accessor}",
+                                "response": f"A-owned marker present in B response: {it['owner_marker']}",
+                                "owner_marker": it["owner_marker"], "control_url": it.get("control_url"),
                                 "attacker_holds": "own_session", "id_source": "in_scope_oracle",
-                                "_model": "authz-idor", "_skills": ["hunt-idor"]}
+                                "_model": "authz-ownership-proof", "_skills": ["hunt-idor"]}
             except Exception:  # noqa: BLE001
                 pass
         if not model:
-            ctx = {"vuln_class": it.get("vuln_class"), "params": len(it.get("params") or []),
+            ctx = {"params": len(it.get("params") or []),
                    "auth_required": it.get("auth_required", False),
+                   "sensitivity": (it.get("function_profile") or {}).get("sensitivity", {}).get("level", 0),
+                   "boundaries": len((it.get("function_profile") or {}).get("trust_dimensions") or []),
                    "previous_result": it.get("_previous_result")}
             model, _eff, _budget = MR.route("hunt", ctx)
             self.eng.log(f"hunt: model={model} effort={_eff} (budget={_budget['max_tokens']}) for {it.get('vuln_class')}@{it.get('url','?')[:60]}")
@@ -2256,10 +2225,8 @@ class Engine:
 
     # ---------------- chain ----------------
     def chain(self):
-        """Chain composer (vuln-first): take confirmed + candidate PRIMITIVES and actively try to COMBINE them
-        into ONE higher-severity chain (open-redirect->OAuth token theft->ATO, IDOR->privesc, SSRF->cloud
-        metadata->cred, XSS->session/ATO, subdomain-takeover->cookie/OAuth). Spends an agent call ONLY when
-        chainable primitives exist -> free on targets that found nothing. In-scope, read-only, end-to-end."""
+        """Compose observed effects and preconditions into an evidence-backed sequence.
+        Runs only when multiple primitives exist; never selects a chain from class names."""
         if self.mock:
             return
         pool = (self.eng.state.get("confirmed") or []) + (self.eng.state.get("candidates") or [])
@@ -2285,11 +2252,10 @@ class Engine:
                           for p in prims[:8])
         self.eng.log(f"chain: composing from {len(prims)} primitive(s) — {classes}")
         task = (self._roe() + "\n"
-                "TASK: You have these CONFIRMED/suspected primitives on this target. Actively try to COMPOSE "
-                "them (with each other, or with a documented pattern) into ONE higher-severity CHAIN — e.g. "
-                "open-redirect -> OAuth code/token theft -> account takeover; IDOR -> privilege escalation; "
-                "SSRF -> cloud metadata -> credential; XSS -> session/ATO; subdomain-takeover -> cookie/OAuth "
-                "theft. Prove the chain END-TO-END with real in-scope, read-only requests. If no real chain "
+                "TASK: You have these evidence-backed primitives on this target. Analyze their actual resources, "
+                "actors, inputs, effects, and preconditions. Try to compose only relationships supported by those "
+                "observations into one higher-impact sequence. Do not select a chain pattern by vulnerability name. "
+                "Prove every transition END-TO-END with real in-scope, read-only requests. If no real chain "
                 "composes, return chained:false — never speculate.\n"
                 f"PRIMITIVES:\n{plist}\n"
                 "End with a fenced ```json``` object: "
@@ -2387,7 +2353,7 @@ class Engine:
         now = time.time()
         for it in list(self.eng.state.get("surface") or []):
             url = it.get("url") or ""
-            if not (_skip_static_url(url) or (skip_junk and _REVIEW_JUNK.search(url))):
+            if not _skip_static_url(url):
                 continue
             key = self.eng._key(it)
             if key in tested or key in collapsed:
@@ -2439,8 +2405,7 @@ class Engine:
 
     def validate(self):
         real_todo = [it for it in self.eng.worklist()
-                     if not _skip_static_url(it.get("url") or "")
-                     and not _REVIEW_JUNK.search(it.get("url") or "")]
+                     if not _skip_static_url(it.get("url") or "")]
         has_candidates = bool(self.eng.state.get("candidates"))
         if len(real_todo) > 20 and not has_candidates:
             self.eng.log(f"validate: {len(real_todo)} real url(s) still untested and no candidates — staying on hunt")
@@ -2449,6 +2414,10 @@ class Engine:
             self.eng.log(f"validate: {len(real_todo)} url(s) still untested but {len(self.eng.state['candidates'])} candidate(s) pending — validating candidates")
         self.eng.set_phase("validate")
         self._apply_review_directives()
+        def outcome(candidate, cls, result, note="", **_kwargs):
+            dimensions = candidate.get("trust_dimensions") or []
+            return _lrn("record_outcome", self.scope.name, cls, result, note, base=self.base,
+                        trust_dimension=dimensions[0] if dimensions else "")
         import disposition as D
         held_keys = {(h.get("url"), h.get("vuln_class"))
                      for h in (self.eng.state.get("disposition_held") or [])}
@@ -2474,7 +2443,7 @@ class Engine:
             if pre["status"] == "disproved":
                 c["reproduction"] = pre
                 self.eng.mark_rejected(c, f"disproved via {pre['method']}")
-                _lrn("record_outcome", self.scope.name, cls, "false-positive",
+                outcome(c, cls, "false-positive",
                      f"disproved by {pre['method']}: {pre['signal']}", base=self.base)
                 self.eng.log(f"validate: ✗ PRE-CHECK disproved {cls} @ {url} — {pre['signal']} (LLM skipped)")
             else:
@@ -2490,14 +2459,14 @@ class Engine:
             # 1) deterministic DISPROOF overrides an LLM 'real' -> NOT a real bug (kills false positives)
             if repro["status"] == "disproved":
                 self.eng.mark_rejected(c, f"disproved via {repro['method']}")
-                _lrn("record_outcome", self.scope.name, cls, "false-positive",
+                outcome(c, cls, "false-positive",
                      f"disproved by {repro['method']}: {repro['signal']}", base=self.base)
                 self.eng.log(f"validate: ✗ NOT REAL (disproved via {repro['method']}) {cls} @ {url} — {repro['signal']}")
                 continue
             # 2) the skeptical validator says it's not real -> drop it, and do not verify it again
             if not llm_real:
                 self.eng.mark_rejected(c, (v or {}).get("reason", "") or "false positive")
-                _lrn("record_outcome", self.scope.name, cls, "false-positive",
+                outcome(c, cls, "false-positive",
                      (v or {}).get("reason", ""), base=self.base)
                 self.eng.log(f"validate: ✗ rejected (false positive) {cls} @ {url} — "
                              f"{(v or {}).get('reason', 'no verdict')}")
@@ -2509,23 +2478,30 @@ class Engine:
                 self.eng.state.setdefault("disposition_held", []).append({
                     "url": url, "vuln_class": cls, "verdict": disp["verdict"], "reason": disp.get("reason", "")})
                 self.eng.save()
-                _lrn("record_outcome", self.scope.name, cls,
+                outcome(c, cls,
                      "held-" + disp["verdict"].lower().replace("_", "-"), disp.get("reason", ""), base=self.base)
                 self.eng.log(f"validate: HELD {disp['verdict']} {cls} @ {url} — {disp.get('reason','')}")
                 continue
-            # 4) REAL -> confirm, LABELLED by how we know it's real (reproduced vs LLM-only-needs-manual-check)
+            reproduced = repro["status"] == "reproduced" or self.mock
+            if not reproduced:
+                c["reproduction"] = repro
+                self.eng.state.setdefault("disposition_held", []).append({
+                    "url": url, "vuln_class": cls, "verdict": "NEEDS_MANUAL_REPRODUCTION",
+                    "reason": repro.get("signal", "independent reproduction required")})
+                self.eng.state.setdefault("manual_review", []).append(c)
+                self.eng.save()
+                outcome(c, cls, "manual-review", repro["signal"], base=self.base)
+                self.eng.log(f"validate: HELD — independent reproduction required [{repro['method']}] {cls} @ {url}")
+                continue
             if v.get("severity"):
-                c["severity"] = v["severity"]     # use the validator's CALIBRATED severity, not the hunt's
-            reproduced = repro["status"] == "reproduced"
-            repro_status = "reproduced" if reproduced else repro.get("status", "unreproduced")
-            self.eng.confirm(c, v, reproduction_status=repro_status)
+                c["severity"] = v["severity"]
+            c["reproduction"] = ({**repro, "status": "reproduced",
+                                  "tools": ["mock-transport", "mock-oracle"]} if self.mock else repro)
+            self.eng.confirm(c, v, reproduction_status="reproduced")
             self.eng.record_finding_verified()
-            tag = ("✅ CONFIRMED REAL (reproduced)" if reproduced
-                   else "⚠ CONFIRMED — LLM-validated but NOT independently reproduced; verify before submit")
-            _lrn("record_outcome", self.scope.name, cls,
-                 "confirmed" if reproduced else "confirmed-unreproduced", repro["signal"], base=self.base)
-            self.eng.log(f"validate: {tag} [{repro['method']}] {cls} @ {url} ({v.get('severity','')})"
-                         + (f" ⚠ scope-flagged: {', '.join(c['scope_warning'])}" if c.get('scope_warning') else ''))
+            outcome(c, cls, "confirmed", repro["signal"], base=self.base)
+            self.eng.log(f"validate: CONFIRMED REAL (reproduced) [{repro['method']}] {cls} @ {url} "
+                         f"({v.get('severity','')})")
         # post-validate: evolve learned skills with accumulated outcomes
         try:
             evolved = _lrn("evolve_all", base=self.base)
@@ -2594,28 +2570,27 @@ class Engine:
         except Exception as e:  # noqa: BLE001
             note = f"live unavailable: {e}"
         if cls in ("idor", "bola") and str(c.get("url") or "").startswith("http"):
-            try:                                       # 2) two-account cross-account diff (needs planned identities)
+            try:
                 import authz as _AZ
                 import authn as _AN
-                _owner = c.get("owner", "A")
-                _accessor = c.get("accessor", "B")
-                if _accessor in _AN.identities(self.scope.name, self.base):
-                    d = _AZ.diff_one("GET", c["url"], None, self.scope.name,
-                                     owner=_owner, accessor=_accessor)
-                    if d.get("bola_suspect"):
-                        return {"status": "reproduced", "method": "two-account-diff",
-                                "signal": f"{_accessor}'s request to {_owner}'s object returned matching data (sim={d.get('similarity')})"}
-                    return {"status": "disproved", "method": "two-account-diff",
-                            "signal": f"two-account diff shows proper isolation — {_accessor} cannot read {_owner}'s object"}
+                _owner = c.get("owner") or "A"
+                _accessor = c.get("accessor") or "B"
+                if _accessor in _AN.identities(self.scope.name, self.base) and c.get("owner_marker"):
+                    proof = _AZ.prove_ownership(
+                        c.get("method") or "GET", c["url"], c.get("body"), self.scope.name,
+                        c["owner_marker"], control_url=c.get("control_url"),
+                        owner=_owner, accessor=_accessor)
+                    if proof.get("confirmed"):
+                        return {"status": "reproduced", "method": "ownership-marker-replay",
+                                "signal": f"{_accessor} received {_owner}'s unique marker in an independent replay"}
+                    return {"status": "inconclusive", "method": "ownership-marker-replay",
+                            "signal": proof.get("reason", "ownership proof did not reproduce")}
             except Exception:  # noqa: BLE001
                 pass
-        # Step 3 removed: regex match on agent-written evidence text is not independent
-        # reproduction. Only live-retest and two-account-diff count as reproduced.
-        # Check transport evidence exists for this case as a minimum bar for "plausible"
         try:
             import evidence as _EV
             edir = self.eng.evidence_path("")
-            case_key = self.eng._key(c)
+            case_key = c.get("case_id") or self.eng._key(c)
             valid, _reason = _EV.validate_evidence(edir, case_key)
             if valid:
                 return {"status": "plausible", "method": "transport-evidence-present",
@@ -2666,11 +2641,17 @@ class Engine:
             D.annotate(self.scope.name, c, base=self.base)
         except Exception as e:
             self.eng.log(f"report: dedup annotate skipped ({e})")
-        # LIKELY_DUP hard gate: never draft findings the dedup oracle flagged as known
-        dup_dropped = [f for f in c if (f.get("dedup") or {}).get("verdict") == "LIKELY_DUP"]
-        if dup_dropped:
-            self.eng.log(f"report: LIKELY_DUP gate dropped {len(dup_dropped)} finding(s) from draft")
-        c = [f for f in c if (f.get("dedup") or {}).get("verdict") != "LIKELY_DUP"]
+        def eligible(f):
+            dd = f.get("dedup") or {}
+            verdict = dd.get("verdict")
+            reproduced = ((f.get("reproduction") or {}).get("status") or f.get("reproduction_status")) == "reproduced"
+            dedup_ok = verdict == "NOVEL" or (verdict == "REVIEW" and bool(f.get("differentiator")))
+            return reproduced and dedup_ok and not f.get("scope_warning")
+        dropped = [f for f in c if not eligible(f)]
+        if dropped:
+            self.eng.log(f"report: report-ready gate held {len(dropped)} finding(s) "
+                         "(reproduction, scope, or dedup unresolved)")
+        c = [f for f in c if eligible(f)]
         s = self.eng.summary()
         try:
             import report as RPT

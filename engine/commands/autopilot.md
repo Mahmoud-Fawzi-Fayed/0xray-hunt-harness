@@ -66,14 +66,14 @@ Runs the full anti-duplicate hunt cycle without stopping for approval at each st
 ```
 1.  SCOPE       Load and confirm program scope
 2.  SYNC        /dedup sync — build the known-issue corpus (your reports + public H1/Bugcrowd disclosures)
-3.  DISCOVER    Exhaustive function/endpoint inventory — map ALL features, APIs, roles, boundaries,
-                credentials, billing, admin paths BEFORE any testing. Coverage gate: ≥80% categories.
+3.  DISCOVER    Map features, APIs, roles, and boundaries before testing. Gate on validated operations
+                and required source attempts; missing categories stay PARTIAL, never guessed coverage.
 4.  RECON       Run recon (or use cached if < 7 days old)
 5.  NOVELTY     /dedup watch — diff the surface; hunt the fresh/changed surface (lowest dup-risk) FIRST
 6.  RANK        /yield — cover ALL classes, ordered by find-likelihood + your learned dup rate
 7.  HUNT        Test prioritized surface systematically (novelty delta first)
 8.  VALIDATE    7-Question Gate on findings
-9.  DEDUP GATE  /dedup check — NOVEL -> draft; LIKELY_DUP -> HELD (not drafted) unless a differentiator
+9.  DEDUP GATE  NOVEL -> report-ready check; UNKNOWN/LIKELY_DUP -> HELD; REVIEW needs differentiator
 10. DRAFT       Draft reports for novel validated findings
 11. CHECKPOINT  Present to human; STOP before any submit
 ```

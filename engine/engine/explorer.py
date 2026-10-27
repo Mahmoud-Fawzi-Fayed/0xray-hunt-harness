@@ -19,19 +19,6 @@ from urllib.parse import urlparse
 ENGINE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE)
 
-# Common hidden/admin paths to probe
-HIDDEN_PATHS = [
-    "/admin", "/debug", "/graphql", "/graphiql", "/playground",
-    "/api-docs", "/swagger", "/swagger-ui", "/openapi.json", "/openapi.yaml",
-    "/.env", "/.git/HEAD", "/robots.txt", "/sitemap.xml",
-    "/wp-admin", "/wp-login.php", "/elmah.axd", "/trace.axd",
-    "/server-status", "/server-info", "/_debug", "/__debug__",
-    "/actuator", "/actuator/health", "/actuator/env",
-    "/api/v1", "/api/v2", "/api/v3",
-    "/console", "/dashboard", "/settings", "/account", "/profile",
-    "/internal", "/metrics", "/health", "/status", "/info",
-]
-
 _ATTR_URL_RE = re.compile(
     r'''(?:href|src|action|data-url|data-api|data-endpoint|data-href|formaction)'''
     r'''=["']([^"'#][^"']*?)["']''', re.I)
@@ -78,38 +65,16 @@ def _extract_roles(content):
 
 
 def _classify_page(url, links, forms):
-    """Classify page type based on content."""
-    url_l = url.lower()
-    if any(k in url_l for k in ("/login", "/signin", "/auth")):
-        return "auth"
-    if any(k in url_l for k in ("/register", "/signup", "/join")):
-        return "registration"
-    if any(k in url_l for k in ("/admin", "/manage", "/dashboard")):
-        return "admin"
-    if any(k in url_l for k in ("/settings", "/account", "/profile")):
-        return "settings"
-    if any(k in url_l for k in ("/api/", "/graphql")):
-        return "api"
-    if forms:
-        return "interactive"
-    return "content"
+    """Describe observed interaction shape without naming a product convention."""
+    return "interactive" if forms else "observed"
 
 
-def _detect_workflows(pages):
-    """Detect multi-step workflows from page transitions."""
-    workflows = []
-    auth_flow = [p for p in pages if p.get("type") in ("auth", "registration")]
-    if auth_flow:
-        steps = sorted(set(p["url"] for p in auth_flow))
-        if steps:
-            workflows.append({"name": "authentication", "steps": steps})
-
-    settings_flow = [p for p in pages if p.get("type") == "settings"]
-    if settings_flow:
-        steps = sorted(set(p["url"] for p in settings_flow))
-        workflows.append({"name": "account-management", "steps": steps})
-
-    return workflows
+def _detect_workflows(pages, forms=None):
+    """Group observed interactions into workflows without inferring a named business flow."""
+    if forms is None:
+        forms = [form for page in pages for form in page.get("forms", [])]
+    steps = sorted({form.get("url") for form in forms if form.get("url")})
+    return [{"name": "observed-interaction-sequence", "steps": steps}] if steps else []
 
 
 def _find_hidden_features(all_urls, js_routes, scope_hosts):
@@ -121,10 +86,6 @@ def _find_hidden_features(all_urls, js_routes, scope_hosts):
         route_clean = route.split("?")[0].rstrip("/")
         if route_clean and route_clean not in known_paths:
             hidden.append({"path": route, "evidence": "found in JS but not in navigation", "source": "js-route"})
-
-    for path in HIDDEN_PATHS:
-        if path not in known_paths:
-            hidden.append({"path": path, "evidence": "common hidden path (not yet probed)", "source": "wordlist"})
 
     return hidden[:50]
 
@@ -214,10 +175,19 @@ def analyze(state, scope=None):
         })
         all_urls.add(url)
 
-    # Extract routes from JS URLs in state
+    # Extract operations and routes only from supplied source evidence.
+    for cap in browser_caps:
+        all_urls.update(_extract_urls_from_html(str(cap.get("content") or cap.get("html") or "")))
+        js_routes.update(_extract_routes_from_js(str(cap.get("js_content") or cap.get("content") or "")))
     for ju in (js_urls or []):
         if isinstance(ju, str):
             all_urls.add(ju)
+        elif isinstance(ju, dict):
+            if ju.get("url"):
+                all_urls.add(ju["url"])
+            content = str(ju.get("js_content") or ju.get("content") or "")
+            all_urls.update(_extract_urls_from_html(content))
+            js_routes.update(_extract_routes_from_js(content))
 
     # Detect roles from all content
     for cap in browser_caps:
@@ -230,7 +200,7 @@ def analyze(state, scope=None):
     hidden = _find_hidden_features(all_urls, js_routes, scope_hosts)
 
     # Detect workflows
-    workflows = _detect_workflows(pages)
+    workflows = _detect_workflows(pages, all_forms)
 
     # Build unique API surface (deduplicated)
     api_seen = set()
@@ -272,13 +242,6 @@ def analyze(state, scope=None):
     }
 
 
-_API_SPEC_PATHS = {
-    "/swagger.json", "/swagger.yaml", "/swagger-ui", "/swagger",
-    "/openapi.json", "/openapi.yaml", "/api-docs", "/v2/api-docs", "/v3/api-docs",
-    "/graphql", "/graphiql", "/playground",
-}
-
-_AUTH_INDICATORS = {"login", "signin", "auth", "token", "oauth", "session", "jwt"}
 _SESSION_PATTERNS = {
     "jwt": re.compile(r"bearer|authorization|jwt", re.I),
     "cookie": re.compile(r"set-cookie|session_?id|csrf", re.I),
@@ -297,23 +260,16 @@ def _path_prefix(url, depth=2):
 
 
 def _detect_api_specs(all_urls, api_surface):
-    """Find known API spec/introspection endpoints in captured URLs."""
+    """Return schemas actually present in captured content, not conventional paths."""
     specs = []
-    all_paths = set()
-    for u in all_urls:
-        try:
-            all_paths.add(urlparse(u).path.rstrip("/").lower())
-        except Exception:
-            pass
     for ep in api_surface:
-        p = ep.get("path", "")
-        try:
-            all_paths.add(urlparse(p).path.rstrip("/").lower())
-        except Exception:
-            pass
-    for spec_path in _API_SPEC_PATHS:
-        if spec_path in all_paths:
-            specs.append({"path": spec_path, "type": "graphql" if "graph" in spec_path else "openapi"})
+        content = ep.get("content") or ep.get("body") or ep.get("schema") or {}
+        text = json.dumps(content) if not isinstance(content, str) else content
+        url = ep.get("url") or ep.get("path") or ""
+        if '"openapi"' in text or '"swagger"' in text:
+            specs.append({"path": url, "type": "openapi", "confidence": "observed"})
+        elif '"__schema"' in text or '"queryType"' in text:
+            specs.append({"path": url, "type": "graphql", "confidence": "observed"})
     return specs
 
 
@@ -334,7 +290,7 @@ def build_inventory(browser_captures, burp_endpoints, js_routes, state, role=Non
     ops_by_prefix = {}
     op_id = 0
 
-    def _add_op(url, method, params, source, confidence, auth_req=False, status=None, evidence=None):
+    def _add_op(url, method, params, source, confidence, auth_req=False, status=None, evidence=None, content=None):
         nonlocal op_id
         op_id += 1
         prefix = _path_prefix(url)
@@ -348,6 +304,7 @@ def build_inventory(browser_captures, burp_endpoints, js_routes, state, role=Non
             "confidence": confidence,
             "roles_tested": [role] if role else [],
             "evidence": evidence,
+            "content": content,
         }
         if status is not None:
             op["status"] = status
@@ -367,8 +324,9 @@ def build_inventory(browser_captures, burp_endpoints, js_routes, state, role=Non
             _add_op(cap["formaction"], cap.get("formmethod", "POST"), [],
                      "button", "observed", evidence="browser_capture")
         elif src in ("fetch", "xhr"):
-            _add_op(cap.get("url", ""), cap.get("method", "GET"), [],
-                     "js-api", "observed", status=cap.get("status"), evidence="browser_capture")
+            _add_op(cap.get("url", ""), cap.get("method", "GET"), cap.get("params") or [],
+                     "js-api", "observed", status=cap.get("status"), evidence="browser_capture",
+                     content=cap.get("content") or cap.get("body") or cap.get("schema"))
 
     # Burp endpoints
     for ep in (burp_endpoints or []):
@@ -397,27 +355,19 @@ def build_inventory(browser_captures, burp_endpoints, js_routes, state, role=Non
             "workflows": [],
         })
 
-    # Detect auth-related features and build workflows
-    auth_ops = []
+    all_operations = []
     for feat in features:
-        is_auth = any(kw in feat["path_prefix"].lower() for kw in _AUTH_INDICATORS)
-        if is_auth:
-            auth_ops.extend(feat["operations"])
+        all_operations.extend(feat["operations"])
+        if len(feat["operations"]) > 1:
             feat["workflows"].append({
-                "name": f"{feat['name']}-flow",
+                "name": "observed-operation-sequence",
                 "steps": [op["url"] for op in feat["operations"]],
             })
+    api_specs = _detect_api_specs(set(), all_operations)
 
-    # Detect API specs from all collected URLs
-    all_urls = set()
-    for feat in features:
-        for op in feat["operations"]:
-            if op["url"]:
-                all_urls.add(op["url"])
-    api_specs = _detect_api_specs(all_urls, [])
-
-    # Auth model
-    login_eps = [op["url"] for op in auth_ops if op["url"]]
+    login_eps = [op["url"] for op in all_operations
+                 if any((p.get("type") == "password" if isinstance(p, dict) else str(p).lower() == "password")
+                        for p in op.get("params", []))]
     roles_discovered = set()
     for feat in features:
         for op in feat["operations"]:
@@ -507,6 +457,7 @@ def _cmd_selftest(_a):
              "inputs": [{"name": "email"}, {"name": "password"}]},
             {"source": "fetch", "url": "/api/v1/users/me", "method": "GET", "status": 200},
             {"source": "xhr", "url": "/api/v1/notifications", "method": "GET"},
+            {"source": "script", "url": "/app.js", "content": "const route = {path: '/api/internal/debug'};"},
             {"source": "button", "formaction": "/api/account/delete", "formmethod": "DELETE"},
         ],
         "surface": [
@@ -520,12 +471,11 @@ def _cmd_selftest(_a):
     assert result["stats"]["pages_discovered"] == 4, result["stats"]
     assert result["stats"]["api_endpoints"] >= 3, result["stats"]
     assert result["stats"]["forms"] == 1, result["stats"]
-    assert any(p["type"] == "auth" for p in result["pages"]), [p["type"] for p in result["pages"]]
-    assert any(p["type"] == "settings" for p in result["pages"]), [p["type"] for p in result["pages"]]
+    assert all(p["type"] in ("observed", "interactive") for p in result["pages"])
     assert any(ep["path"] == "/api/v1/users/me" for ep in result["api_surface"]), result["api_surface"]
     assert any(ep["path"] == "/api/account/delete" for ep in result["api_surface"]), result["api_surface"]
-    assert result["hidden_features"], "should find hidden paths"
-    assert result["workflows"], "should detect auth workflow"
+    assert result["hidden_features"], "should find source-evidenced unlinked paths"
+    assert result["workflows"], "should detect observed interaction workflows"
 
     # Test empty state doesn't crash
     empty = analyze({})
@@ -536,7 +486,8 @@ def _cmd_selftest(_a):
         browser_captures=[
             {"source": "form", "action": "/api/login", "method": "POST", "inputs": ["email", "password"]},
             {"source": "fetch", "url": "/api/v1/users/me", "method": "GET", "status": 200},
-            {"source": "fetch", "url": "/graphql", "method": "POST"},
+            {"source": "fetch", "url": "/graphql", "method": "POST",
+             "content": {"data": {"__schema": {"queryType": {"name": "Query"}}}}},
         ],
         burp_endpoints=[
             {"url": "/api/v1/orders", "method": "GET", "params": ["page"], "status": 200},

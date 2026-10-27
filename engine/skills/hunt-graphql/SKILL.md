@@ -29,6 +29,8 @@ That desync is one pattern. Most targets have a single GraphQL API and no second
 | `@defer` / `@stream` on a field you should not see | One deferred field | The incremental chunk contains it and the first payload did not |
 | The same object writable from REST and GraphQL | Steps 4–7 below | The two APIs disagree after one revoke or grant |
 
+Read-only GraphQL POST (queries/introspection) is allowed in non-intrusive mode. Mutations still require explicit authorization; POST is not treated as proof of a write by itself. Use bounded queries only and never test depth, aliases, or batches for service exhaustion.
+
 Skip steps 4–7 when nothing else writes the object.
 
 ---

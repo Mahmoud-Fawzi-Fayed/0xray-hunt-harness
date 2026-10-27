@@ -48,13 +48,13 @@ def save(slug, brain, base=DEFAULT_BASE):
 
 def record_edge(slug, url, analysis="", classes=None, signals=None,
                 result="nothing", hypotheses=None, base=DEFAULT_BASE):
-    """Write what this URL actually did. Truncate so the next prompt stays small."""
+    """Write observed behavior and hypothesis/dimension history, not a class worklist."""
     brain = load(slug, base)
     edges = brain["edges"]
     prev = edges.get(url) if isinstance(edges.get(url), dict) else {}
     edges[url] = {
         "last_analysis": str(analysis or prev.get("last_analysis") or "")[:800],
-        "classes_considered": list(classes or prev.get("classes_considered") or [])[:12],
+        "hypothesis_results": list(classes or prev.get("hypothesis_results") or [])[:12],
         "signals": list(signals or prev.get("signals") or [])[:12],
         "result": result or prev.get("result") or "nothing",
         "tested_at": time.time(),
@@ -176,9 +176,9 @@ def prompt_block(slug, url, base=DEFAULT_BASE):
         parts.append("PREVIOUS LOOK AT THIS URL (do not repeat the same requests or the same "
                      "empty conclusion; invent a different test from the live response):\n"
                      + str(edge["last_analysis"])[:500])
-        if edge.get("classes_considered"):
-            parts.append("Classes already considered: "
-                         + ", ".join(str(c) for c in edge["classes_considered"][:10]))
+        if edge.get("hypothesis_results"):
+            parts.append("Hypotheses already attempted (do not treat as class coverage): "
+                         + json.dumps(edge["hypothesis_results"][:10], default=str)[:1200])
     react = [r for r in (brain.get("reactive") or []) if r]
     if react:
         parts.append("MISSED SIGNALS FROM EARLIER ROUNDS (attack these, they were seen and not proven):\n- "

@@ -32,6 +32,16 @@ def _run(cmd, timeout=120):
         return ""
 
 
+def _fetch(url, timeout=12, redirects=False):
+    try:
+        import netget
+        if redirects:
+            return netget.follow_redirects(url, timeout=timeout)
+        return netget.get(url, timeout=timeout)
+    except Exception:
+        return 0, "", {}
+
+
 def enumerate_subdomains(apex, log=print):
     subs = {apex}
     if which("subfinder"):
@@ -44,7 +54,7 @@ def enumerate_subdomains(apex, log=print):
         names = [x.strip().lower() for x in out.splitlines() if x.strip()]
         subs.update(names)
         log(f"osint: assetfinder -> +{len(names)} name(s)")
-    crt = _run(["curl", "-s", "-A", _UA, "-m", "25", f"https://crt.sh/?q=%25.{apex}&output=json"], 30)
+    _, crt, _ = _fetch(f"https://crt.sh/?q=%25.{apex}&output=json", timeout=25)
     try:
         c = 0
         for x in json.loads(crt):
@@ -74,32 +84,21 @@ def _fingerprint(headers, body):
 
 
 def probe(host, timeout=12):
-    """Probe https then http; return target dict or None if dead. Backs off once on 429/503 so a
-    target's rate-limiter (Cloudflare 429) doesn't cost us the fingerprint + downstream recon coverage."""
+    """Probe through the scope-guarded transport; never follow redirects outside policy."""
     for scheme in ("https", "http"):
         url = f"{scheme}://{host}/"
-        out, codes = "", []
         for attempt in range(2):
-            out = _run(["curl", "-s", "-A", _UA, "-m", str(timeout), "-L", "-D", "-", "-o", "/tmp/_osint_body", url], timeout + 6)
-            codes = re.findall(r'^HTTP/\S+\s+(\d{3})', out, re.M)
-            if codes and int(codes[-1]) in (429, 503) and attempt == 0:
-                time.sleep(6)                              # polite backoff, then one retry
+            code, body, headers = _fetch(url, timeout=timeout, redirects=True)
+            if code in (429, 503) and attempt == 0:
+                time.sleep(6)
                 continue
             break
-        if not codes:
+        if not code:
             continue
-        headers = {}
-        for line in out.splitlines():
-            m = re.match(r'^([A-Za-z0-9\-]+):\s*(.*?)\s*$', line)
-            if m:
-                headers[m.group(1).lower()] = m.group(2)
-        try:
-            body = open("/tmp/_osint_body", encoding="utf-8", errors="replace").read()
-        except Exception:
-            body = ""
-        title = (re.search(r'<title[^>]*>([^<]*)', body, re.I) or [None, ""])[1].strip()
-        return {"host": host, "url": f"{scheme}://{host}/", "status": int(codes[-1]),
-                "server": headers.get("server", ""), "title": title[:70], "tech": _fingerprint(headers, body)}
+        title = (re.search(r'<title[^>]*>([^<]*)', body or "", re.I) or [None, ""])[1].strip()
+        return {"host": host, "url": url, "status": code,
+                "server": headers.get("server", ""), "title": title[:70],
+                "tech": _fingerprint(headers, body or "")}
     return None
 
 
@@ -127,23 +126,8 @@ def _pd_httpx():
 
 def probe_hosts(hosts, log=print):
     """Liveness + tech probe. Prefers PD httpx-toolkit (batch, rich tech-detect); curl fallback."""
-    pd = _pd_httpx()
-    if pd:
-        out = _run_stdin([pd, "-silent", "-json", "-sc", "-title", "-td", "-server",
-                          "-timeout", "12", "-no-color"], "\n".join(hosts))
-        targets = []
-        for line in out.splitlines():
-            try:
-                d = json.loads(line)
-                targets.append({"host": d.get("input") or urlparse(d.get("url", "")).hostname,
-                                "url": d.get("url", ""), "status": d.get("status_code"),
-                                "server": d.get("webserver", ""), "title": (d.get("title") or "")[:70],
-                                "tech": d.get("tech", []) or []})
-            except Exception:
-                pass
-        return targets, pd
     targets = [probe(h) for h in hosts]
-    return [t for t in targets if t], "curl(fallback — install PD httpx-toolkit)"
+    return [t for t in targets if t], "netget(scope-guarded)"
 
 
 def osint(scope, log=print, max_probe=80):

@@ -81,7 +81,7 @@ def _endpoints_from_profile(profile):
         if isinstance(u, str) and u.startswith("http"):
             eps.append({
                 "method": "GET", "url": u[:500],
-                "function": "hidden/admin/debug",
+                "function": "observed_unlinked_operation",
                 "params": [], "auth_required": True,
                 "source": "profile-hidden",
                 "confidence": "inferred",
@@ -103,8 +103,13 @@ def _endpoints_from_surface(state):
         seen.add(key)
         eps.append({
             "method": m, "url": u,
-            "function": s.get("note") or s.get("vuln_class") or "",
-            "params": [s["param"]] if s.get("param") else [],
+            "function": s.get("note") or (s.get("function_profile") or {}).get("action") or "",
+            "params": list(s.get("params") or ([s["param"]] if s.get("param") else [])),
+            "body_params": list(s.get("body_params") or []),
+            "role": s.get("role", ""), "owner": s.get("owner", ""),
+            "accessor": s.get("accessor", ""),
+            "unresolved_template": bool(s.get("unresolved_template")),
+            "provenance": s.get("provenance", ""),
             "auth_required": s.get("auth_required"),
             "source": s.get("source") or "recon",
             "confidence": "observed" if s.get("source") in ("browser", "proxy", "recon") else "inferred",
@@ -329,9 +334,14 @@ def merge_endpoints(sources):
             existing = by_key[key]
             if ep.get("confidence") == "observed" and existing.get("confidence") == "inferred":
                 by_key[key] = dict(ep)
-            # merge params
-            merged_params = list(set(existing.get("params", []) + (ep.get("params") or [])))
+                existing = by_key[key]
+            merged_params = list(dict.fromkeys(existing.get("params", []) + (ep.get("params") or [])))
             by_key[key]["params"] = merged_params[:30]
+            merged_body = list(dict.fromkeys(existing.get("body_params", []) + (ep.get("body_params") or [])))
+            by_key[key]["body_params"] = merged_body[:30]
+            for field in ("role", "owner", "accessor", "auth_required", "provenance"):
+                if ep.get(field) not in (None, "") and existing.get(field) in (None, ""):
+                    by_key[key][field] = ep[field]
             if ep.get("function") and not existing.get("function"):
                 by_key[key]["function"] = ep["function"]
             if ep.get("source") and ep["source"] not in existing.get("source", ""):
@@ -373,39 +383,17 @@ def group_by_feature(endpoints):
 
 # ---------------------------------------------------------------- test opportunities
 def annotate_test_opportunities(features):
-    """Annotate each feature with potential test opportunities based on its actions."""
+    """Expose observed trust dimensions; never infer vulnerability opportunities from names."""
+    import function_profile as FP
     for feat in features:
-        opportunities = set()
+        dimensions = set()
+        invariants = set()
         for action in feat.get("actions", []):
-            m = action.get("method", "").upper()
-            url = action.get("url", "").lower()
-            params = action.get("params") or []
-            func = (action.get("function") or "").lower()
-            if m in ("POST", "PUT", "PATCH", "DELETE"):
-                opportunities.add("state-change")
-            if any(p in ("id", "user_id", "uid", "account_id", "email") for p in params):
-                opportunities.add("IDOR/BOLA")
-            if any(p in ("url", "uri", "link", "redirect", "next", "return", "callback") for p in params):
-                opportunities.add("SSRF/open-redirect")
-            if any(p in ("file", "path", "filename", "upload", "document") for p in params):
-                opportunities.add("file-upload/LFI")
-            if any(p in ("query", "search", "q", "filter", "sort", "order") for p in params):
-                opportunities.add("injection")
-            if "graphql" in url:
-                opportunities.add("GraphQL")
-            if "websocket" in url or "ws:" in url or "wss:" in url:
-                opportunities.add("WebSocket")
-            if any(k in url for k in ("/admin", "/internal", "/debug", "/manage")):
-                opportunities.add("admin-access")
-            if any(k in func for k in ("payment", "checkout", "price", "billing", "subscription")):
-                opportunities.add("payment-logic")
-            if any(k in func for k in ("auth", "login", "signup", "password", "token", "session")):
-                opportunities.add("auth-bypass")
-            if any(k in func for k in ("export", "download", "report")):
-                opportunities.add("data-export")
-            if not action.get("auth_required"):
-                opportunities.add("unauth-access")
-        feat["test_opportunities"] = sorted(opportunities)
+            profile = FP.from_endpoint(action)
+            dimensions.update(profile.get("trust_dimensions") or [])
+            invariants.update(profile.get("logic_invariants") or [])
+        feat["test_opportunities"] = sorted(dimensions)
+        feat["logic_invariants"] = sorted(invariants)
     return features
 
 
@@ -468,8 +456,12 @@ def build_feature_map(slug, base=DEFAULT_BASE, eng_dir=None, profile=None, state
     except Exception:
         pass
 
+    import target_adapters as TA
+    function_profiles = TA.http_profiles(merged)
+
     return {
         "slug": slug,
+        "function_profiles": function_profiles,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "sources": list({ep.get("source", "unknown") for ep in merged}),
         "by_source": {src: sum(1 for e in merged if e.get("source") == src)
@@ -656,15 +648,10 @@ def _cmd_selftest(_a):
     all_opps = set()
     for feat in fmap["features"]:
         all_opps.update(feat.get("test_opportunities", []))
-    assert "IDOR/BOLA" in all_opps, f"missing IDOR opportunity: {all_opps}"
-    assert "payment-logic" in all_opps, f"missing payment opportunity: {all_opps}"
-    assert "auth-bypass" in all_opps, f"missing auth opportunity: {all_opps}"
-    assert "file-upload/LFI" in all_opps, f"missing file-upload opportunity: {all_opps}"
-    assert "injection" in all_opps, f"missing injection opportunity: {all_opps}"
-    assert "GraphQL" in all_opps, f"missing GraphQL opportunity: {all_opps}"
-    assert "data-export" in all_opps, f"missing data-export opportunity: {all_opps}"
-    assert "admin-access" in all_opps, f"missing admin opportunity: {all_opps}"
-    assert "unauth-access" in all_opps, f"missing unauth opportunity: {all_opps}"
+    assert "input_variation" in all_opps, all_opps
+    assert "state_and_sequence" in all_opps, all_opps
+    assert "actor_variation" in all_opps, all_opps
+    assert all("/" not in opportunity for opportunity in all_opps), all_opps
 
     # Check merge dedup (projects should appear once, not twice)
     proj_eps = [e for e in fmap["endpoints"] if "projects" in e["url"] and e["method"] == "GET"]

@@ -13,8 +13,9 @@ Trigger: `novelty.py` reports `changed_js` or `new_js`, or the HTML references a
 
 ```bash
 # Entry points: <script src>, importmap, asset-manifest.json, build-manifest
-curl -sL "https://$TARGET/" | grep -oE 'src="[^"]+\.js"'
-curl -sL "https://$TARGET/<bundle-url>" -o /tmp/new.js
+python3 engine/engine/netget.py GET "https://$TARGET/" --slug "$PROGRAM"
+# Full old/new fetch + diff uses the scope-guarded transport:
+python3 engine/engine/jsdiff.py fetch --old "$OLD_BUNDLE_URL" --new "$NEW_BUNDLE_URL"
 ```
 
 Old copy, first one that exists: novelty cache, prior recon file, Wayback (`https://web.archive.org/web/<timestamp>/<bundle-url>`), or an older build id still linked from a cached HTML page. No old bytes at all:

@@ -41,7 +41,7 @@ cat ~/.bughunter-engagements/<slug>/report.md
 | `HUNT_MAX_REDIRECTS` | `5` | Maximum redirect hops for `follow_redirects()` |
 | `HUNT_RETEST_HOURS` | `48` | Re-hunt window (hours since last test) |
 | `HUNT_MAX_ACCOUNTS` | `3` | Max accounts created per program |
-| `HUNT_SKIP_COVERAGE_GATE` | unset | Set to `1` to bypass 80% coverage gate |
+| `HUNT_SKIP_COVERAGE_GATE` | unset | Set to `1` for an intentional operator override of discovery readiness |
 | `HUNT_SKIP_AUTH_GATE` | unset | Set to `1` to bypass auth-wall gate |
 | `HUNT_SESSION_POOL` | `3` | Reused agent sessions per target |
 | `HUNT_SESSION_MAX_USES` | `25` | Max turns before session refresh |
@@ -52,10 +52,11 @@ cat ~/.bughunter-engagements/<slug>/report.md
 
 ### Coverage Gate (Phase: Discover → Hunt)
 
-- Threshold: 80% depth coverage
-- Formula: `min(100, 0.9 * depth_score + breadth_bonus)`
-- Override: `HUNT_SKIP_COVERAGE_GATE=1`
-- If triggered: Run more discovery methods, check for missed endpoint categories
+- Requirement: validated in-scope operations with source attempts and unparsed residuals retained
+- Guessed paths are leads only; source, operation, workflow, and trust-dimensional coverage are independent
+- No schema, URL convention, or target category is required; unavailable capabilities stay visible
+- Override: `HUNT_SKIP_COVERAGE_GATE=1` for an intentional operator decision
+- If triggered: inspect residuals, supply missing identities/artifacts, and rerun observed-response, client, and applicable parser discovery
 
 ### Auth Gate (Phase: Plan → Hunt)
 
@@ -67,13 +68,16 @@ cat ~/.bughunter-engagements/<slug>/report.md
 ### Dedup Gate (Phase: Report)
 
 - Verdict `LIKELY_DUP`: HARD STOP — do not draft
-- Verdict `REVIEW`: Draft with "why this is different" paragraph
-- Verdict `NOVEL`: Proceed to draft
+- Verdict `UNKNOWN`: HELD — an empty corpus is not novelty
+- Verdict `REVIEW`: requires a concrete differentiator; otherwise HELD
+- Verdict `NOVEL`: eligible for the report-ready check
 - Check: `python3 engine/engine/dedup.py check --program <slug> --class <c> --url <u> --title "..."`
 
 ### Verify Gate (Phase: Validate → Report)
 
-- Every finding must pass `verify.py check --file <finding.json> --program <slug>`
+- Every finding must be independently reproduced and pass `verify.py check --file <finding.json> --program <slug>`
+- High/Critical findings require two independent reproduction tools/transports; another model's opinion is not one
+- Similarity-only BOLA, reflection-only XSS, and SQL-error-only SQLi are detection signals, not reproduction
 - Self-verdict: `READY` / `NEEDS_FIXES` / `DO_NOT_SUBMIT`
 - `DO_NOT_SUBMIT` is a hard stop — fix or discard
 
@@ -169,12 +173,25 @@ python3 engine/engine/dedup.py ingest --program <slug>
 python3 engine/engine/dedup.py stats --program <slug>
 ```
 
-### coverage.py — coverage tracking
+### coverage.py — dimensional coverage tracking
 ```bash
 python3 engine/engine/coverage.py show --slug <target>
 python3 engine/engine/coverage.py show --slug <target> --json
 python3 engine/engine/coverage.py all
 ```
+
+Coverage is counted independently for each operation, actor/ownership context, and trust dimension. A tested endpoint does not close all of its dimensions. Pending, blocked, inconclusive, and legacy/unknown results remain unresolved; only `tested`, `confirmed`, or `disproved` dimensional results with matching transport observations count as covered. `dimension_details` contains the observation IDs and identity context for each result. Legacy class coverage remains compatibility output, not the completeness metric.
+
+### Dynamic target and model validation
+
+```bash
+make dynamic         # generic runtime, evidence, adapter, and coverage regressions
+make matrix          # schema-less/live workflows + real app/tool/infra/contract artifacts
+make model-families  # opt-in live checks; consumes model tokens
+make assess          # evidence-weighted score from the recorded gate artifacts
+```
+
+The matrix distinguishes `live-target` from `artifact-only` and writes `artifacts/release-validation/dynamic-matrix-results.json`. Model checks exercise every configured `HUNT_MODELS` label, or one host-default case, against the single `HUNT_AGENT_CMD` runtime with an isolated engagement and evidence directory per attempt. No alternate AI command is used. Claimed reflected XSS is independently reproduced in a browser; a model claim or reflection alone is not a pass. Unsupported target types and unavailable runtimes remain explicit rather than becoming passes. `make assess` gives artifact-only rows half the weight of live-target rows and reports an engineering-validation score, not vulnerability yield, production coverage, or proof of arbitrary live AI hosts.
 
 ### learn.py — self-learning
 ```bash

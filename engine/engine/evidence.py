@@ -59,7 +59,7 @@ _SENSITIVE_HEADERS = re.compile(
     r"^(authorization|cookie|set-cookie|x-[a-z]+-token|x-api-key|"
     r"x-[a-z]+-secret|proxy-authorization)$", re.I)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _gen_id():
@@ -77,6 +77,17 @@ def _hash_body(body):
     if isinstance(body, str):
         body = body.encode("utf-8", errors="replace")
     return hashlib.sha256(body[:65536]).hexdigest()
+
+
+def _redact_excerpt(body, limit=16384):
+    if body is None:
+        return ""
+    text = body if isinstance(body, str) else str(body)
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1REDACTED", text)
+    text = re.sub(r"(?i)(password|passwd|secret|token|api[_-]?key|client[_-]?secret)(\"\s*:\s*\"|'\s*:\s*'|\s*=\s*)[^\"'\s&}]+",
+                  r"\1\2REDACTED", text)
+    text = re.sub(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}", "REDACTED_JWT", text)
+    return text[:limit]
 
 
 def _redact_headers(headers):
@@ -105,7 +116,7 @@ _WRITE_LOCK = threading.Lock()
 def _append_jsonl(path, record):
     line = json.dumps(record, default=str) + "\n"
     with _WRITE_LOCK:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -158,10 +169,12 @@ def record_observation(engagement_dir, method, url, req_headers=None,
         "req_headers": _redact_headers(req_headers),
         "req_body_hash": _hash_body(req_body),
         "req_body_length": len(req_body) if req_body else 0,
+        "req_body_excerpt": _redact_excerpt(req_body),
         "resp_status": resp_status,
         "resp_headers": _redact_headers(resp_headers),
         "resp_body_hash": _hash_body(resp_body),
         "resp_body_length": len(resp_body) if resp_body else 0,
+        "resp_body_excerpt": _redact_excerpt(resp_body),
         "identity": identity,
         "owner": owner,
         "accessor": accessor,

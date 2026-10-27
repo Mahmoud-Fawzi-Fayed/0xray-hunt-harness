@@ -23,7 +23,8 @@ from shutil import which
 from urllib.parse import urlparse
 
 URL_RE = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{4,}")
-PATH_RE = re.compile(r'"(/(?:api|v\d|rest|graphql|auth|oauth|users?|account|mobile)[A-Za-z0-9_./{}-]{2,})"', re.I)
+PATH_RE = re.compile(r'["\'`](/[A-Za-z0-9_./{}:\-]{2,})["\'`]')
+CALL_RE = re.compile(r"fetch|axios|httprequest|okhttp|retrofit|httpurlconnection", re.I)
 SECRET_RE = [
     ("google_api", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}")),
@@ -58,8 +59,10 @@ def extract(apk, scan_dir=None):
                 h = urlparse(m).hostname
                 if h:
                     hosts.add(h)
-            for m in PATH_RE.findall(txt):
-                paths.add(m[:150])
+            for m in PATH_RE.finditer(txt):
+                context = txt[max(0, m.start() - 300):m.end() + 300]
+                if CALL_RE.search(context):
+                    paths.add(m.group(1)[:150])
             for label, rx in SECRET_RE:
                 for s in rx.findall(txt):
                     secrets.append({"type": label, "value": s[:64], "file": f})
@@ -89,6 +92,7 @@ def _selftest():
     os.makedirs(os.path.join(d, "src"))
     open(os.path.join(d, "src", "Api.java"), "w").write(
         'String base="https://hpcs.example.eu/Mobile2/api/v1/"; String p="/api/v1/account/InfosPerso"; '
+        'OkHttpClient.newCall(request); '
         'String k="AIzaSyA1234567890abcdefghijklmnopqrstuv"; String t="eyJabcdefghij.klmnopqrstuv.wxyz012345";')
     r = extract(None, scan_dir=d)
     assert "hpcs.example.eu" in r["hosts"], r["hosts"]

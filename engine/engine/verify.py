@@ -113,6 +113,45 @@ PER_CLASS = {
                       [r"api exists|endpoint found|no impact"], r"unauthenticat|mass.*data|paginate.*all|rate.?limit.*bypass.*impact|method.*override|verb.*tamper"),
 }
 
+PER_CLASS.update({
+    "mass-assignment": ("a restricted field changed server-side authorization or state",
+                        [r"field accepted only|no role change"], r"role.*admin|is_admin|privilege|permission.*changed|mass assignment"),
+    "password-reset": ("reset flow compromise proven on a second account or owned victim fixture",
+                       [r"email received only|link returned only"], r"password.*changed|account takeover|token.*reus|host.*poison|reset.*hijack"),
+    "grpc": ("unauthorized gRPC method/data access or state change",
+             [r"reflection only|service listed|method listed"], r"unauthorized|other user|sensitive.*data|mutation|privilege"),
+    "subdomain-takeover": ("dangling DNS plus attacker-controlled content on the affected hostname",
+                           [r"dangling only|cname only|nxdomain only"], r"claimed|attacker-controlled|controlled content|takeover.*verified"),
+    "nextjs": ("Next.js-specific bypass with protected data/action or code execution",
+               [r"version only|middleware present"], r"bypass.*accepted|protected.*data|server action|rce|unauthorized"),
+    "nodejs": ("Node.js-specific injection/auth bypass with a sensitive sink",
+               [r"prototype modified only|stack only"], r"rce|xss|bypass|admin|extracted|unauthorized"),
+    "laravel": ("Laravel-specific debug/auth/deserialization impact",
+                [r"debug enabled only|version only"], r"rce|credential|secret|unauthorized|file contents|executed"),
+    "springboot": ("Spring-specific actuator/injection impact",
+                   [r"actuator exists|mappings only"], r"heapdump|credential|secret|rce|executed|unauthorized"),
+    "aspnet": ("ASP.NET-specific authentication/deserialization impact",
+               [r"viewstate present|version only"], r"machinekey|command output|rce|bypass|unauthorized"),
+    "sharepoint": ("SharePoint-specific auth bypass, sensitive read, or code execution",
+                   [r"ntlm only|version only|sharepoint detected"], r"toolshell|rce|bypass|sensitive.*data|command output"),
+    "k8s": ("Kubernetes/Docker unauthorized workload, secret, or host impact",
+            [r"api reachable|pod listed only"], r"exec|secret|token|host escape|unauthorized|created pod"),
+    "container-escape": ("cross-tenant/host boundary violation with demonstrated access",
+                         [r"container detected|socket exposed only"], r"host.*access|escape|other tenant|secret|exec"),
+    "cicd": ("CI/CD command execution, secret exposure, or deployment impact",
+             [r"workflow exists|self-hosted only"], r"command output|secret|artifact|deployed|pull_request_target.*executed"),
+    "baas": ("backend-as-a-service unauthorized read/write with real data",
+             [r"firebase config|api key only|rules shown only"], r"unauthorized.*(read|write)|other user|sensitive.*data|deleted|modified"),
+    "desktop-macos": ("macOS desktop privileged action, credential access, or code execution",
+                      [r"url scheme exists|electron only"], r"privileged|keychain|command output|executed|credential"),
+    "desktop-windows": ("Windows desktop privileged action, credential access, or code execution",
+                        [r"url protocol exists|electron only"], r"privileged|credential|command output|executed|system.*access"),
+    "tls-network": ("demonstrated interception, spoofing, or downgrade impact",
+                    [r"missing hsts|weak cipher only|certificate only"], r"intercepted|downgraded|spoofed|session.*captured|mitm.*reproduced"),
+    "ntlm-info": ("anonymous NTLM challenge disclosing internal identity material",
+                  [r"ntlm banner only|negotiate header only"], r"netbios|internal dns|domain name|forest|computer name|av_pairs"),
+})
+
 # never-submit, independent of class (always-rejected list)
 ALWAYS_REJECT = [
     (r"self[- ]?xss", "self-XSS (cannot impact other users)"),
@@ -326,7 +365,8 @@ def live_check(f, program=None, base=DEFAULT_BASE, max_probes=4):
                 for k, v in saved.items():
                     os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
-    cls = (f.get("vuln_class") or "").lower()
+    import vulncatalog as VC
+    cls = VC.canonical_class(f.get("vuln_class"))
     purl, param = _probe_url_and_param(f)
     out["attempted"] = True
 
@@ -351,8 +391,8 @@ def live_check(f, program=None, base=DEFAULT_BASE, max_probes=4):
         u2 = urlunparse(urlparse(purl)._replace(query=q))
         st2, txt2, hd2 = _get(u2)
         if _payload_core(payload) in (txt2 or "").lower():
-            out["confirmed"] = True
-            out["note"] = f"payload reflected UNENCODED in the response (HTTP {st2}) — live signal confirms it"
+            out["confirmed"] = None
+            out["note"] = f"payload reflected UNENCODED (HTTP {st2}) — detection only; browser execution is required"
             _add("xss-reflection", u2, st2, txt2, hd2, "payload reflected unencoded")
         elif re.search(r"&lt;|&gt;|&quot;", txt2 or ""):
             out["confirmed"] = False
@@ -393,9 +433,9 @@ def live_check(f, program=None, base=DEFAULT_BASE, max_probes=4):
         u2 = urlunparse(urlparse(purl)._replace(query=q))
         st2, txt2, hd2 = _get(u2)
         if _SQL_ERR.search(txt2 or ""):
-            out["confirmed"] = True
-            out["note"] = ("single quote triggers a DB error — injection point signal confirmed. "
-                           "Now EXTRACT data (version()/a row) or show a time/boolean difference to prove impact")
+            out["confirmed"] = None
+            out["note"] = ("single quote triggers a DB error — detection only. EXTRACT data or prove a "
+                           "time/boolean difference before treating this as reproduction")
             _add("sqli-error", u2, st2, txt2, hd2, "DB error on quote")
         else:
             out["note"] = ("no DB error on a quote — could still be blind; prove with SLEEP(5) timing "
@@ -415,7 +455,8 @@ def live_check(f, program=None, base=DEFAULT_BASE, max_probes=4):
 
 def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
     checks, missing = [], []
-    cls = (f.get("vuln_class") or "").lower().strip()
+    import vulncatalog as VC
+    cls = VC.canonical_class(f.get("vuln_class"))
     sev = (f.get("severity") or "").lower().strip()
     url = f.get("url", "")
     blob = _text(f)
@@ -461,7 +502,9 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
     # 4) always-rejected patterns
     for pat, why in ALWAYS_REJECT:
         if re.search(pat, blob):
-            # allow if it's clearly chained to real impact
+            if pat == r"rate.?limit|brute.?force|captcha" and cls in (
+                    "2fa-bypass", "auth-bypass", "password-reset", "ato", "session", "api-misconfig"):
+                continue
             if not re.search(r"chain|leads to|results in|account takeover|ato|rce|exfiltrat", blob):
                 hard_reject = hard_reject or f"always-rejected: {why}"
             break
@@ -499,6 +542,11 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
                            r"metadata|credentials|extracted|full access", blob)
         add("severity supported by evidence", bool(strong),
             "" if strong else f"'{sev}' needs stronger demonstrated impact, or lower the severity")
+        reproduction = f.get("reproduction") or {}
+        methods = reproduction.get("tools") or ([reproduction.get("method")] if reproduction.get("method") else [])
+        methods = [m for m in methods if m and m != "none"]
+        add("independent reproduction (two tools for High/Critical)", len(set(methods)) >= 2,
+            "" if len(set(methods)) >= 2 else "reproduce with two independent tools/transports; an LLM opinion is not a tool")
 
     # 7) dedup
     try:
@@ -693,16 +741,8 @@ def _cleanup(paths=(), session_ids=()):
 
 
 def _pool_models():
-    try:
-        import notify
-        notify._load_env_file()
-    except Exception:  # noqa: BLE001
-        pass
-    for key in ("OPENCODE_HUNT_MODELS", "CURSOR_HUNT_MODELS", "HUNT_MODELS"):
-        pool = [m.strip() for m in os.environ.get(key, "").split(",") if m.strip()]
-        if pool:
-            return pool
-    return []
+    import agent
+    return agent._pool_models()
 
 
 def deep_opinion_all(f, det, program=None, base=DEFAULT_BASE, timeout=None, max_models=4):
@@ -1043,10 +1083,10 @@ def _selftest():
                "title": "t", "poc": '"><svg/onload=alert(1)> reflects'}
         lv = live_check(xss, program="acme-live", base=bse2)
         assert lv["attempted"] and lv["confirmed"] is False and "encoded" in lv["note"].lower(), lv
-        # unencoded reflection confirms
+        # unencoded reflection is a detection signal, not proof of execution
         fake.get = lambda u, headers=None, timeout=15, **kw: (200, '..."><svg/onload=alert(1)>...', {})
         lv2 = live_check(xss, program="acme-live", base=bse2)
-        assert lv2["confirmed"] is True, lv2
+        assert lv2["confirmed"] is None and "execution" in lv2["note"], lv2
         # no scope => never touched
         lv3 = live_check(xss, program=None, base=bse2)
         assert not lv3["attempted"] and "skipped" in lv3["note"], lv3

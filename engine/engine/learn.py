@@ -112,14 +112,13 @@ def learn_from_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE):
     return rec
 
 
-def record_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE):
-    """Close the learning loop: log a hunt result to BOTH the rich learning journal (shown in the panel)
-    AND the yieldrank journal (so class ranking actually learns confirmed/duplicate/false-positive rates
-    over time). `result`: confirmed | duplicate | false-positive | error | empty | reported. Never raises."""
+def record_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE,
+                   trust_dimension="", profile_id=""):
+    """Record outcomes for dimensional ranking and post-finding skill evolution."""
     rec = learn_from_outcome(program, vuln_class, result, note, base)
     _append(_yr_journal(base), {"ts": _now(), "program": _slug(program),
-            "vuln_class": str(vuln_class or "")[:40], "result": str(result or "")[:40]})
-    # trigger skill evolution when enough outcomes accumulate
+            "trust_dimension": str(trust_dimension or "")[:80], "profile_id": str(profile_id or "")[:80],
+            "result": str(result or "")[:40]})
     _maybe_evolve(vuln_class, base)
     return rec
 
@@ -192,6 +191,9 @@ def _maybe_evolve(vuln_class, base):
         path = os.path.join(LEARNED_DIR, slug, "SKILL.md")
         if not os.path.isfile(path):
             return
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            if "review_status: proposed" in fh.read(4096):
+                return
         outcomes = [r for r in _read_jsonl(_journal(base))
                     if r.get("type") == "outcome" and _slug(r.get("vuln_class", "")) == slug]
         # check if we already evolved recently
@@ -341,6 +343,7 @@ def _frontmatter(slug, desc, kind):
     return (f"---\nname: {slug}\n"
             f"description: {desc}\n"
             f"auto_authored: true\n"
+            f"review_status: proposed\n"
             f"kind: {kind}\n"
             f"created: {_now()}\n"
             f"evolved: 0\n---\n\n")
@@ -735,15 +738,15 @@ def _cmd_selftest(_a):
     learn_from_outcome("acme", "idor", "duplicate", "already disclosed", base=base)
     assert any(x.get("type") == "outcome" for x in journal(base))
 
-    record_outcome("acme", "ssrf", "confirmed", base=base)
-    record_outcome("acme", "ssrf", "confirmed", base=base)
-    record_outcome("acme", "xss", "duplicate", base=base)
+    record_outcome("acme", "ssrf", "confirmed", base=base, trust_dimension="external_effect")
+    record_outcome("acme", "ssrf", "confirmed", base=base, trust_dimension="external_effect")
+    record_outcome("acme", "xss", "duplicate", base=base, trust_dimension="input_variation")
     assert os.path.isfile(_yr_journal(base)), "yieldrank journal written"
     sys.path.insert(0, ENGINE)
     import yieldrank as YR
     learned = YR.Model.load(base).learned
-    assert learned.get("ssrf", {}).get("confirmed", 0) >= 2, learned
-    assert learned.get("xss", {}).get("dup", 0) >= 1, learned
+    assert learned.get("external_effect", {}).get("confirmed", 0) >= 2, learned
+    assert learned.get("input_variation", {}).get("dup", 0) >= 1, learned
 
     # evolution: add enough outcomes for zzq skill, then evolve
     for i in range(6):

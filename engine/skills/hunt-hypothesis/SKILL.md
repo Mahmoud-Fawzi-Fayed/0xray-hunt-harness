@@ -19,19 +19,14 @@ Send the request as the logged-in test user. Read status, headers, and body.
 
 ### 2. INVENT — Developer psychology hypotheses
 
-The developer made assumptions. Name them:
+Name one assumption actually supported by the baseline. Vary only the dimension that assumption concerns:
+- **Actors and ownership:** would the same operation be safe for another role, tenant, owner, or accessor?
+- **Inputs and parsers:** which accepted value, encoding, content type, or parser assumption could change behavior?
+- **State and sequence:** what precondition, transition, replay, or second-order effect should be impossible?
+- **External effects:** which callback, integration, or downstream trust relationship is visible in the response?
+- **Protocol behavior:** what does this protocol's actual negotiation or framing assume?
 
-| Developer assumption | Hypothesis | Test |
-|---|---|---|
-| "The client always sends the user's own ID" | What if I send another user's ID? | Swap `user_id` in the request, compare response bodies |
-| "Auth is checked on this endpoint" | What if I strip the session cookie? | Send without auth — 200 with data = auth bypass |
-| "This field is read-only" | What if I add `role`, `is_admin`, `verified` to the JSON body? | POST/PUT with extra fields — mass assignment |
-| "The ID is unguessable" | What if it's sequential or time-ordered? | Check: is `id+1` or `id-1` valid? Is UUID v1/v7? |
-| "This internal endpoint isn't reachable" | What if the path exists but isn't linked in the UI? | Try `/admin/*`, `/internal/*`, `/debug/*`, `/api/v1/*` vs `/api/v2/*` |
-| "Rate limiting protects this" | What if the limit is per-IP only? | Change `X-Forwarded-For` — does the limit reset? |
-| "Content-type is always JSON" | What if I send XML? | Switch to `application/xml` — XXE if parsed |
-| "This redirect only goes to our domain" | What if I use `//evil.com` or `\/evil.com`? | Open redirect → OAuth token theft chain |
-| "GraphQL queries are read-only" | What if mutations are exposed? | Introspection or guess mutation names from query names |
+Record the baseline observation IDs. Only after the hypothesis is concrete, call `skill_map.for_hypothesis(...)` with those IDs; without them the harness returns methodology only. Test one dimension at a time and leave every other dimension unresolved.
 
 ### 3. TEST — One variable at a time
 
@@ -67,12 +62,12 @@ Single primitives often don't pay. Chains do:
 
 ## When the worklist is empty
 
-1. Run `browser.py capture` on the seed URLs — SPA XHR/fetch calls are the REAL surface
-2. Grep JS bundles for `/api/`, `fetch(`, `axios.`, `graphql`, endpoint patterns
-3. Check for undocumented API versions (`/v1/` → try `/v2/`, `/v3/`, `/internal/`)
-4. Look at mobile API endpoints (different auth, often less restricted)
-5. Check WebSocket connections — different protocol, often different auth model
-6. Run `learn.py auto` on the stack if no skill matches what you're seeing
+1. Re-check discovery source status; failed or unattempted sources are unknown, not empty surface
+2. Run authenticated browser capture when the observed application uses a SPA or client-side calls
+3. Mine observed responses, schemas, and bundles for relationships to operations not yet profiled
+4. Expand only from live links, `Allow` evidence, documented operations, and supplied artifacts—not guessed path lists
+5. Record inaccessible protocols or roles as blocked and continue with validated surface
+6. Run `learn.py auto` only after live behavior reveals a concrete knowledge gap
 
 ## Where ideas come from
 

@@ -36,44 +36,77 @@ import engine as E        # noqa: E402  (reuse the deterministic phase runner)
 import dedup as D         # noqa: E402
 import novelty as N       # noqa: E402
 
-SEV_CVSS = {"critical": "9.1", "high": "8.1", "medium": "5.3", "low": "3.1", "unknown": "5.0"}
+SEV_CVSS = {
+    "critical": ("9.8", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+    "high": ("8.1", "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"),
+    "medium": ("5.4", "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N"),
+    "low": ("3.1", "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N"),
+}
 
 
 def _title(f):
+    if f.get("title"):
+        return f["title"]
     url = f.get("url", "")
     path = url.split("://", 1)[-1]
     path = "/" + path.split("/", 1)[1] if "/" in path else path
     cls = (f.get("vuln_class") or "issue").upper()
-    actor = "an authenticated user" if "auth" not in (f.get("vuln_class") or "") else "an attacker"
-    return f"{cls} in {path} allows {actor} to {('impact: ' + (f.get('evidence','')[:48]) or 'cause harm')}".strip()
+    evidence = " ".join((f.get("evidence") or "unauthorized access").split())
+    return f"{cls} in {path}: {evidence[:120]}"
+
+
+def _cvss(f, severity):
+    score, vector = SEV_CVSS.get(severity, ("not scored", "not scored"))
+    unauthenticated = (f.get("id_source") == "not_required" or
+                       f.get("attacker_holds") in ("nothing", "not_required", "no_auth"))
+    if unauthenticated and severity != "unknown":
+        vector = vector.replace("PR:L", "PR:N")
+        score = {"critical": "9.8", "high": "8.6", "medium": "6.1", "low": "4.3"}.get(severity, score)
+    return score, vector
+
+
+def _http_text(value):
+    return str(value or "").replace("\\r\\n", "\n").replace("\\r", "\n")
 
 
 def _draft_md(f, verdict):
     sev = (f.get("severity") or "unknown").lower()
+    score, vector = _cvss(f, sev)
     lines = [
         f"# {_title(f)}", "",
-        f"**Severity:** {sev}  ·  **CVSS (starting point):** {SEV_CVSS.get(sev, '5.0')}",
+        f"**Severity:** {sev}  ·  **CVSS:** {score} ({vector})",
         f"**Dedup verdict:** {verdict['verdict']} (score {verdict.get('score', 0)}, corpus {verdict.get('corpus_size', 0)})",
+        f"**Verification:** {(f.get('reproduction') or {}).get('method') or f.get('reproduction_status', 'reproduced')}",
     ]
-    if verdict["verdict"] == "UNKNOWN":
-        lines.append("> ⚠ Dedup NOT performed — the corpus for this program is EMPTY. Refresh it (own reports "
-                     "via the bb-platforms MCP + public H1/Bugcrowd) and re-check before submitting.")
-    if verdict["verdict"] not in ("NOVEL", "UNKNOWN") and verdict.get("matches"):
-        m = verdict["matches"][0]
-        lines.append(f"> ⚠ Overlaps a known issue: {m.get('title','')} {m.get('link','')}")
-        lines.append("> State the differentiator below (different endpoint/param/impact, or fix-bypass) or HOLD.")
-    lines += [
-        "", "## Summary", "",
-        f"{f.get('evidence','(describe the attacker-attainable impact in one sentence)')}",
-        "", "## Steps to reproduce", "",
-        "```http", f"{f.get('request','(exact HTTP request)')}", "```",
-        "", "## Impact", "", f"{f.get('evidence','')}",
-        "", "## Remediation", "", "(1-2 concrete sentences)",
-    ]
+    if verdict["verdict"] == "REVIEW":
+        lines.append(f"**Differentiator:** {f.get('differentiator', '')}")
+        if verdict.get("matches"):
+            m = verdict["matches"][0]
+            lines.append(f"Nearest known issue: {m.get('title','')} {m.get('link','')}")
+    steps = f.get("steps") or [f.get("request", "")]
+    if isinstance(steps, str):
+        steps = [steps]
+    lines += ["", "## Summary", "", f.get("evidence", ""),
+              "", "## Steps to reproduce", ""]
+    lines += [f"{i}. {step}" for i, step in enumerate(steps, 1)]
+    lines += ["", "### Request", "", "```http", _http_text(f.get("request")), "```"]
+    if f.get("response"):
+        lines += ["", "### Response (redacted evidence)", "", "```http", _http_text(f["response"]), "```"]
+    lines += ["", "## Impact", "", f.get("impact") or f.get("evidence", ""),
+              "", "## Remediation", ""]
+    cls = (f.get("vuln_class") or "").lower()
+    remediations = {
+        "idor": "Enforce object-level authorization using the authenticated tenant and resource owner; do not trust client IDs. Add cross-account regression tests.",
+        "bola": "Enforce object-level authorization using the authenticated tenant and resource owner; do not trust client IDs. Add cross-account regression tests.",
+        "open-redirect": "Allow only approved relative or absolute redirect destinations. Canonicalize before validation and reject external schemes and hosts.",
+        "xss": "Encode output for its exact HTML/JavaScript context, sanitize unsafe markup, and add browser-execution regression tests.",
+        "ssrf": "Allowlist outbound schemes, hosts, and IP ranges; re-check redirects and DNS resolution before every server-side fetch.",
+        "sqli": "Use parameterized queries and ORM bindings; never concatenate untrusted input into SQL. Add injection regression tests.",
+    }
+    remediation = remediations.get(cls, "Validate the affected operation server-side and add a regression test that proves the demonstrated attack is rejected without weakening legitimate functionality.")
+    lines.append(remediation)
     if f.get("proof_note"):
         lines += ["", f"> Proof note: {f['proof_note']}"]
-    if f.get("scope_warning"):
-        lines += ["", f"> ⚠ SCOPE: PoC referenced out-of-scope host(s): {', '.join(f['scope_warning'])}"]
     return "\n".join(lines)
 
 
@@ -103,9 +136,22 @@ class Orchestrator:
         from urllib.parse import urlparse
         target = urlparse(seeds[0]).hostname or seeds[0]
         if obs is None and not self.mock:
+            merged = {"subdomains": set(), "endpoints": set(), "params": set()}
+            hosts, js = {}, {}
             try:
                 import observe as O
-                obs = O.observe(target, base=self.base)
+                for seed in seeds:
+                    host = urlparse(seed).hostname or seed
+                    current = O.observe(host, base=self.base, scope=self.eng.scope)
+                    for key in ("subdomains", "endpoints", "params"):
+                        merged[key].update(current.get(key) or [])
+                    for item in current.get("hosts") or []:
+                        if item.get("url"):
+                            hosts[item["url"]] = item
+                    for item in current.get("js") or []:
+                        if item.get("url"):
+                            js[item["url"]] = item
+                obs = {**merged, "hosts": list(hosts.values()), "js": list(js.values())}
             except Exception as e:
                 self.eng.eng.log(f"novelty: observe skipped ({e})")
                 return None
@@ -114,19 +160,39 @@ class Orchestrator:
         diff = N.Novelty(target, base=self.base).watch(obs)
         tag = "baseline" if diff.get("baseline") else ("CHANGES" if diff.get("has_changes") else "no change")
         self.eng.eng.log(f"novelty: {target} -> {tag}; " + " | ".join(N.summarize(diff))[:200])
-        try:
-            self.eng.eng.state["last_novelty"] = {
-                "new_js": list(diff.get("new_js") or [])[:20],
-                "changed_js": list(diff.get("changed_js") or [])[:20],
-                "has_changes": bool(diff.get("has_changes")),
-                "ts": time.time(),
-            }
-            self.eng.eng.save()
-        except Exception:  # noqa: BLE001
-            pass
+        self.eng.eng.state["last_novelty"] = {
+            "new_js": list(diff.get("new_js") or [])[:20],
+            "changed_js": list(diff.get("changed_js") or [])[:20],
+            "new_endpoints": list(diff.get("new_endpoints") or [])[:100],
+            "new_params": list(diff.get("new_params") or [])[:100],
+            "new_hosts": list(diff.get("new_hosts") or [])[:30],
+            "has_changes": bool(diff.get("has_changes")), "ts": time.time(),
+        }
+        candidates = [] if diff.get("baseline") else list(diff.get("new_endpoints") or []) + list(diff.get("new_params") or [])
+        candidates += [] if diff.get("baseline") else [h.get("url") for h in (diff.get("new_hosts") or []) if h.get("url")]
+        items = []
+        for url in dict.fromkeys(candidates):
+            if url and self.eng.scope.in_scope_host(url):
+                items.append({"url": url, "method": "GET", "vuln_class": "deep",
+                              "source": "novelty", "priority": 140, "confidence": "observed"})
+        if items:
+            added = self.eng.eng.add_surface(E._deepen(items))
+            self.eng.eng.log(f"novelty: queued {added} new/changed surface item(s) at elevated priority")
+        self.eng.eng.save()
         return diff
 
     # ---- step 3: draft gate (dedup) -------------------------------------------
+    @staticmethod
+    def _finding_identity(f):
+        import hashlib
+        canonical = json.dumps({
+            "method": f.get("method") or "GET", "url": f.get("url") or "",
+            "params": sorted(f.get("params") or ([f["param"]] if f.get("param") else [])),
+            "role": f.get("role") or "", "class": f.get("vuln_class") or "",
+            "chain": f.get("chain") or "",
+        }, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()[:20]
+
     def draft_gate(self):
         confirmed = self.eng.eng.state.get("confirmed", [])
         cp = D.Corpus(self.eng.scope.name, base=self.base)
@@ -135,45 +201,66 @@ class Orchestrator:
         os.makedirs(drafts_dir, exist_ok=True)
         os.makedirs(held_dir, exist_ok=True)
         import disposition as DP
-        # draft / publish / EMAIL each finding ONCE. A confirmed finding persists across rounds, so without a
-        # dedup here the same bug is re-drafted, re-published and re-emailed every round (the duplicate loop).
-        drafted_keys = {tuple(k) for k in (self.eng.eng.state.get("drafted_keys") or [])}
+        import verify as VF
+        drafted_keys = {str(k) for k in (self.eng.eng.state.get("drafted_keys") or [])}
         links = dict(self.eng.eng.state.get("draft_links") or {})
         drafted, held, policy = [], [], []
         for i, f in enumerate(confirmed, 1):
             name = f"{i:02d}-{(f.get('vuln_class') or 'finding')}.md"
+            key = self._finding_identity(f)
+            legacy_key = "|".join((f.get("url", ""), f.get("vuln_class", "")))
             disp = DP.check(f)
-            if disp["verdict"] != "PASS":
-                body = ("# HELD — " + disp["verdict"] + "\n\n" + disp["reason"] + "\n\n"
-                        + "\n".join(f"- **{r['id']}:** {r['reason']}" for r in disp.get("rules") or []))
-                open(os.path.join(held_dir, name), "w").write(body + "\n")
-                policy.append({"finding": f, "disposition": disp, "file": os.path.join(held_dir, name)})
-                E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"),
-                       "held-" + disp["verdict"].lower().replace("_", "-"),
-                       disp.get("reason", ""), base=self.base)
-                continue
+            reproduction = (f.get("reproduction") or {}).get("status") or f.get("reproduction_status")
+            if reproduction != "reproduced":
+                disp = {"verdict": "HOLD_REPRODUCTION", "reason": "independent reproduction is required", "rules": []}
+            elif f.get("scope_warning"):
+                disp = {"verdict": "HOLD_SCOPE", "reason": "unresolved out-of-scope evidence", "rules": []}
             v = cp.check({"vuln_class": f.get("vuln_class", ""), "url": f.get("url", ""),
                           "title": f.get("evidence", "")})
-            md = _draft_md(f, v)
-            if v["verdict"] == "LIKELY_DUP":
-                open(os.path.join(held_dir, name), "w").write(md)
+            f["dedup"] = v
+            if disp["verdict"] == "PASS" and v["verdict"] in ("UNKNOWN", "LIKELY_DUP"):
+                md = _draft_md(f, v)
+                open(os.path.join(held_dir, name), "w").write(md + "\n")
                 held.append({"finding": f, "dedup": v, "file": os.path.join(held_dir, name)})
-                E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "duplicate",
-                       f"held: {v.get('score')}", base=self.base)
-            else:
-                open(os.path.join(drafts_dir, name), "w").write(md)
-                key = (f.get("url", ""), f.get("vuln_class", ""))
-                is_new = key not in drafted_keys
-                link = self._publish(f, v, md, i) if is_new else links.get("|".join(key))   # publish ONCE
-                if link:
-                    links["|".join(key)] = link
-                drafted.append({"finding": f, "dedup": v, "file": os.path.join(drafts_dir, name),
-                                "link": link, "new": is_new})
-                if is_new:                                 # first time only -> count as reported + allow one email
-                    drafted_keys.add(key)
-                    E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "reported",
-                           v.get("verdict", ""), base=self.base)
-        self.eng.eng.state["drafted_keys"] = [list(k) for k in drafted_keys]
+                if v["verdict"] == "LIKELY_DUP":
+                    E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "duplicate",
+                           f"held: {v.get('score')}", base=self.base)
+                continue
+            if disp["verdict"] == "PASS" and v["verdict"] == "REVIEW" and not f.get("differentiator"):
+                disp = {"verdict": "HOLD_DEDUP_REVIEW", "reason": "a concrete differentiator is required", "rules": []}
+            if disp["verdict"] != "PASS":
+                body = "# HELD — " + disp["verdict"] + "\n\n" + disp["reason"] + "\n"
+                open(os.path.join(held_dir, name), "w").write(body)
+                policy.append({"finding": f, "disposition": disp, "file": os.path.join(held_dir, name)})
+                continue
+            report_f = dict(f)
+            report_f.update({
+                "title": _title(f), "steps": f.get("steps") or [f.get("request", "")],
+                "impact": f.get("impact") or f.get("evidence", ""),
+                "response": f.get("response") or f.get("evidence", ""),
+                "poc": f.get("poc") or f.get("request", ""),
+            })
+            readiness = VF.verify_finding(report_f, program=self.eng.scope.name, base=self.base)
+            f["report_readiness"] = readiness
+            if readiness.get("verdict") != "READY":
+                reason = "; ".join(readiness.get("failed") or ["report evidence incomplete"])
+                disp = {"verdict": "HOLD_REPORT_READY", "reason": reason, "rules": []}
+                open(os.path.join(held_dir, name), "w").write("# HELD — report not ready\n\n" + reason + "\n")
+                policy.append({"finding": f, "disposition": disp, "file": os.path.join(held_dir, name)})
+                continue
+            md = _draft_md(f, v)
+            open(os.path.join(drafts_dir, name), "w").write(md + "\n")
+            is_new = key not in drafted_keys and legacy_key not in drafted_keys
+            link = self._publish(f, v, md, i) if is_new else links.get(key) or links.get(legacy_key)
+            if link:
+                links[key] = link
+            drafted.append({"finding": f, "dedup": v, "file": os.path.join(drafts_dir, name),
+                            "link": link, "new": is_new})
+            if is_new:
+                drafted_keys.add(key)
+                E._lrn("record_outcome", self.eng.scope.name, f.get("vuln_class"), "reported",
+                       v.get("verdict", ""), base=self.base)
+        self.eng.eng.state["drafted_keys"] = sorted(drafted_keys)
         self.eng.eng.state["draft_links"] = links
         self.eng.eng.save()
         self._policy = policy
@@ -371,7 +458,7 @@ class Orchestrator:
                             pass
             except Exception as e:  # noqa: BLE001
                 self.eng.eng.log(f"auth: provisioning skipped ({type(e).__name__}: {e})")
-        phases = ["recon", "explore", "rank", "map", "plan"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
+        phases = ["recon", "discover", "explore", "rank", "map", "plan"] + (["hunt", "validate", "chain"] if self.do_hunt else [])
         engine_result = self.eng.run(phases) or {}
         failed = engine_result.get("failed_phases") or []
         if failed:
@@ -478,14 +565,16 @@ def _selftest():
     os.environ.pop("HUNT_PUBLIC_URL", None)
     for _k in ("SMTP_HOST", "SMTP_TO", "HUNT_PARALLEL", "HUNT_MAX_HUNTS", "HUNT_AGENT_TIMEOUT"):
         os.environ.pop(_k, None)
-    os.environ["HUNT_SKIP_COVERAGE_GATE"] = "1"
+    os.environ.pop("HUNT_SKIP_COVERAGE_GATE", None)
     scope = os.path.join(ENGINE, "engagement.example.json")
     obs = {"subdomains": ["localhost"], "hosts": [{"url": "http://localhost:3002", "status": 200}],
            "js": [], "endpoints": ["http://localhost:3002/api/account"], "params": []}
+    D.Corpus("demo-local", base=base).ingest([{"source": "h1-public", "vuln_class": "ssrf",
+             "url": "http://localhost:3002/unrelated", "title": "Unrelated SSRF report", "link": "https://h1/0"}])
     orc = Orchestrator(scope, base=base, mock=True, do_hunt=True)
     s = orc.run(obs=obs)
     assert s["confirmed"] >= 1, s                     # mock IDOR confirms
-    assert s["drafted"] >= 1, s                       # and becomes a draft (NOVEL, no corpus)
+    assert s["drafted"] >= 1, s                       # and becomes a draft (NOVEL corpus)
     assert s["submitted"] == 0, s                     # never submits
     assert os.path.isfile(os.path.join(s["dir"], "approval.md")), "approval gate written"
     drafts = os.listdir(os.path.join(s["dir"], "drafts"))
@@ -538,10 +627,13 @@ def main(argv=None):
     obs = json.load(open(os.path.expanduser(a.obs))) if a.obs else None
     orc = Orchestrator(a.scope, base=a.base, mock=a.mock, do_hunt=a.hunt or a.mock, parallel=a.parallel)
     if a.persist:
-        print("\n" + json.dumps(orc.run_persist(obs=obs, rounds=a.rounds, interval=a.interval), indent=2))
+        result = orc.run_persist(obs=obs, rounds=a.rounds, interval=a.interval)
     else:
-        print("\n" + json.dumps(orc.run(obs=obs), indent=2))
-    return 0
+        result = orc.run(obs=obs)
+    print("\n" + json.dumps(result, indent=2))
+    if result.get("status") == "blocked":
+        return 3
+    return 1 if result.get("status") == "partial" or result.get("failed_phases") else 0
 
 
 if __name__ == "__main__":
