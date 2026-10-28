@@ -1,7 +1,8 @@
 # 0xRay Hunt Harness
 
-![skills](https://img.shields.io/badge/skills-90-blue)
-![engine modules](https://img.shields.io/badge/engine%20modules-41-blue)
+![skills](https://img.shields.io/badge/skills-95-blue)
+![engine modules](https://img.shields.io/badge/engine%20modules-55-blue)
+![tests](https://img.shields.io/badge/tests-112%20passing-brightgreen)
 ![posture](https://img.shields.io/badge/posture-read--only%20·%20stops%20at%20draft-brightgreen)
 ![license](https://img.shields.io/badge/license-Proprietary-red)
 
@@ -36,22 +37,22 @@ flowchart TB
     N["n8n monitor<br/>watches for NEW surface"]
     BR["Host bridge :8899<br/>token-gated control"]
     EN["Engine<br/>recon → rank → hunt → validate → dedup"]
-    SK["90 skills<br/>hunt-xss, hunt-idor, hunt-mcp, ..."]
+    SK["95 skills<br/>behavior-driven, no class routing"]
     TG["Targets<br/>one scope file per program"]
     OUT["Draft finding<br/>published + emailed (with CC)"]
 
     U -->|drive / add target| BR
     N -->|surface changed| BR
     BR --> EN
-    EN -->|reads the matching playbook| SK
+    EN -->|behavior-driven skill matching| SK
     EN -->|stays in scope| TG
     EN --> OUT
     OUT -.->|STOP — you approve before any submit| U
 ```
 
-**In plain English:** you (or the n8n monitor) kick off a hunt through the bridge. The engine does the
-work, guided by the skill playbooks and fenced in by each target's scope, and hands you a draft at the
-end. Nothing leaves without your say-so.
+**In plain English:** you (or the n8n monitor) kick off a hunt through the bridge. The engine maps the
+target's functions and trust boundaries, matches skills by observed behavior (not vulnerability class names),
+and hands you a draft at the end. Nothing leaves without your say-so.
 
 ---
 
@@ -61,7 +62,7 @@ end. Nothing leaves without your say-so.
 flowchart LR
     A["novelty<br/>what's new?"] --> B["recon<br/>find endpoints"]
     B -->     C["rank<br/>this program's live surface"]
-    C --> D["map<br/>skills that match the bytes"]
+    C --> D["map<br/>trust dimensions + function profiles"]
     D --> E["hunt<br/>one deep agent per URL"]
     E --> F{"impact<br/>proven?"}
     F -->|no| R["mark tested<br/>rotate / re-recon"]
@@ -111,7 +112,7 @@ qualifying + non-qualifying classes, reward grid, and the mandatory User-Agent �
 | [`harness/`](harness/) | the glue: n8n `docker-compose`, the novelty-monitor workflow, launch scripts |
 | [`harness/.env.example`](harness/.env.example) | every setting documented — copy to `.env` and fill in |
 | [`.claude/`](.claude/) | Claude Code agents + skills (hunt, report, triage, research) |
-| [`engine/`](engine/) | the full engine (41 modules) + 90 skills |
+| [`engine/`](engine/) | the full engine (55 modules) + 95 skills |
 | [`MANUAL.md`](MANUAL.md) | the deep operator manual (dashboard, sessions, ops, troubleshooting) |
 | [`Makefile`](Makefile) | one-command setup, run, and the CI gates |
 
@@ -135,8 +136,10 @@ Run `make` with no target to see every command.
 
 The harness can now reach the surface where the paid bugs actually live:
 
-- **No static hunt catalog** — ranking, skill pick, and session health come from *this* program's
-  live surface and the operator paste, not a baked-in list of classes, paths, or products.
+- **Fully dynamic pipeline** — no hardcoded vulnerability lists, no class-based skill routing.
+  The AI decides what to hunt based on observed target behavior, function profiles, and trust
+  dimensions. Skills are matched by tech stack and analysis content, never by URL patterns or
+  vuln class names. Classification happens only after evidence supports it.
 - **Auto-relogin** (`authsession.py` creds vault) — store the login URL + cookies or
   username/password from a paste. When a JWT/session dies, hunt and reviewer replay that URL
   and refresh. Password never goes in logs.
@@ -194,16 +197,17 @@ Supports H1, Bugcrowd, YesWeHack, Intigriti. Auto-detects platform from URL, fet
 
 Before hunting, the harness maps the target's full attack surface:
 
-- **Feature → Action → Endpoint → Method → Parameters → Auth → Test Opportunities**
-- Sources: profile agent, browser capture (forms/buttons/XHR), JS bundle analysis (fetch/axios detection), Burp proxy history, OpenAPI introspection
+- **Feature → Action → Endpoint → Method → Parameters → Auth → Trust Dimensions**
+- Sources: profile agent, browser capture (XHR/fetch/WebSocket), JS bundle analysis (fetch/axios + source maps), Burp proxy history, OpenAPI introspection, GraphQL introspection
 - Outputs: `feature-map.json`, `feature-map.md`, `endpoints.jsonl` per engagement
-- Coverage section distinguishes observed-in-traffic from security-tested endpoints
-- Annotates test opportunities: IDOR/BOLA, SSRF, auth-bypass, payment-logic, file-upload, GraphQL, etc.
+- Coverage tracks per-operation, per-identity, per-trust-dimension evidence and blind spots
+- Function profiles expose trust dimensions (actor variation, ownership boundaries, input/parser variation, state/sequence, external effects) — not vulnerability class labels
 
-## Skills catalog (90)
+## Skills catalog (95)
 
-Each `hunt-*` skill is a playbook: *what actually pays*, how to detect it, the minimum proof, and a
-dedup gate. Plus auto-learned tech skills that evolve from hunt outcomes.
+Each `hunt-*` skill is a reference playbook matched by observed behavior, not by class name.
+Skills are pulled on-demand when the AI forms a hypothesis and needs methodology — never pre-loaded
+based on URL patterns. Plus auto-learned tech skills that evolve from hunt outcomes.
 
 - **Recon & novelty** — `web2-recon` · `offensive-osint` · `osint-methodology` · `hunt-subdomain` · `hunt-source-leak` · `changed-js-deepdive` · `hunt-ntlm-info` · `supply-chain-attack-recon`
 - **Injection & server-side** — `hunt-sqli` · `hunt-nosqli` · `hunt-ssrf` · `hunt-rce` · `hunt-lfi` · `hunt-ssti` · `hunt-xxe` · `hunt-deserialization` · `hunt-ldap` · ✨`hunt-webhook`
@@ -235,8 +239,10 @@ See [SECURITY.md](SECURITY.md) for the full responsible-use policy.
 ## Testing & CI
 
 ```bash
-make selfcheck     # crash/loop/hostile-input gauntlet — 57/57
-make e2e           # end-to-end pipeline trace
+make selfcheck     # crash/loop/hostile-input gauntlet — 63/63
+make dynamic       # dynamic harness tests — 27/27
+make behavior-lab  # behavior lab tests — 9/9
+make e2e           # end-to-end pipeline trace — 13/16 (2 WARN infra, 0 FAIL)
 make skills-lint   # frontmatter, naming, secret + client-identifier scan over all skills
 make secret-scan   # fail if obvious secrets are present in the tree
 ```

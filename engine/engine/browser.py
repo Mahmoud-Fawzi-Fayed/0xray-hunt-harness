@@ -94,6 +94,12 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             try { window.__xray_api.push({url:''+u, method:m.toUpperCase(), src:'xhr'}); } catch(e){}
             return _xo.apply(this, arguments);
         };
+        const _ws = window.WebSocket;
+        window.WebSocket = function(url, protocols) {
+            try { window.__xray_api.push({url:''+url, method:'WS', src:'websocket'}); } catch(e){}
+            return new _ws(url, protocols);
+        };
+        window.WebSocket.prototype = _ws.prototype;
         """)
         _form_seen = set()
 
@@ -155,8 +161,6 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                 try:
                     controls = pg.locator("button:not([type=submit]), [role=button]")
                     for idx in range(min(controls.count(), 8)):
-                        if idx >= 5:
-                            break
                         control = controls.nth(idx)
                         label = (control.inner_text(timeout=500) or "").strip().lower()
                         if not label or any(word in label for word in forbidden) or not control.is_visible():
@@ -196,7 +200,7 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
                             and not any(x in h.lower() for x in bad)):
                         nseen.add(base)
                         nav.append(h)
-                budget = _t.time() + 15
+                budget = _t.time() + int(os.environ.get("HUNT_BROWSER_PAGE_BUDGET", "30"))
                 for h in nav[:pages]:
                     if _t.time() > budget:
                         break
@@ -318,7 +322,7 @@ def dom_xss_probe(url, params=None, timeout=10000, scope=None):
             except Exception:
                 pass
         # Test query param injection
-        for param in (params or ["q", "search", "query", "name", "redirect", "url", "next", "callback"]):
+        for param in (params or []):
             test_url = f"{url}{'&' if '?' in url else '?'}{param}={canary}"
             try:
                 page.goto(test_url, timeout=timeout, wait_until="domcontentloaded")

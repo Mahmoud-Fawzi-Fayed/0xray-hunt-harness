@@ -34,6 +34,62 @@ def _tool_env():
 
 _TOOL_ENV = _tool_env()
 
+_TOOL_CAPABILITIES = {
+    "url_history": [
+        {"bin": "gau", "source": "gau-historical",
+         "install": "go install github.com/lc/gau/v2/cmd/gau@latest"},
+        {"bin": "waybackurls", "source": "waybackurls",
+         "install": "go install github.com/tomnomnom/waybackurls@latest"},
+    ],
+    "live_crawl": [
+        {"bin": "katana", "source": "katana-crawl",
+         "install": "go install github.com/projectdiscovery/katana/cmd/katana@latest"},
+    ],
+    "subdomain_enum": [
+        {"bin": "subfinder", "source": "subfinder",
+         "install": "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"},
+        {"bin": "assetfinder", "source": "assetfinder",
+         "install": "go install github.com/tomnomnom/assetfinder@latest"},
+    ],
+    "dns_validate": [
+        {"bin": "dnsx", "source": "dnsx",
+         "install": "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest"},
+    ],
+    "http_probe": [
+        {"bin": "httpx", "source": "httpx",
+         "install": "go install github.com/projectdiscovery/httpx/cmd/httpx@latest"},
+    ],
+    "vuln_scan": [
+        {"bin": "nuclei", "source": "nuclei",
+         "install": "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"},
+    ],
+    "oob": [
+        {"bin": "interactsh-client", "source": "interactsh",
+         "install": "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest"},
+    ],
+    "shell_utils": [
+        {"bin": "curl", "source": "curl", "install": "apt install curl"},
+        {"bin": "jq", "source": "jq", "install": "apt install jq"},
+    ],
+}
+
+
+def _available_tools(capability=None):
+    """Return tool descriptors whose binary is found on PATH or in ~/go/bin.
+    If capability is given, filter to that category only."""
+    gobin = os.path.expanduser("~/go/bin")
+    caps = {capability: _TOOL_CAPABILITIES[capability]} if capability else _TOOL_CAPABILITIES
+    found = []
+    for cap, tools in caps.items():
+        for t in tools:
+            path = which(t["bin"]) or (
+                os.path.join(gobin, t["bin"])
+                if os.path.isfile(os.path.join(gobin, t["bin"])) else None)
+            if path:
+                found.append({**t, "path": path, "capability": cap})
+    return found
+
+
 # Default browser UA; a per-target override comes from HUNT_USER_AGENT (set by the engine from the
 # scope's user_agent), so recon traffic carries a program's required SOC tag.
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -392,6 +448,46 @@ def _katana_urls(scope, log, depth=2, timeout=45, max_seeds=30, budget_s=480):
     return urls
 
 
+def _waybackurls(scope, log):
+    """Passive: waybackurls historical URLs (in-scope). url -> source.
+    Independent of gau — uses the Wayback Machine CDX API directly."""
+    import subprocess, time
+    from urllib.parse import urlparse
+    if os.environ.get("HUNT_ALLOW_UNCONTAINED_TOOLS") != "1":
+        log("params: external waybackurls disabled (no per-request egress containment)")
+        return {}
+    if not which("waybackurls"):
+        log("params: waybackurls not installed — skipping Wayback Machine discovery")
+        return {}
+    log("params: waybackurls launching subprocess (uncontained network access, output scope-filtered post-hoc)")
+    apexes = set()
+    for s in scope.seeds:
+        h = urlparse(s if "://" in s else "//" + s).hostname
+        if h:
+            apexes.add(".".join(h.split(".")[-2:]))
+    urls = {}
+    apexes = sorted(apexes)
+    t0 = time.time()
+    for i, apex in enumerate(apexes, 1):
+        if time.time() - t0 > 300:
+            log(f"params: waybackurls budget exhausted after {i-1}/{len(apexes)} apex(es)")
+            break
+        try:
+            out = subprocess.run(["waybackurls", apex], capture_output=True, text=True,
+                                 timeout=90, env=_TOOL_ENV).stdout
+        except Exception:
+            out = ""
+        for u in out.splitlines():
+            u = u.strip()
+            if u and "?" in u and scope.in_scope_host(u):
+                urls.setdefault(u, "waybackurls")
+        if i % 5 == 0 or i == len(apexes):
+            log(f"params: waybackurls {i}/{len(apexes)} apex(es), {len(urls)} URL(s) so far ({int(time.time()-t0)}s)")
+    log(f"params: waybackurls -> {len(urls)} in-scope parameterized URL(s)")
+    return urls
+
+
+
 def _probe(url, timeout=12):
     """GET via the shared transport so probes honor target UA, auth, proxy, and impersonation."""
     try:
@@ -495,7 +591,7 @@ def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-
                 code = 0
             n += 1
             if code in (200, 201, 202, 204, 422):     # reached the handler/validation unauth = NOT enforced
-                broken.append({"url": url, "param": "", "vuln_class": "auth-bypass", "source": "auth-sweep",
+                broken.append({"url": url, "param": "", "vuln_class": "deep", "source": "auth-sweep",
                                "note": f"{m.upper()} {path} -> {code} UNAUTH (declared-secured, NOT enforced)"})
             time.sleep(0.03)
     if broken:
@@ -532,7 +628,7 @@ def platform_recon(scope, log=print):
                     cfg = _json.loads(body)
                     log(f"platform: {base}{wk} -> Firebase config (projectId={cfg.get('projectId','')}, "
                         f"bucket={cfg.get('storageBucket','')})")
-                    items.append({"url": base + wk, "param": "", "vuln_class": "info-leak", "source": "platform",
+                    items.append({"url": base + wk, "param": "", "vuln_class": "deep", "source": "platform",
                                   "note": f"Firebase config disclosed (projectId={cfg.get('projectId','')})"})
                 except Exception:
                     pass
@@ -540,11 +636,11 @@ def platform_recon(scope, log=print):
                 try:
                     meta = _json.loads(body)
                     log(f"platform: {base}{wk} -> OAuth/OIDC discovery (issuer={meta.get('issuer','')})")
-                    items.append({"url": base + wk, "param": "", "vuln_class": "info-leak", "source": "platform",
+                    items.append({"url": base + wk, "param": "", "vuln_class": "deep", "source": "platform",
                                   "note": "OAuth/OIDC discovery exposed"})
                     for k in ("authorization_endpoint", "token_endpoint", "registration_endpoint"):
                         if meta.get(k):
-                            items.append({"url": meta[k], "param": "", "vuln_class": "oauth",
+                            items.append({"url": meta[k], "param": "", "vuln_class": "deep",
                                           "source": "platform", "note": f"OAuth {k}"})
                 except Exception:
                     pass
@@ -583,7 +679,7 @@ def platform_recon(scope, log=print):
                     log(f"platform: {base}/robots.txt -> {len(raw)} disallow(s), {len(cand)} concrete, "
                         f"{len(live)} live: {', '.join(d for d, _ in live[:6]) or '(none)'}")
                 for d, code in live:
-                    items.append({"url": base + d, "param": "", "vuln_class": "info-leak",
+                    items.append({"url": base + d, "param": "", "vuln_class": "deep",
                                   "source": "robots-disallow", "note": f"robots-disallowed path (live, {code})"})
             elif "security.txt" in wk:
                 log(f"platform: {base}{wk} -> security.txt present")
@@ -633,22 +729,35 @@ def openapi_recon(scope, log=print):
 
 
 def gather_params(scope, log=print, max_items=80):
-    """Deterministic parameter discovery from TWO independent sources — gau (passive historical)
-    and katana (active live crawl) — merged, scope/noise-filtered into (endpoint,param) pairs,
-    then inertness-pruned so only live/processable params reach the map."""
+    """Deterministic parameter discovery from all available URL source tools — merged,
+    scope/noise-filtered into (endpoint,param) pairs, then inertness-pruned so only
+    live/processable params reach the map."""
     from urllib.parse import urlparse, parse_qs
+    _URL_BACKENDS = {"gau": _gau_urls, "waybackurls": _waybackurls}
+    _CRAWL_BACKENDS = {"katana": _katana_urls}
     src = {}
-    for u, s in _gau_urls(scope, log).items():
-        src.setdefault(u, s)
-    for u, s in _katana_urls(scope, log).items():
-        src.setdefault(u, s)
+    used = []
+    for tool in _available_tools("url_history"):
+        fn = _URL_BACKENDS.get(tool["bin"])
+        if fn:
+            for u, s in fn(scope, log).items():
+                src.setdefault(u, s)
+            used.append(tool["bin"])
+    for tool in _available_tools("live_crawl"):
+        fn = _CRAWL_BACKENDS.get(tool["bin"])
+        if fn:
+            for u, s in fn(scope, log).items():
+                src.setdefault(u, s)
+            used.append(tool["bin"])
+    if not used:
+        log("params: no URL source tools available — parameter discovery skipped")
     items, seen = [], set()
     for u in sorted(src):
         base = u.split("?", 1)[0]
         if base.count("://") != 1 or re.search(r'https?:/', urlparse(u).path or ""):
-            continue  # skip malformed entries (double-scheme, etc.)
+            continue
         if is_static_asset(base) or "*" in u:
-            continue  # a static file (img/css/js/font) has no injectable param; a glob isn't a URL
+            continue
         for p in parse_qs(urlparse(u).query):
             pl = p.lower()
             if pl in PARAM_NOISE or pl.startswith("utm_"):
@@ -658,7 +767,7 @@ def gather_params(scope, log=print, max_items=80):
                 continue
             seen.add(key)
             items.append({"url": f"{base}?{p}=FUZZ", "param": p, "method": "GET", "source": src[u]})
-    log(f"params: {len(items)} unique (endpoint,param) pair(s) from gau+katana after noise filter")
+    log(f"params: {len(items)} unique (endpoint,param) pair(s) from {'+'.join(used) or 'no tools'} after noise filter")
     return prune_inert_params(items, log, max_keep=max_items)
 
 
@@ -708,19 +817,19 @@ def graphql_recon(scope, slug=None, ident=None, log=print, timeout=20, max_probe
         except Exception:  # noqa: BLE001
             schema = None
         if schema:
-            out.append({"url": u, "vuln_class": "graphql", "source": "graphql-introspect",
+            out.append({"url": u, "vuln_class": "deep", "source": "graphql-introspect",
                         "priority": 72, "note": "introspection OPEN"})
             qn = (schema.get("queryType") or {}).get("name")
             mn = (schema.get("mutationType") or {}).get("name")
             ops = [f.get("name") for t in (schema.get("types") or [])
                    if t.get("name") in (qn, mn) for f in (t.get("fields") or []) if f.get("name")]
             for op in ops[:60]:
-                out.append({"url": u, "param": op, "vuln_class": "idor",
+                out.append({"url": u, "param": op, "vuln_class": "deep",
                             "source": "graphql-op", "priority": 66, "note": f"gql op {op}"})
             log(f"graphql: introspection OPEN at {u} -> {len(ops)} operation(s) mapped")
             break
         else:                                   # live graphql, introspection closed -> still surface
-            out.append({"url": u, "vuln_class": "graphql", "source": "graphql-endpoint",
+            out.append({"url": u, "vuln_class": "deep", "source": "graphql-endpoint",
                         "priority": 52, "note": "live graphql (introspection closed)"})
             log(f"graphql: live endpoint (introspection closed) at {u}")
             break
@@ -797,28 +906,18 @@ def browser_recon(scope, base=None, slug=None, ident=None, log=print, max_seeds=
 
 
 def toolcheck():
-    """Print which recon tools are available and which are missing."""
-    tools = {
-        "subfinder": "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
-        "httpx": "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
-        "dnsx": "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
-        "katana": "go install github.com/projectdiscovery/katana/cmd/katana@latest",
-        "nuclei": "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
-        "waybackurls": "go install github.com/tomnomnom/waybackurls@latest",
-        "gau": "go install github.com/lc/gau/v2/cmd/gau@latest",
-        "gf": "go install github.com/tomnomnom/gf@latest",
-        "interactsh-client": "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
-        "curl": "apt install curl",
-        "jq": "apt install jq",
-    }
+    """Print which recon tools are available and which are missing, discovered from _TOOL_CAPABILITIES."""
     gobin = os.path.expanduser("~/go/bin")
     ok, missing = [], []
-    for name, install in tools.items():
-        found = which(name) or (os.path.isfile(os.path.join(gobin, name)) and os.path.join(gobin, name))
-        if found:
-            ok.append(f"  [OK] {name:22s} {found}")
-        else:
-            missing.append(f"  [--] {name:22s} install: {install}")
+    for cap, tools in _TOOL_CAPABILITIES.items():
+        for t in tools:
+            path = which(t["bin"]) or (
+                os.path.join(gobin, t["bin"])
+                if os.path.isfile(os.path.join(gobin, t["bin"])) else None)
+            if path:
+                ok.append(f"  [OK] {t['bin']:22s} ({cap:16s}) {path}")
+            else:
+                missing.append(f"  [--] {t['bin']:22s} ({cap:16s}) install: {t['install']}")
     print("Recon tool check:")
     for line in ok:
         print(line)

@@ -68,20 +68,15 @@ def matching(url="", tech=None, analysis="", extra=""):
 
 
 def skills_for(vuln_class, tech=None, url="", analysis=""):
-    """Skills on disk whose names match this URL/stack/class token. No built-in map."""
-    if vuln_class in ("deep", "dynamic", ""):
-        return []
-    extra = " ".join(x for x in (vuln_class, analysis) if x)
-    hits = matching("", tech, extra)
-    import vulncatalog as VC
-    slug = VC.skill_name(vuln_class)
-    if vuln_class and vuln_class not in ("deep", "") and slug in _present():
-        if slug in hits:
-            hits.remove(slug)
-        hits.insert(0, slug)
+    """Skills on disk whose names match tech/analysis content. No class→skill map.
+
+    URL is intentionally NOT passed to matching() — path segments that happen to
+    look like vuln class names (e.g. /admin/xss/ssrf) must not bias skill selection.
+    """
+    extra = " ".join(x for x in (vuln_class, analysis) if x and x not in ("deep", "dynamic"))
+    hits = matching(tech=tech, analysis=extra)
     if hits:
         return hits
-    # No class match — fall back to hypothesis-driven hunting
     if "hunt-hypothesis" in _present():
         return ["hunt-hypothesis"]
     return _filter(["hunt-misc"])

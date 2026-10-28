@@ -1,35 +1,35 @@
 {
   "schema_version": 1,
-  "generated": "2026-10-27T19:13:17Z",
-  "score": 70.0,
+  "generated": "2026-10-28T09:38:15Z",
+  "score": 51.1,
   "maximum": 100,
   "interpretation": "Engineering-validation score, not vulnerability yield or production-target coverage",
   "verdict": "NEEDS_WORK",
   "categories": {
     "target_artifact_breadth": {
       "weight": 20,
-      "score": 14.7,
+      "score": 10.0,
       "evidence": "8 live rows at full weight + 9 artifact-only rows at half weight"
     },
     "adaptive_discovery": {
       "weight": 15,
-      "score": 15.0,
-      "evidence": "8/8 live discovery rows"
+      "score": 7.5,
+      "evidence": "4/8 live discovery rows"
     },
     "hypothesis_late_execution": {
       "weight": 15,
-      "score": 7.5,
-      "evidence": "dynamic=1.00, live behavior=0.00"
+      "score": 7.2,
+      "evidence": "dynamic=0.96, live behavior=0.00"
     },
     "dimensional_coverage": {
       "weight": 20,
-      "score": 14.0,
+      "score": 12.3,
       "evidence": "per-dimension regression, matrix, and live model evidence"
     },
     "evidence_and_safety": {
       "weight": 20,
-      "score": 18.8,
-      "evidence": "15/16 requirements; OOS=0"
+      "score": 14.1,
+      "evidence": "12/17 requirements; OOS=0"
     },
     "model_family_robustness": {
       "weight": 10,

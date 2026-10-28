@@ -78,6 +78,38 @@ _FETCH_CALL = re.compile(
     re.I,
 )
 
+_SOURCE_MAP_URL = re.compile(r"//[#@]\s*sourceMappingURL\s*=\s*(\S+)")
+
+
+def mine_source_map(map_url, scope=None):
+    """Fetch a .map file and extract intel from original sources.
+
+    Returns mine_content()-style dict plus 'source_files' (original file paths).
+    """
+    import netget
+    if scope and not scope.in_scope_host(map_url):
+        return {"source_files": []}
+    status, text, _hdrs = netget.get(map_url, timeout=10)
+    if status == 0 or not text:
+        return {"source_files": []}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {"source_files": []}
+    sources = data.get("sources") or []
+    contents = data.get("sourcesContent") or []
+    merged = mine_content("")
+    merged["source_files"] = [s for s in sources if isinstance(s, str)]
+    for src_text in contents:
+        if not isinstance(src_text, str) or len(src_text) < 20:
+            continue
+        partial = mine_content(src_text)
+        for key in ("api_paths", "graphql_ops", "auth_patterns", "routes",
+                     "hidden_endpoints", "interesting_urls", "tokens", "fetch_calls"):
+            for item in partial.get(key, []):
+                if item not in merged.get(key, []):
+                    merged.setdefault(key, []).append(item)
+    return merged
 
 
 def discover_bundles(url, scope=None):
@@ -185,15 +217,36 @@ def mine_bundle(url_or_path, scope=None):
     """
     if os.path.isfile(url_or_path):
         with open(url_or_path) as f:
-            return mine_content(f.read())
+            result = mine_content(f.read())
+        result.setdefault("source_files", [])
+        return result
 
     import netget
     if scope and not scope.in_scope_host(url_or_path):
         return mine_content("")
-    status, text, _hdrs = netget.get(url_or_path)
+    status, text, hdrs = netget.get(url_or_path)
     if status == 0 or not text:
         return mine_content("")
-    return mine_content(text)
+    result = mine_content(text)
+    result.setdefault("source_files", [])
+    map_url = None
+    sm_header = (hdrs or {}).get("sourcemap") or (hdrs or {}).get("SourceMap") or ""
+    if sm_header.strip():
+        map_url = urljoin(url_or_path, sm_header.strip())
+    else:
+        tail = text[-500:] if len(text) > 500 else text
+        m = _SOURCE_MAP_URL.search(tail)
+        if m and not m.group(1).startswith("data:"):
+            map_url = urljoin(url_or_path, m.group(1))
+    if map_url:
+        sm = mine_source_map(map_url, scope=scope)
+        result["source_files"] = sm.get("source_files", [])
+        for key in ("api_paths", "graphql_ops", "auth_patterns", "routes",
+                     "hidden_endpoints", "interesting_urls", "tokens", "fetch_calls"):
+            for item in sm.get(key, []):
+                if item not in result.get(key, []):
+                    result[key].append(item)
+    return result
 
 
 def mine_all(seed_url, scope=None):
@@ -218,12 +271,14 @@ def mine_all(seed_url, scope=None):
         "interesting_urls": [],
         "tokens": [],
         "fetch_calls": [],
+        "source_files": [],
     }
 
     for burl in bundles:
         result = mine_bundle(burl, scope=scope)
         for key in ("api_paths", "graphql_ops", "auth_patterns", "routes",
-                     "hidden_endpoints", "interesting_urls", "tokens", "fetch_calls"):
+                     "hidden_endpoints", "interesting_urls", "tokens", "fetch_calls",
+                     "source_files"):
             for item in result.get(key, []):
                 if item not in merged[key]:
                     merged[key].append(item)
@@ -338,6 +393,30 @@ def _selftest():
     assert "/static/SurveyApp-BRik6BKG.js" in filtered, f"filter: {filtered}"
     assert "/static/vendor.abc123.js" not in filtered
     assert "/static/polyfill.js" not in filtered
+
+    # source map parsing (offline — no network)
+    mock_map = json.dumps({
+        "version": 3,
+        "sources": ["src/pages/admin/Users.tsx", "src/api/payments.ts", "src/utils/auth.ts"],
+        "sourcesContent": [
+            'fetch("/api/admin/users"); const ADMIN_ROLE = "superadmin";',
+            'axios.post("/api/payments/charge", {amount}); const API_KEY = "sk_test_abc";',
+            'headers["Authorization"] = `Bearer ${token}`; const WS = "wss://api.example.com/ws";',
+        ],
+    })
+    sm = json.loads(mock_map)
+    merged_sm = mine_content("")
+    merged_sm["source_files"] = sm.get("sources", [])
+    for src_text in sm.get("sourcesContent", []):
+        partial = mine_content(src_text)
+        for key in ("api_paths", "fetch_calls", "auth_patterns", "interesting_urls"):
+            for item in partial.get(key, []):
+                if item not in merged_sm.get(key, []):
+                    merged_sm.setdefault(key, []).append(item)
+    assert "src/pages/admin/Users.tsx" in merged_sm["source_files"], f"source_files: {merged_sm['source_files']}"
+    assert any("/api/admin/users" in p for p in merged_sm["api_paths"]), f"api_paths: {merged_sm['api_paths']}"
+    assert any("/api/payments/charge" in p for p in merged_sm.get("api_paths", []) + merged_sm.get("fetch_calls", [])), \
+        f"payments path missing from: {merged_sm}"
 
     print("jsminer.py: selftest PASSED")
     return True

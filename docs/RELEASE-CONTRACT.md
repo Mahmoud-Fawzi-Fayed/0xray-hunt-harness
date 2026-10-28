@@ -122,7 +122,7 @@ Local E2E run against `vuln_app.py` exercising:
 3. **Evidence chain** — `evidence.py` separates transport-level observations from agent analysis. Coverage derived from real HTTP responses, not agent claims.
 4. **Phase state machine** — `state.py` tracks explicit phase statuses with atomic checkpoint writes and dependency enforcement.
 5. **Coverage dimensions** — sources, validated operations, workflows, and trust dimensions are independent. Sparse results and unresolved residuals remain visible; no fixed breadth percentage implies completeness.
-6. **Discovery provenance** — Every endpoint carries `confidence` (high/medium/low) and `provenance` (documented/observed/inferred/guessed/confirmed).
+6. **Discovery provenance** — Every endpoint carries `confidence` (high/medium/low) and normalized `provenance` (structured dict: `{level, source, round, evidence}`).
 
 ## Deliverables (§16)
 

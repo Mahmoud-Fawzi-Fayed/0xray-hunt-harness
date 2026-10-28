@@ -2,7 +2,7 @@
 
 # claude-bughunter
 
-> A self-contained Claude skill bundle for bug hunting and external red-team work · **71 skills** · 15 slash commands · **681 disclosed-report patterns** across 24 core vulnerability classes · enterprise identity + infrastructure attack matrices · engagement-folder scaffolding · Burp MCP integration · battle-tested across authorized red-team and bug-hunting engagements, plus public training platforms (DVWA, OWASP Juice Shop, Hacker101, testphp.vulnweb.com).
+> A self-contained skill bundle for bug hunting and external red-team work · **95 skills** · 15 slash commands · **681 disclosed-report patterns** across 24 core vulnerability classes · enterprise identity + infrastructure attack matrices · engagement-folder scaffolding · Burp MCP integration · battle-tested across authorized red-team and bug-hunting engagements, plus public training platforms (DVWA, OWASP Juice Shop, Hacker101, testphp.vulnweb.com).
 
 Built by **[Sachin Sharma](https://www.linkedin.com/in/sachinsharma8080/)** — Bug Hunting & GenAI Security Research.
 
@@ -26,7 +26,7 @@ Built by **[Sachin Sharma](https://www.linkedin.com/in/sachinsharma8080/)** — 
 Four layers stack:
 
 - **Think** — `bb-methodology` + `redteam-mindset`: the 5-phase non-linear workflow, critical-thinking framework, and red-team operator discipline.
-- **Hunt webapps** — 48 `hunt-*` skills curated from 681 disclosed HackerOne reports: per-class detection patterns, payloads, bypass tables, and chain templates.
+- **Hunt webapps** — 68 `hunt-*` skills curated from 681 disclosed HackerOne reports: per-class detection patterns, payloads, bypass tables, and chain templates. Skills are matched by observed behavior and tech stack — never by URL patterns or vulnerability class names.
 - **Hit the perimeter** — enterprise platform chains (M365/Entra, Okta, vCenter, SSL-VPN appliances, SharePoint, cloud IAM): current 2024–2026 CVE chains + post-credential escalation.
 - **Ship it** — `triage-validation` + reporting + `evidence-hygiene`: the 7-Question Gate, VRT-aware severity, OOS rebuttals, PII redaction, and red-team deliverables.
 
@@ -43,7 +43,7 @@ All triggered automatically by topic — describe what you're testing in plain E
 /plugin install claude-bughunter@elementalsouls
 ```
 
-All 71 skills + 15 commands load namespaced under `claude-bughunter:` and update when you bump the plugin version — no files copied into `~/.claude/`.
+All 95 skills + 15 commands load namespaced under `claude-bughunter:` and update when you bump the plugin version — no files copied into `~/.claude/`.
 
 **Option B — copy install (no plugin system / pin to a clone):**
 
@@ -99,7 +99,7 @@ This bundle covers the **external attack surface** — anything reachable from t
 - **Web application pentesting** — full hunt-* coverage of OWASP-mapped bug classes + discipline rules
 - **External red-team engagements** — initial-access against internet-facing enterprise estate: M365 / Entra ID, Okta-as-IdP, SharePoint on-prem (ToolShell + legacy SOAP), VMware vCenter / Workspace ONE, SSL VPN appliances (Cisco / Fortinet / Citrix / Palo Alto / Pulse / SonicWall / F5), Android APK red-team, supply-chain recon
 - **Cloud misconfig + post-credential escalation** — public S3, IMDS chains, STS AssumeRole, cross-account confused-deputy
-- **Recon + OSINT** — subdomain enum, identity-fabric mapping, certificate transparency, JS analysis, secret scanning
+- **Recon & OSINT** — subdomain enum, identity-fabric mapping, certificate transparency, JS analysis, secret scanning
 - **Reporting** — H1, Bugcrowd (VRT-aware), Intigriti, Immunefi, plus client-facing red-team deliverable format
 
 ### Out of scope (deliberate — not gaps, design decisions)
@@ -117,7 +117,7 @@ If you're running an internal red team that includes domain-takeover chains via 
 
 ## What's inside
 
-**71 skills**, auto-loaded by topic — no invocation by name. Coverage across the external attack surface:
+**95 skills**, auto-loaded by topic — no invocation by name. Coverage across the external attack surface:
 
 | Category | # | Examples |
 |---|---|---|
@@ -131,19 +131,22 @@ If you're running an internal red team that includes domain-takeover chains via 
 | Red-team tradecraft ★ | 4 | redteam-mindset, APK pipeline, supply-chain recon, mid-engagement IR |
 | Recon & OSINT | 4 | web2-recon, offensive-osint, subdomain |
 | Workflow, reporting & specialized | 11 | methodology, triage-validation, evidence-hygiene, VRT-aware reporting |
+| Behavior-driven & dynamic | 4+ | hunt-hypothesis, hunt-methodology, auto-learned tech skills |
 
-Full searchable catalog → **[docs/skills.md](docs/skills.md)**. Also ships **15 slash commands** (`/hunt`, `/recon`, `/report`, …) and a deterministic **engagement engine** (`engine/`) that maps a target's attack surface and routes each finding to the skill that handles it.
+Full searchable catalog → **[docs/skills.md](docs/skills.md)**. Also ships **15 slash commands** (`/hunt`, `/recon`, `/report`, …) and a deterministic **engagement engine** (`engine/`) that maps a target's trust dimensions and function profiles, then routes each finding to the matching skill by observed behavior.
 
 ---
 
 ## How it works
 
-A 6-phase, non-linear workflow — **recon → map & rank → hunt → validate → report** — with scope enforced in code and a **7-Question Gate** before anything is submitted. Two ways to drive it:
+A 10-phase pipeline — **recon → discover → explore → rank → map → plan → hunt → validate → chain → report** — with scope enforced in code and a **7-Question Gate** before anything is submitted. Two ways to drive it:
 
 - **Plain English** — describe what you're testing and the relevant skill loads automatically.
 - **`/hunt` scaffold + `cbh` CLI** — engagement-folder structure, state, and orchestration.
 
-→ [Usage guide & worked example](USAGE.md) · [6-phase architecture & skill-to-phase map](docs/architecture.md) · [`cbh` CLI](docs/cbh-cli.md)
+The pipeline is **fully dynamic**: no hardcoded vulnerability lists, no class-based skill routing. The AI decides what to hunt based on observed target behavior, function profiles, and trust dimensions. Vulnerability classification happens only after evidence supports it.
+
+→ [Usage guide & worked example](USAGE.md) · [10-phase architecture & skill-to-phase map](docs/architecture.md) · [`cbh` CLI](docs/cbh-cli.md)
 
 ---
 ## Authorization
@@ -165,7 +168,7 @@ The bundle explicitly **excludes**: weaponizing 0-days against unauthorized targ
 | [`README.md`](README.md) | This file — overview, quickstart, scope, skill summary |
 | [`INSTALL.md`](INSTALL.md) | Full setup with Burp MCP integration and optional skill regenerator |
 | [`USAGE.md`](USAGE.md) | Workflow walkthrough · decision tree · worked engagement example |
-| [`docs/architecture.md`](docs/architecture.md) | 6-phase architecture · skill-to-phase mapping · engagement composition |
+| [`docs/architecture.md`](docs/architecture.md) | 10-phase architecture · skill-to-phase mapping · engagement composition |
 | [`docs/cbh-cli.md`](docs/cbh-cli.md) | `cbh` CLI — native runner orchestrating recon + classify + triage + report |
 | [`docs/cve-coverage.md`](docs/cve-coverage.md) | CISA KEV coverage snapshot — refreshed weekly via the workflow template at `docs/automation/cve-refresh.yml.template` |
 | [`docs/credits.md`](docs/credits.md) | Full attribution: 43 original skills + 8 vendored from upstream |
@@ -238,7 +241,7 @@ Operational tradecraft accumulated across bug-bounty engagements and authorized 
 
 **Sister project:** [Claude-OSINT](https://github.com/elementalsouls/Claude-OSINT) — paired skills for the recon phase that this bundle picks up after.
 
-**Vendored foundation:** [shuvonsec/claude-bug-bounty](https://github.com/shuvonsec/claude-bug-bounty) — methodology, validation, reporting, payload library (8 of 71 skills + 15 slash commands)
+**Vendored foundation:** [shuvonsec/claude-bug-bounty](https://github.com/shuvonsec/claude-bug-bounty) — methodology, validation, reporting, payload library (8 of 95 skills + 15 slash commands)
 
 **Generator tool used (not vendored):** [shuvonsec/public-skills-builder](https://github.com/shuvonsec/public-skills-builder) — used to scaffold per-class skills from H1 disclosed reports
 

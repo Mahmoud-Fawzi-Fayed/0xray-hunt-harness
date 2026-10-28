@@ -42,18 +42,29 @@ def _fetch(url, timeout=12, redirects=False):
         return 0, "", {}
 
 
+_SUBDOMAIN_TOOLS = [
+    {"bin": "subfinder", "args": lambda apex: ["subfinder", "-d", apex, "-silent"], "timeout": 150},
+    {"bin": "assetfinder", "args": lambda apex: ["assetfinder", "--subs-only", apex], "timeout": 90},
+]
+
+
+def _find_tool(name):
+    """Check if a binary is available on PATH or ~/go/bin."""
+    gobin = os.path.expanduser("~/go/bin")
+    return which(name) or (
+        os.path.join(gobin, name)
+        if os.path.isfile(os.path.join(gobin, name)) else None)
+
+
 def enumerate_subdomains(apex, log=print):
     subs = {apex}
-    if which("subfinder"):
-        out = _run(["subfinder", "-d", apex, "-silent"], 150)
+    for tool in _SUBDOMAIN_TOOLS:
+        if not _find_tool(tool["bin"]):
+            continue
+        out = _run(tool["args"](apex), tool["timeout"])
         names = [x.strip().lower() for x in out.splitlines() if x.strip()]
         subs.update(names)
-        log(f"osint: subfinder -> {len(names)} name(s)")
-    if which("assetfinder"):
-        out = _run(["assetfinder", "--subs-only", apex], 90)
-        names = [x.strip().lower() for x in out.splitlines() if x.strip()]
-        subs.update(names)
-        log(f"osint: assetfinder -> +{len(names)} name(s)")
+        log(f"osint: {tool['bin']} -> {len(names)} name(s)")
     _, crt, _ = _fetch(f"https://crt.sh/?q=%25.{apex}&output=json", timeout=25)
     try:
         c = 0
@@ -65,6 +76,19 @@ def enumerate_subdomains(apex, log=print):
         log(f"osint: crt.sh -> +{c} name(s)")
     except Exception:
         log("osint: crt.sh (no data / slow)")
+    if len(subs) > 1 and _find_tool("dnsx"):
+        try:
+            proc = subprocess.run(["dnsx", "-silent"], input="\n".join(subs),
+                                  capture_output=True, text=True, timeout=120)
+            resolved = {x.strip().lower() for x in proc.stdout.splitlines() if x.strip()}
+            dead = subs - resolved - {apex}
+            if dead:
+                log(f"osint: dnsx pruned {len(dead)} non-resolving subdomain(s)")
+                subs = resolved | {apex}
+            else:
+                log(f"osint: dnsx validated {len(resolved)} subdomain(s)")
+        except Exception:
+            log("osint: dnsx validation skipped (timeout/error)")
     return subs
 
 

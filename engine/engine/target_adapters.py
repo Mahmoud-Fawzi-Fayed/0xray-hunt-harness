@@ -59,7 +59,7 @@ def cloud_profiles(snapshot):
             preconditions=resource.get("preconditions") or [],
             state={"mutates": bool(resource.get("mutates"))},
             sensitivity=resource.get("sensitivity") or {"level": 0},
-            provenance=[resource.get("provenance") or "cloud_config_artifact"],
+            provenance=[resource.get("provenance") or {"level": "inferred", "source": "cloud_config_artifact", "round": 0, "evidence": ""}],
             observations=resource.get("observations") or [],
             confidence=resource.get("confidence", "inferred"),
             metadata=resource,
@@ -87,7 +87,7 @@ def llm_profiles(descriptor):
             preconditions=tool.get("preconditions") or [],
             state={"mutates": bool(tool.get("mutates") or tool.get("action"))},
             sensitivity=tool.get("sensitivity") or descriptor.get("sensitivity") or {"level": 0},
-            provenance=["llm_descriptor_artifact"], confidence="inferred",
+            provenance=[{"level": "inferred", "source": "llm_descriptor_artifact", "round": 0, "evidence": ""}], confidence="inferred",
             observations=tool.get("observations") or [],
             metadata={"tool": tool, "memory": descriptor.get("memory") or descriptor.get("data_stores") or {}},
         ))
@@ -98,7 +98,7 @@ def llm_profiles(descriptor):
             protocol="llm-memory", actors=store.get("actors") or {},
             outputs=store.get("data") or store.get("schema") or {},
             sensitivity=store.get("sensitivity") or {"level": 0},
-            provenance=["llm_descriptor_artifact"], confidence="inferred", metadata=store,
+            provenance=[{"level": "inferred", "source": "llm_descriptor_artifact", "round": 0, "evidence": ""}], confidence="inferred", metadata=store,
         ))
     return FP.merge_profiles(profiles)
 
@@ -127,14 +127,14 @@ def _profiles_from_text(text, source, protocol):
         profiles.append(FP.from_endpoint({
             "url": match.group(0)[:500], "method": "POST" if CALL_RE.search(context) else "GET",
             "function": "backend_call", "protocol": protocol,
-            "provenance": "static_artifact_observation", "confidence": "inferred", "source": source,
+            "provenance": {"level": "inferred", "source": "static_artifact_observation", "round": 0, "evidence": ""}, "confidence": "inferred", "source": source,
         }))
     for match in QUOTED_PATH_RE.finditer(text):
         context = text[max(0, match.start() - 300):match.end() + 300]
         if CALL_RE.search(context):
             profiles.append(FP.from_endpoint({
                 "url": match.group(1), "method": "POST", "function": "backend_call",
-                "protocol": protocol, "provenance": "static_artifact_observation",
+                "protocol": protocol, "provenance": {"level": "inferred", "source": "static_artifact_observation", "round": 0, "evidence": ""},
                 "confidence": "inferred", "source": source,
             }))
     return profiles
@@ -163,7 +163,7 @@ def _android_manifest(path):
         external = explicit == "true" or (explicit is None and has_intent)
         profiles.append(FP.new_profile(
             action="ipc_component", resource=name, protocol="android-ipc",
-            actors={"external": external}, provenance=["android_manifest_artifact"], confidence="inferred",
+            actors={"external": external}, provenance=[{"level": "inferred", "source": "android_manifest_artifact", "round": 0, "evidence": ""}], confidence="inferred",
             metadata={"manifest": path, "exported": external},
         ))
     return profiles
@@ -202,7 +202,7 @@ def ios_profiles(ipa_path):
                     for scheme in url_type.get("CFBundleURLSchemes") or []:
                         profiles.append(FP.new_profile(
                             action="url_scheme", resource=str(scheme), protocol="ios-url-scheme",
-                            actors={"external": True}, provenance=["ios_info_plist_artifact"],
+                            actors={"external": True}, provenance=[{"level": "inferred", "source": "ios_info_plist_artifact", "round": 0, "evidence": ""}],
                             confidence="inferred", metadata={"plist": name},
                         ))
             elif lower.endswith((".swift", ".m", ".mm", ".h", ".json", ".js")):
@@ -215,20 +215,20 @@ def ios_profiles(ipa_path):
                     entitlements = {"raw_excerpt": data.decode("utf-8", errors="ignore")[:2000]}
                 profiles.append(FP.new_profile(
                     action="entitlement_boundary", resource=name, protocol="ios-entitlements",
-                    actors={"privileged": True}, provenance=["ios_entitlements_artifact"],
+                    actors={"privileged": True}, provenance=[{"level": "inferred", "source": "ios_entitlements_artifact", "round": 0, "evidence": ""}],
                     confidence="inferred", metadata={"entitlements": entitlements},
                 ))
     return FP.merge_profiles(profiles)
 
 
-def operation_profiles(operations, protocol="operation", provenance="operation_descriptor"):
+def operation_profiles(operations, protocol="operation", provenance=None):
     """Normalize operations declared by any transport or tool descriptor."""
     profiles = []
     for operation in _named_records(operations):
         endpoint = dict(operation)
         endpoint.setdefault("protocol", operation.get("transport") or protocol)
         endpoint.setdefault("url", operation.get("url") or operation.get("href") or operation.get("name") or "operation")
-        endpoint.setdefault("provenance", provenance)
+        endpoint.setdefault("provenance", provenance or {"level": "inferred", "source": "operation_descriptor", "round": 0, "evidence": ""})
         endpoint.setdefault("confidence", "inferred")
         profiles.append(FP.from_endpoint(endpoint))
     return FP.merge_profiles(profiles)
@@ -251,7 +251,7 @@ def infrastructure_profiles(document, source="infrastructure"):
                          for match in URL_RE.finditer(json.dumps(item, default=str))]
         profiles.append(FP.new_profile(
             action="declared_configuration", resource=f"{resource_type}/{name}", protocol="infrastructure",
-            inputs=inputs, relationships=relationships, provenance=["infrastructure_artifact"],
+            inputs=inputs, relationships=relationships, provenance=[{"level": "inferred", "source": "infrastructure_artifact", "round": 0, "evidence": ""}],
             confidence="inferred", metadata={"source": source, "declaration": item},
         ))
     return FP.merge_profiles(profiles)
@@ -275,7 +275,7 @@ def terraform_profiles(text, source="terraform"):
                   for key in re.findall(r'^\s*([A-Za-z_][\w-]*)\s*=', body, re.M)]
         profiles.append(FP.new_profile(
             action="declared_configuration", resource=f"{match.group(1)}/{match.group(2)}",
-            protocol="infrastructure", inputs=inputs, provenance=["infrastructure_artifact"],
+            protocol="infrastructure", inputs=inputs, provenance=[{"level": "inferred", "source": "infrastructure_artifact", "round": 0, "evidence": ""}],
             confidence="inferred", metadata={"source": source},
         ))
     return FP.merge_profiles(profiles)
@@ -296,13 +296,13 @@ def desktop_plist_profiles(plist, source="desktop"):
         elif isinstance(value, list) and value:
             operations.append({"name": str(key), "protocol": "desktop-declaration",
                                "function": str(key), "outputs": {"declared_count": len(value)}})
-    profiles = operation_profiles(operations, provenance="desktop_plist_artifact")
+    profiles = operation_profiles(operations, provenance={"level": "inferred", "source": "desktop_plist_artifact", "round": 0, "evidence": ""})
     if not profiles:
         profiles = [FP.new_profile("application_metadata", plist.get("CFBundleIdentifier") or source,
                                    protocol="desktop-application", inputs=[
                                        {"name": key, "location": "metadata", "type": type(value).__name__}
                                        for key, value in plist.items()],
-                                   provenance=["desktop_plist_artifact"], confidence="inferred",
+                                   provenance=[{"level": "inferred", "source": "desktop_plist_artifact", "round": 0, "evidence": ""}], confidence="inferred",
                                    metadata={"source": source})]
     return FP.merge_profiles(profiles)
 
@@ -325,7 +325,7 @@ def contract_profiles(text, source="contract-source"):
         profiles.append(FP.new_profile(
             action=match.group(1), resource=source, protocol="contract-source", inputs=arguments,
             effects=effects, preconditions=re.findall(r'\b(?:require|assert|only\w+)\b', trailer),
-            state={"mutates": bool(effects)}, provenance=["contract_source_artifact"], confidence="inferred",
+            state={"mutates": bool(effects)}, provenance=[{"level": "inferred", "source": "contract_source_artifact", "round": 0, "evidence": ""}], confidence="inferred",
             metadata={"source": source, "declaration": match.group(0)[:500]},
         ))
     return FP.merge_profiles(profiles)
@@ -369,8 +369,14 @@ def adapt(source, base_url=""):
                 elif suffix == ".tf":
                     adapter, profiles = "infrastructure", terraform_profiles(text, path)
                 elif suffix in (".yaml", ".yml"):
-                    import yaml
-                    adapter, profiles = "infrastructure", infrastructure_profiles(list(yaml.safe_load_all(text)), path)
+                    try:
+                        import yaml
+                        adapter, profiles = "infrastructure", infrastructure_profiles(list(yaml.safe_load_all(text)), path)
+                    except ImportError:
+                        adapter = "infrastructure"
+                        profiles = _profiles_from_text(text, path, "infrastructure")
+                        residuals.append({"reason": "yaml_unavailable", "source": path,
+                                          "hint": "pip install pyyaml"})
                 elif suffix in (".sol", ".vy", ".move", ".rs"):
                     adapter, profiles = "contract", contract_profiles(text, path)
                 else:

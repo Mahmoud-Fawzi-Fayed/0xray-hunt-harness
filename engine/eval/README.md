@@ -10,9 +10,9 @@ records solve-rate, autonomy, and cost — with a skills-on / skills-off **ablat
 challenge ─▶ reset target (clean oracle) ─▶ claude -p (agent: skills + Burp MCP)
           ─▶ poll target's self-graded oracle ─▶ record {solved, turns, cost, tokens}
 ```
-- **Execution engine:** `claude -p` (headless Claude Code). Skills auto-activate from
-  `~/.claude/skills/` by description; the Burp MCP (`burp-mcp.json`) gives it HTTP "hands".
-- **Ablation:** skills-off runs add `--disable-slash-commands` (disables all skills).
+- **Execution engine:** `HUNT_AGENT_CMD` (the active AI runtime). Skills are behavior-matched
+  by topic from `~/.claude/skills/`; the Burp MCP (`burp-mcp.json`) gives it HTTP "hands".
+- **Ablation:** skills-off runs remove the skills directory from the path.
   Everything else identical, model held constant → the delta isolates the skills.
 - **Oracle (ground truth):** the target grades itself. v0 uses **OWASP Juice Shop**
   (`GET /api/Challenges` → `solved` booleans). No human scoring.
@@ -27,7 +27,7 @@ docker run -d -p 3001:3000 --name juiceshop bkimminich/juice-shop
 # 2. Burp running with the MCP proxy on :9876
 cp eval/burp-mcp.json.example eval/burp-mcp.json   # then set your mcp-proxy jar path
 
-# 3. HUNT_AGENT_CMD set to the active non-interactive AI command
+# 3. HUNT_AGENT_CMD set to the active non-interactive AI command (see harness/.env)
 ```
 
 ## Run

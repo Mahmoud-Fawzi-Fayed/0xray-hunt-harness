@@ -36,6 +36,16 @@ def _prov(level, source, evidence="", round_num=0):
     return {"level": level, "source": source, "round": round_num, "evidence": evidence}
 
 
+def normalize_provenance(value):
+    if isinstance(value, dict) and "level" in value:
+        return value
+    if isinstance(value, str):
+        return {"level": value, "source": "legacy", "round": 0, "evidence": ""}
+    if isinstance(value, (list, tuple)):
+        return [normalize_provenance(item) for item in value]
+    return {"level": "observed", "source": "unknown", "round": 0, "evidence": ""}
+
+
 DISCOVERY_STABLE_ROUNDS = 2
 DISCOVERY_MAX_ROUNDS = 6
 
@@ -492,7 +502,7 @@ def _is_soft_404(url, code, body, headers):
     """Detect soft-404: 200 that looks like an error/login/generic page."""
     if code >= 400:
         return False
-    parsed = urllib.parse.urlparse(url)
+    parsed = urlparse(url)
     host = parsed.netloc or parsed.hostname or ""
     if host not in _SOFT_404_CACHE:
         rand_path = f"/{''.join(chr(ord('a') + (i * 7 + 3) % 26) for i in range(12))}-{os.getpid()}"

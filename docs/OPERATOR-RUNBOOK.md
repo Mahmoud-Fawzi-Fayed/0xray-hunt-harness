@@ -25,7 +25,7 @@ cat ~/.bughunter-engagements/<slug>/report.md
 - `pip install requests playwright`
 - `python3 -m playwright install chromium`
 - Optional: Burp Suite Pro with MCP BApp (port 9876)
-- Optional: Go recon tools in `~/go/bin/` (subfinder, httpx, gau, katana)
+- Optional: Go recon tools in `~/go/bin/` — dynamically discovered via capability registry (subfinder, httpx, gau, katana, waybackurls, assetfinder, dnsx, nuclei, interactsh-client)
 
 ## Environment Variables
 
@@ -118,11 +118,17 @@ Sessions expire after `SESSION_MAX_AGE_SEC` (default 1 hour). Relogin is automat
 ## Testing
 
 ```bash
-# Full selfcheck (all 49 modules)
+# Full selfcheck (55 modules, 63 tests)
 python3 engine/scripts/selfcheck.py
 
-# Comprehensive E2E (27 tests)
-python3 engine/tests/test_e2e_comprehensive.py
+# Dynamic harness tests (27 tests — evidence pipeline, dimensional coverage, skill gating)
+python3 engine/tests/test_dynamic_harness.py
+
+# Behavior lab (9 tests — function profiles, chain verification, yield metrics)
+python3 engine/tests/test_behavior_lab.py
+
+# End-to-end pipeline trace (13+ tests)
+python3 engine/scripts/e2e.py
 
 # Policy egress tests
 python3 engine/tests/test_policy_egress.py
@@ -132,6 +138,9 @@ python3 engine/tests/test_evidence_pipeline.py
 
 # Individual module selftest
 python3 engine/engine/<module>.py selftest
+
+# Recon tool discovery check
+python3 engine/engine/recon.py check
 ```
 
 ## CLI Reference
@@ -222,11 +231,11 @@ python3 engine/engine/evidence.py show --slug <target> --case <case_id>
 Before running an engagement, verify:
 
 1. **Scope loaded**: `python3 engine/engine/targets.py show --program <slug>` returns scope data
-2. **Selftests pass**: `python3 engine/scripts/selfcheck.py` — expect 44+ PASS
+2. **Selftests pass**: `python3 engine/scripts/selfcheck.py` — expect 63/63 PASS
 3. **Auth ready** (if needed): `python3 engine/engine/authsession.py show --program <slug>`
 4. **Dedup corpus current**: `python3 engine/engine/dedup.py stats --program <slug>`
 5. **Burp MCP** (if needed): `python3 engine/engine/burp.py setup` — check connectivity
-6. **Go tools** (for recon): `which subfinder httpx gau katana` — all found in PATH
+6. **Go tools** (for recon): `python3 engine/engine/recon.py check` — dynamically discovers tools by capability
 7. **Browser**: `python3 -m playwright install chromium` — installed
 8. **Environment**: `HUNT_USER_AGENT` is set to your H1 username identifier
 

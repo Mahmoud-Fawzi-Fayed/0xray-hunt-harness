@@ -1,6 +1,6 @@
 # Architecture and Threat Model
 
-## Component Map (45 modules in `engine/engine/`)
+## Component Map (55 modules in `engine/engine/`)
 
 ### Intake and Scope
 | Module | Role |
@@ -34,10 +34,10 @@
 ### Planning and Execution
 | Module | Role |
 |---|---|
-| `engine.py` | Main orchestrator — phases: recon → explore → map → plan → hunt → validate → report |
+| `engine.py` | Main orchestrator — phases: recon → discover → explore → rank → map → plan → hunt → validate → chain → report |
 | `orchestrator.py` | Higher-level orchestration, draft publishing, approval gates |
 | `testplan.py` | Test case generation, state tracking, evidence validation, plan coverage |
-| `yieldrank.py` | Ranks vuln classes by findability for the target stack |
+| `yieldrank.py` | Ranks endpoints by observed impact and unresolved trust dimensions |
 | `explorer.py` | Analyzes browser captures into app model (pages, API, features, hidden paths) |
 | `featuremap.py` | Builds feature-operation-parameter inventory from all sources |
 
@@ -45,22 +45,22 @@
 | Module | Role |
 |---|---|
 | `agent.py` | Dispatches tasks only to the configured active command. Parses plain/JSON/JSONL output by content |
-| `modelroute.py` | Routes tasks to models: Opus (deep), Fable (creative), Sonnet (fast). Escalation ladder |
-| `skill_map.py` | Filesystem-based skill discovery — matches `hunt-*` directories to vuln classes |
+| `modelroute.py` | Routes tasks to the configured model pool via opaque labels. Budget gate |
+| `skill_map.py` | Behavior-driven skill matching — matches `hunt-*` directories by tech stack and analysis content, not by URL patterns or vuln class names |
 | `brain.py` | Per-program memory — stores/retrieves context for agent prompts |
 | `learn.py` | Auto-drafts new skills for unknown stacks/vulns |
 
 ### Verification and Reporting
 | Module | Role |
 |---|---|
-| `verify.py` | 42 PER_CLASS verification rules, ALWAYS_REJECT patterns, evidence quality checks |
+| `verify.py` | 60 PER_CLASS post-evidence verification rules, ALWAYS_REJECT patterns, evidence quality checks |
 | `dedup.py` | Deduplication gate — LIKELY_DUP stops the pipeline |
 | `disposition.py` | Finding disposition (own-session OAuth, self-XSS, etc.) |
 | `reviewer.py` | Multi-model review panel for findings |
 | `report.py` | Finding report generation and formatting |
 | `findings.py` | Finding lifecycle state management |
 | `notify.py` | Finding notification (email, webhook) |
-| `coverage.py` | Coverage matrix — per method/URL/class/param/role with blind spot detection |
+| `coverage.py` | Dimensional coverage — per-operation, per-identity, per-trust-dimension evidence. Trust dimensions primary, class coverage secondary |
 
 ### Supporting
 | Module | Role |

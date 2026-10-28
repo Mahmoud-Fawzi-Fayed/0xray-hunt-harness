@@ -9,6 +9,16 @@ import json
 SCHEMA_VERSION = 1
 
 
+def _normalize_prov(value):
+    if isinstance(value, dict) and "level" in value:
+        return value
+    if isinstance(value, str):
+        return {"level": value, "source": "legacy", "round": 0, "evidence": ""}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_prov(item) for item in value]
+    return {"level": "observed", "source": "unknown", "round": 0, "evidence": ""}
+
+
 def _list(value):
     if value is None:
         return []
@@ -59,7 +69,7 @@ def new_profile(action, resource, protocol="http", **kwargs):
         "residuals": _records(kwargs.get("residuals")),
         "state": _dict(kwargs.get("state")),
         "sensitivity": _dict(kwargs.get("sensitivity")),
-        "provenance": _list(kwargs.get("provenance") or ["observed"]),
+        "provenance": _normalize_prov(kwargs.get("provenance") or [{"level": "observed", "source": "unknown", "round": 0, "evidence": ""}]),
         "observations": _list(kwargs.get("observations")),
         "confidence": kwargs.get("confidence", "observed"),
         "metadata": _dict(kwargs.get("metadata")),
@@ -158,7 +168,7 @@ def from_endpoint(endpoint):
     sensitivity.setdefault("level", 0)
     state = _dict(endpoint.get("state"))
     state.setdefault("mutates", method in ("POST", "PUT", "PATCH", "DELETE"))
-    provenance = endpoint.get("provenance") or endpoint.get("confidence") or "observed"
+    provenance = _normalize_prov(endpoint.get("provenance") or endpoint.get("confidence") or "observed")
     return new_profile(
         action=endpoint.get("function") or endpoint.get("action") or method,
         resource=endpoint.get("resource") or endpoint.get("url") or endpoint.get("path") or "unknown",

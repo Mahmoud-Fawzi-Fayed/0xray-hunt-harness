@@ -1,53 +1,72 @@
 {
-  "harness_version": "14.0-evidence-learning",
-  "generated": "2026-10-28T07:33:51Z",
-  "baseline_tag": "phases-1-4",
-  "head_commit": "933368c",
-  "working_tree_clean": true,
-  "selftest_modules": {
-    "passed": 63,
-    "failed": 0,
-    "total": 63
+  "harness_version": "14.0-evidence-learning-review",
+  "generated": "2026-10-28T09:37:06Z",
+  "baseline_tag": "current-working-tree",
+  "head_commit": "b6815c7",
+  "working_tree_clean": false,
+  "selftest_modules": {"passed": 63, "failed": 0, "total": 63},
+  "remediation_regression": {"passed": 0, "failed": 1, "total": 32, "status": "FAIL", "error": "_recheck_session accesses missing _auth_session attribute"},
+  "dynamic_regression": {"passed": 26, "failed": 1, "total": 27, "status": "FAIL", "error": "structured provenance no longer matches legacy relationship_lead assertion"},
+  "generic_runtime_regression": {"passed": 11, "failed": 0, "total": 11},
+  "behavior_lab": {"passed": 9, "failed": 0, "total": 9},
+  "learning_db": {"selftest": "PASS"},
+  "dynamic_matrix": {"passed": 13, "failed": 4, "blocked": 0, "total": 17, "live_target": 8, "artifact_only": 9, "error": "urllib is not imported in _is_soft_404; adaptive relationship expansion stops"},
+  "e2e_comprehensive": {"passed": 27, "failed": 0, "blocked": 0, "total": 27},
+  "policy_egress": {"passed": 10, "failed": 0, "total": 10},
+  "evidence_pipeline": {"passed": 10, "failed": 0, "total": 10},
+  "standard_e2e": {"passed": 13, "warnings": 2, "skipped": 1, "failed": 0, "total": 16},
+  "model_family_checks": {
+    "status": "UNAVAILABLE",
+    "families_passed": 0,
+    "families_failed": 0,
+    "families_unavailable": 2,
+    "families_total": 2,
+    "attempts_passed": 0,
+    "attempts_failed": 0,
+    "attempts_unavailable": 2,
+    "attempts_total": 2,
+    "error": "runtime-not-configured",
+    "evidence": "model-family-results.json"
   },
-  "e2e": {
-    "passed": 11,
-    "warnings": 2,
-    "failed": 0
+  "model_pool_ping": {"working": 0, "failed": 0, "unavailable": 1, "status": "SKIPPED_NO_ACTIVE_RUNTIME"},
+  "skills_lint": {"skills": 95, "errors": 0, "warnings": 0},
+  "secret_scan": "PASS",
+  "diff_check": "PASS",
+  "oos_requests_total": 0,
+  "requirements": {
+    "orchestration_and_case_identity": "FAIL",
+    "scheduler_evidence_gate": "PASS",
+    "ownership_proof": "PASS",
+    "behavior_discovery_and_provenance": "FAIL",
+    "browser_and_novelty": "PASS",
+    "report_ready_and_dedup_gates": "PASS",
+    "high_critical_two_tool_rule": "PASS",
+    "evidence_classification_rules": "PASS",
+    "evidence_redaction_and_learning_quarantine": "PASS",
+    "scope_and_egress": "PASS",
+    "fixchat_concurrency": "PASS",
+    "hypothesis_late_skill_gate": "PASS",
+    "dimensional_evidence_coverage": "PASS",
+    "target_artifact_matrix": "FAIL",
+    "generic_active_runtime_contract": "PASS",
+    "agent_os_containment": "FAIL",
+    "model_family_behavior": "UNAVAILABLE"
   },
-  "egress_policy": {
-    "passed": 10,
-    "failed": 0
-  },
-  "behavior_lab": {
-    "passed": 9,
-    "failed": 0
-  },
-  "learning_db": {
-    "selftest": "PASS"
-  },
-  "phases_completed": [
-    "0-baseline",
-    "1-runtime-health",
-    "2-scope-containment",
-    "3-discovery-quality",
-    "4-cognitive-freedom",
-    "5-sqlite-learning",
-    "6-verification-hardening",
-    "7-behavior-labs",
-    "8-release-hardening"
+  "current_defects": [
+    "Uncommitted _recheck_session change raises AttributeError before hunt because _auth_session is initialized only in hunt()",
+    "_is_soft_404 uses urllib.parse without importing urllib, causing adaptive schema-less discovery to fail",
+    "Dynamic regression still expects legacy relationship_lead instead of structured provenance",
+    "No OS-level agent network containment implementation was found; uncontained external tools are only disabled by default",
+    "Live model behavior is unavailable without HUNT_AGENT_CMD"
   ],
-  "new_modules": [
-    "learning_db.py"
+  "positive_evidence": [
+    "SQLite learning selftest and 9 behavior-lab tests pass",
+    "Generic runtime contract passes 11 tests",
+    "Comprehensive E2E, policy egress, evidence pipeline, selfcheck, lint, secret scan, and diff checks pass",
+    "All nine artifact-only matrix rows and four other live-target rows pass",
+    "Zero prohibited out-of-scope requests in executed tests"
   ],
-  "modified_modules": [
-    "learn.py",
-    "brain.py",
-    "yieldrank.py",
-    "verify.py",
-    "dedup.py"
-  ],
-  "new_tests": [
-    "test_behavior_lab.py"
-  ],
-  "release_ready": true
+  "gate_verdict": "NEEDS_WORK",
+  "release_ready": false,
+  "gate_notes": "The current tree must not be rated from the earlier release_ready artifact. Fresh gates found two code regressions, one stale provenance assertion, four failed live matrix rows, and missing OS containment. SQLite and several integration suites pass, but live model and production-target effectiveness remain unverified."
 }

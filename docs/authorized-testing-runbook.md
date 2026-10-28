@@ -62,7 +62,7 @@ make secret-scan
 
 ```bash
 make skills-lint
-# Checks 90 skills for naming, structure, broken references
+# Checks 95 skills for naming, structure, broken references
 ```
 
 ## ROE Intake — Starting an Engagement

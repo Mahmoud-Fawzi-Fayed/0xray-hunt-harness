@@ -371,23 +371,22 @@ def _tech_body(name, desc, context, notes, refs):
             f"- Target runs **{name}**.\n"
             f"- No curated `hunt-*` skill covers this stack.\n\n"
             f"## Fingerprint\n"
-            f"- Headers, cookies, JS bundles, error pages, `/robots.txt`, version strings.\n"
-            f"- Debug/admin endpoints: actuator, phpinfo, /_debug, /admin, /graphql, /swagger.\n\n"
-            f"## Attack surface by layer\n"
-            f"- **Auth**: default creds, session handling, JWT/token issues, OAuth flows.\n"
-            f"- **Injection**: SQL/NoSQL/LDAP/OS command via every user input.\n"
-            f"- **Access control**: IDOR on every object-id parameter, role escalation.\n"
-            f"- **SSRF/file**: any URL/path parameter — test internal fetch, file read.\n"
-            f"- **Config**: verbose errors, debug mode, exposed secrets, .env, .git.\n"
-            f"- **Deserialization**: if the stack uses serialized objects (Java/.NET/PHP/Python pickle).\n\n"
+            f"- Headers, cookies, JS bundles, error pages, version strings.\n\n"
+            f"## Behavior-driven approach\n"
+            f"1. Observe the target's functions, inputs, state transitions, and trust boundaries.\n"
+            f"2. Map which actors can reach which operations and with what effects.\n"
+            f"3. Form hypotheses from what you see — not from a checklist.\n"
+            f"4. Test one trust dimension at a time: actor variation, ownership, input variation,\n"
+            f"   state/sequence, external effects, parser behavior.\n"
+            f"5. Record each dimension's outcome independently.\n\n"
             f"## {name}-specific vectors\n"
             f"- Check known CVEs for the detected version (NVD, GitHub advisories).\n"
             f"- Stack-specific misconfigs and default behaviors.\n"
             f"{notes or '- (research results will appear here after web search)'}\n\n"
             f"## Validation\n"
             f"- Prove impact concretely — no speculative claims.\n"
-            f"- OOB confirmation for blind injection/SSRF.\n"
-            f"- IDOR: A-vs-B diff with unique marker.\n\n"
+            f"- OOB confirmation for blind effects.\n"
+            f"- Cross-account: A-vs-B diff with unique marker.\n\n"
             f"## Lessons learned\n"
             f"_This section is auto-updated as the harness hunts against {name} targets._\n\n"
             f"## References\n{refs or '- (will populate after research)'}\n")
@@ -399,17 +398,14 @@ def _vuln_body(name, desc, context, notes, refs):
             f"# {name} — vulnerability playbook\n\n"
             f"> Auto-drafted from a gap. Context: {context or '(none)'}\n\n"
             f"## When to use\n"
-            f"- Endpoint behavior suggests **{name}** may be possible.\n\n"
-            f"## Detection signals\n"
-            f"- What in the response hints at this class?\n"
-            f"- Which parameters/headers/fields are the injection points?\n\n"
-            f"## Test methodology\n"
-            f"- Step 1: Baseline request (normal input, capture response).\n"
-            f"- Step 2: Inject test payload — observe delta vs baseline.\n"
-            f"- Step 3: Escalate — prove real impact (data leak, auth bypass, code exec).\n\n"
+            f"- Observed behavior suggests **{name}** may be relevant.\n\n"
+            f"## Behavior-driven approach\n"
+            f"1. Understand what the function does — its inputs, outputs, state, and effects.\n"
+            f"2. Identify the trust assumption being made (e.g. who can act, what is validated).\n"
+            f"3. Design a test that violates that assumption.\n"
+            f"4. Prove concrete impact — not theoretical possibility.\n\n"
             f"## Bypass techniques\n"
-            f"- WAF/filter evasion patterns for this class.\n"
-            f"- Encoding tricks, alternate syntax, chained vectors.\n"
+            f"- Evasion patterns observed for this behavior class.\n"
             f"{notes or '- (research results populate here)'}\n\n"
             f"## False-positive patterns\n"
             f"_Auto-updated: patterns that looked like {name} but were disproved._\n\n"
@@ -716,7 +712,7 @@ def _cmd_selftest(_a):
     body = open(r["path"], encoding="utf-8").read()
     assert body.startswith("---\nname: zzq-framework-9000") and "description:" in body
     assert "auto_authored: true" in body and "kind: tech" in body
-    assert "## Fingerprint" in body and "## Attack surface by layer" in body
+    assert "## Fingerprint" in body and "## Behavior-driven approach" in body
     assert "## Lessons learned" in body
     assert any(e["slug"] == "zzq-framework-9000" for e in learned_index())
     assert have_skill("ZZQ Framework 9000")
@@ -730,7 +726,7 @@ def _cmd_selftest(_a):
     assert r2.get("registered"), r2
     body2 = open(r2["path"], encoding="utf-8").read()
     assert "kind: vuln" in body2
-    assert "## Detection signals" in body2
+    assert "## Behavior-driven approach" in body2
     assert "## False-positive patterns" in body2
     assert "## Confirmed patterns" in body2
 

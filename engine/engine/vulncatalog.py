@@ -23,12 +23,6 @@ ALIASES = {
     "prompt-injection": "llm-ai", "ai": "llm-ai",
 }
 
-SKILLS = {
-    "dom-xss": "hunt-dom", "subdomain-takeover": "hunt-subdomain",
-    "info-leak": "hunt-source-leak", "2fa-bypass": "hunt-2fa-bypass",
-    "privilege-escalation": "hunt-auth-bypass",
-}
-
 METHODOLOGY = {
     "discovery", "dispatch", "hypothesis", "methodology", "misc", "waf-bypass",
     "api-fuzzing", "api-owasp",
@@ -45,7 +39,7 @@ def canonical_class(value):
 
 def skill_name(value):
     cls = canonical_class(value)
-    return SKILLS.get(cls, "hunt-" + cls) if cls else "hunt-hypothesis"
+    return ("hunt-" + cls) if cls else "hunt-hypothesis"
 
 
 def is_methodology(value):

@@ -4,15 +4,15 @@ The Claude-BugHunter bundle maps to a 6-phase workflow that supports both bug hu
 
 ## Primary view — phase-by-phase architecture
 
-71 skills mapped to 6 phases, with a 48-skill `hunt-*` sub-stack, a 7-skill enterprise-platform attack layer, integration layer, and usage decision tree. This is the main reference for "which skill do I use when?".
+95 skills mapped to 6 phases, with a 68-skill `hunt-*` sub-stack, a 7-skill enterprise-platform attack layer, integration layer, and usage decision tree. Skills are matched by observed behavior and tech stack — not by URL patterns or vulnerability class names. This is the main reference for "which skill do I use when?".
 
 ![architecture overview](assets/architecture-overview.svg)
 
-The "Source" column in the per-phase tables below tags each skill: **`original`** = author's work in this repo, `community` = community-contributed (v3), `vendored` = from [shuvonsec/claude-bug-bounty](https://github.com/shuvonsec/claude-bug-bounty) (MIT). Of 71 skills: 43 original, 20 community (v3), 8 vendored.
+The "Source" column in the per-phase tables below tags each skill: **`original`** = author's work in this repo, `community` = community-contributed (v3), `vendored` = from [shuvonsec/claude-bug-bounty](https://github.com/shuvonsec/claude-bug-bounty) (MIT), `dynamic` = behavior-driven (auto-learned or hypothesis-based). Of 95 skills: 43 original, 20 community (v3), 8 vendored, 24 dynamic/auto-learned.
 
 ## Alternate view — 3-layer capability stack
 
-The same 71 skills, regrouped by **role in an engagement** rather than by phase. Methodology + Recon (bottom) feeds the Hunt Arsenal (middle), which produces findings that flow up through Ship It (top) to a paid submission or client deliverable.
+The same 95 skills, regrouped by **role in an engagement** rather than by phase. Methodology + Recon (bottom) feeds the Hunt Arsenal (middle), which produces findings that flow up through Ship It (top) to a paid submission or client deliverable.
 
 ![capability map](assets/capability-map.svg)
 
@@ -54,12 +54,12 @@ The 6-phase workflow expanded into a pipeline showing per-phase active skills, t
 
 | Skill | Source | Purpose |
 |---|---|---|
-| **48 `hunt-*` skills** | original + community | Per vuln class / framework, curated from disclosed H1 reports + v3 community expansion — auto-trigger by topic |
+| **68 `hunt-*` skills** | original + community + dynamic | Per behavior / framework, curated from disclosed H1 reports + v3 community expansion + auto-learned skills — matched by observed behavior and tech stack, not by vulnerability class name |
 | `security-arsenal` | vendored | Payload library (XSS / SSRF / SQLi / SSTI / etc.) |
 | `web3-audit` | vendored | Smart-contract audit (10 bug classes, Foundry PoC) |
 | `meme-coin-audit` | vendored | Token rug-pull detection |
 
-### Per-class hunt skills (48)
+### Hunt skills (68)
 
 ```
 hunt-api-misconfig                      hunt-mfa-bypass
@@ -92,7 +92,7 @@ Plus alternates: `hunt-cache-poison`, `hunt-race-condition`, `hunt-subdomain`. P
 
 **Total disclosed reports curated**: 681 (plus enterprise CVE catalogues that aren't measured in H1-report counts)
 
-**How auto-triggering works**: just describe what you're testing — e.g., *"I see a `?url=` parameter on this endpoint"* — and Claude loads only `hunt-ssrf`. You don't invoke them by name.
+**How auto-triggering works**: skills are matched by observed behavior and tech stack. The engine forms hypotheses from live responses and matches relevant skills by content. No class-based routing — the AI classifies only after evidence supports it.
 
 ### Enterprise platform attack (Phase 3 expansion — 7 skills)
 

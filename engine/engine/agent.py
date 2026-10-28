@@ -20,6 +20,24 @@ _RR = {"i": 0}
 _RETRYABLE = {"parse:no-json", "parse:incomplete-jsonl", "rate-limited", "agent-error"}
 _DANGEROUS_FLAGS = ["--dangerously-skip-permissions", "--no-verify", "--yolo"]
 
+_SAFE_ENV_ALLOW_PREFIX = ("HUNT_", "PATH", "HOME", "LANG", "LC_", "TERM", "BUGHUNTER_",
+                          "PYTHONPATH", "XDG_", "GOBIN", "GOPATH")
+_SAFE_ENV_DENY = ("_TOKEN", "_PASS", "_KEY", "_SECRET", "SMTP_",
+                  "AWS_SECRET", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+
+def _safe_env(extras=None):
+    env = {}
+    for key, value in os.environ.items():
+        if not any(key.startswith(p) for p in _SAFE_ENV_ALLOW_PREFIX):
+            continue
+        if any(d in key for d in _SAFE_ENV_DENY):
+            continue
+        env[key] = value
+    if extras:
+        env.update({k: str(v) for k, v in extras.items()})
+    return env
+
 
 def _load_model_env():
     try:
@@ -66,7 +84,23 @@ def preflight():
     if not shutil.which(exe):
         return {"ok": False, "runtime_id": _runtime(),
                 "error": f"executable '{exe}' not found on PATH"}
-    return {"ok": True, "runtime_id": _runtime(), "error": None}
+    if os.environ.get("HUNT_SKIP_PREFLIGHT_PING") == "1":
+        return {"ok": True, "runtime_id": _runtime(), "error": None}
+    pool = _pool_models()
+    candidates = pool[:3] if pool else [None]
+    ping_prompt = "Reply with exactly: PONG" if "{task}" not in _template() else None
+    last_err = None
+    for test_model in candidates:
+        try:
+            test_cmd = _cmd("Reply with exactly: PONG", test_model)
+            ping = _run_once(test_cmd, test_model, timeout=45, prompt=ping_prompt)
+            if not ping.get("error"):
+                return {"ok": True, "runtime_id": _runtime(), "error": None}
+            last_err = f"model={test_model}: {ping['error']}"
+        except Exception as exc:
+            last_err = f"model={test_model}: {exc}"
+    return {"ok": False, "runtime_id": _runtime(),
+            "error": f"preflight ping failed — no model responded ({last_err})"}
 
 
 def _pool_models():
@@ -128,12 +162,27 @@ def _cmd(task, model=None, resume_id=None):
         raise ValueError("runtime-resume-unsupported: configured command has no {resume} placeholder")
     values = {"{task}": str(task or ""), "{model}": str(model or ""),
               "{resume}": str(resume_id or "")}
-    cmd = []
+    raw = []
     for arg in shlex.split(template):
+        original = arg
         for key, value in values.items():
             arg = arg.replace(key, value)
-        if arg:
-            cmd.append(arg)
+        raw.append((arg, original))
+    cmd = []
+    skip_next = False
+    for i, (arg, original) in enumerate(raw):
+        if skip_next:
+            skip_next = False
+            continue
+        if not arg:
+            if cmd and cmd[-1].startswith("--"):
+                cmd.pop()
+            continue
+        if (arg.startswith("--") and i + 1 < len(raw) and not raw[i + 1][0]
+                and any(p in raw[i + 1][1] for p in ("{resume}", "{model}"))):
+            skip_next = True
+            continue
+        cmd.append(arg)
     if not cmd:
         raise ValueError("runtime-not-configured: empty HUNT_AGENT_CMD")
     for element in cmd:
@@ -257,7 +306,7 @@ def _parse_output(stdout):
 
 def _run_once(cmd, model, timeout, env_extra=None, prompt=None):
     started = time.time()
-    env = {**os.environ, **{k: str(v) for k, v in (env_extra or {}).items()}} if env_extra else None
+    env = _safe_env(env_extra)
     try:
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, start_new_session=True, env=env)

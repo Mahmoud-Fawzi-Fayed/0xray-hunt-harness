@@ -215,6 +215,10 @@ class Engine:
         self.allow_intrusive = bool(allow_intrusive) or os.environ.get("HUNT_INTRUSIVE") == "1"
         self.expand = expand
         self.parallel = max(1, parallel)
+        self._auth_session = None
+        self._auth_dead = False
+        self._auth_dead_host = ""
+        self._last_auth_check = 0.0
         # Defense-in-depth: arm netget scope guard so no HTTP request can escape scope
         try:
             import netget
@@ -497,19 +501,14 @@ class Engine:
         endpoints, oos = R.spa_recon(self.scope, log=self.eng.log)   # current API endpoints + JS secrets
         params = ([] if getattr(self.scope, "skip_param_mining", False)
                   else self._gather_params_cached(R))                 # gau+katana, cached (skipped if scanner-forbidden)
-        # categorize every (endpoint | param) into its applicable attack classes, expand to work units
-        expanded = list(api) + list(plat)                            # api + platform items are already categorized
+        expanded = list(api) + list(plat)
         for it in endpoints:
-            for cls in R.classify_all(it):
-                e = dict(it); e["vuln_class"] = cls; e.pop("vuln_classes", None); expanded.append(e)
+            e = dict(it); e.setdefault("vuln_class", "deep"); e.pop("vuln_classes", None); expanded.append(e)
         for it in params:
-            for cls in R.classes_for_param(it.get("param", ""), it.get("url", "")):
-                e = dict(it); e["vuln_class"] = cls; expanded.append(e)
-        # documented API routes from the scope (path-scoped programs where recon can't crawl the surface)
+            e = dict(it); e.setdefault("vuln_class", "deep"); expanded.append(e)
         for u in (getattr(self.scope, "endpoints", None) or []):
             if u and self.scope.in_scope_host(u):
-                for cls in R.classify_all({"url": u, "method": "GET", "source": "scope-endpoint"}):
-                    expanded.append({"url": u, "vuln_class": cls, "source": "scope-endpoint"})
+                expanded.append({"url": u, "vuln_class": "deep", "source": "scope-endpoint"})
         # Belt-and-suspenders: never let a non-curlable target (robots/scope glob with '*', or a
         # static asset) reach the worklist — those always waste a hunt step and yield 'nothing'.
         # A leaked-secret item keeps its own .js URL (the bundle IS the finding), so it's exempt.
@@ -517,21 +516,17 @@ class Engine:
         expanded = [e for e in expanded
                     if e.get("source") == "secret" or R.is_concrete_target(e.get("url", ""))]
         dropped = before - len(expanded)
-        if os.environ.get("HUNT_DEEP", "1") == "1":   # ONE analysis-driven pentest agent per endpoint
-            seen, deep = set(), []                    # (not N mechanical per-class hunts) — the agent views
-            for e in expanded:                       # source, reasons about the endpoint, then exploits what fits
-                if e.get("source") == "secret":
-                    deep.append(e)                    # a leaked-secret item IS the finding — keep as-is
-                    continue
-                u = e.get("url", "")
-                mk = f"{e.get('method','GET')}:{u}"
-                if u and mk not in seen:
-                    seen.add(mk)
-                    d = dict(e)
-                    d["vuln_class"] = "deep"
-                    d.pop("vuln_classes", None)
-                    deep.append(d)
-            expanded = deep
+        seen, deduped = set(), []
+        for e in expanded:
+            if e.get("source") == "secret":
+                deduped.append(e)
+                continue
+            u = e.get("url", "")
+            mk = f"{e.get('method','GET')}:{u}"
+            if u and mk not in seen:
+                seen.add(mk)
+                deduped.append(e)
+        expanded = deduped
         # SURFACE QUALITY: stop any ONE host from flooding the worklist (e.g. a staging host enumerated into
         # thousands of URLs). Keep the top slice per host by priority — generous + env-tunable, so it trims junk
         # domination without capping the AI's reach on real hosts. (Dead endpoints are also skipped at hunt time.)
@@ -1409,7 +1404,9 @@ class Engine:
         parts.append(self._capabilities_note())
         parts.append(
             "OUTPUT: End with a fenced ```json``` object: "
-            '{"vulnerable":true|false,"vuln_class":"<class>","severity":"low|medium|high|critical",'
+            '{"vulnerable":true|false,"vuln_class":"<optional — classify only if evidence supports it>",'
+            '"behavior_observed":"<what the endpoint actually does>",'
+            '"severity":"low|medium|high|critical",'
             '"analysis":"<observed action, resources, actors, and effects>","dimensions_considered":["<dimension>"],'
             '"baseline_observation_ids":["<observation id>"],"skill_references":["<selected after hypothesis>"],'
             '"hypotheses":["<next tests>"],"signals_missed":["<seen not proved>"],'
@@ -2211,9 +2208,41 @@ class Engine:
         else:
             self.scheduler.fail(case_id, worker_id, error=reason or "no transport evidence")
 
+    _SESSION_RECHECK_SEC = int(os.environ.get("HUNT_SESSION_RECHECK_SEC", "900"))
+    _last_auth_check = 0.0
+
+    def _recheck_session(self):
+        """Re-validate auth session periodically during hunt to catch mid-hunt expiry."""
+        now = time.time()
+        if (not getattr(self, '_auth_session', None) or getattr(self, '_auth_dead', False)
+                or now - self._last_auth_check < self._SESSION_RECHECK_SEC):
+            return
+        self._last_auth_check = now
+        try:
+            _AS = _authmod()
+            if not _AS:
+                return
+            for ident in ("A", "B"):
+                sess = _AS.load(self.scope.name, self.base, ident=ident) if ident == "B" else self._auth_session
+                if not sess:
+                    continue
+                if _AS.site_rejects(sess, program=self.scope.name, base=self.base):
+                    rel = _AS.relogin(self.scope.name, ident=ident, base=self.base) or {}
+                    if rel.get("ok"):
+                        if ident == "A":
+                            self._auth_session = _AS.load(self.scope.name, self.base)
+                        self.eng.log(f"hunt: mid-hunt session refresh succeeded (ident {ident})")
+                    else:
+                        if ident == "A":
+                            self._auth_dead = True
+                        self.eng.log(f"hunt: mid-hunt session expired, relogin failed (ident {ident})")
+        except Exception:
+            pass
+
     def _hunt_agent(self, it, model=None, timeout=None):
         if self.mock:
             return MOCK_HUNT.get((it["url"], it.get("vuln_class")), {"vulnerable": False})
+        self._recheck_session()
         try:
             import netget as _ng
             _ng.set_current_case(self.eng._key(it))
@@ -2255,14 +2284,15 @@ class Engine:
                         it["owner_marker"], control_url=it.get("control_url"),
                         owner=_owner, accessor=_accessor)
                     if proof.get("confirmed"):
-                        return {"vulnerable": True, "severity": "high", "vuln_class": "idor",
+                        return {"vulnerable": True, "severity": "high",
+                                "vuln_class": it.get("vuln_class", "deep"),
                                 "evidence": (f"Cross-account {_method}: {_accessor} received {_owner}'s unique marker "
                                              f"from {it['url']} (A={proof['A_status']}, B={proof['B_status']})."),
                                 "request": f"{_method} {it['url']} — as {_owner} vs {_accessor}",
                                 "response": f"A-owned marker present in B response: {it['owner_marker']}",
                                 "owner_marker": it["owner_marker"], "control_url": it.get("control_url"),
                                 "attacker_holds": "own_session", "id_source": "in_scope_oracle",
-                                "_model": "authz-ownership-proof", "_skills": ["hunt-idor"]}
+                                "_model": "authz-ownership-proof"}
             except Exception:  # noqa: BLE001
                 pass
         if not model:
@@ -2649,7 +2679,7 @@ class Engine:
                 return {"status": "disproved", "method": "live-retest", "signal": note}
         except Exception as e:  # noqa: BLE001
             note = f"live unavailable: {e}"
-        if cls in ("idor", "bola") and str(c.get("url") or "").startswith("http"):
+        if c.get("owner_marker") and str(c.get("url") or "").startswith("http"):
             try:
                 import authz as _AZ
                 import authn as _AN

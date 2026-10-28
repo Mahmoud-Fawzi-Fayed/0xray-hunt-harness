@@ -246,21 +246,35 @@ def report(slug, base=DEFAULT_BASE):
 def fmt(r):
     L = [f"# Coverage — {r['program']} (phase={r.get('phase')})",
          f"surface={r['surface']}  tested={r['tested']}  security_tested={r.get('security_tested',0)}"
-         f"  candidates={r['candidates']}  confirmed={r['confirmed']}",
-         "", "  ## Per vuln class",
-         "  class              tested/total   endpoints"]
-    for c, v in r["coverage_by_class"].items():
-        pct = round(100 * v["tested"] / v["total"]) if v["total"] else 0
-        bar_w = 20
-        filled = round(bar_w * pct / 100)
-        bar = "█" * filled + "░" * (bar_w - filled)
-        L.append(f"  {c:18s} {v['tested']}/{v['total']:<6} {bar} {pct:3d}%  {v['endpoints']}")
+         f"  candidates={r['candidates']}  confirmed={r['confirmed']}"]
+
+    if r.get("trust_dimensions"):
+        L += ["", f"  ## Trust dimensions ({r.get('dimension_coverage_pct', 0)}% evidence-backed)"]
+        for name, rec in sorted(r["trust_dimensions"].items()):
+            unresolved = rec["total"] - rec["tested"]
+            L.append(f"  {name:32s} {rec['tested']}/{rec['total']} tested; {unresolved} unresolved "
+                     f"(blocked={rec['blocked']}, inconclusive={rec['inconclusive']}, unknown={rec['unknown']})")
+
+    if r.get("blind_spots"):
+        L += ["", "  ## BLIND SPOTS (trust dimensions not fully tested)"]
+        L.append(f"  {len(r['blind_spots'])} dimension(s) with incomplete evidence:")
+        for bs in r["blind_spots"]:
+            L.append(f"    - {bs}")
 
     if r.get("coverage_by_role"):
         L += ["", "  ## Per role"]
         for role, rv in r["coverage_by_role"].items():
             pct = round(100 * rv["tested"] / rv["operations"]) if rv["operations"] else 0
             L.append(f"  {role:18s} {rv['tested']}/{rv['operations']} operations tested ({pct}%)")
+
+    L += ["", "  ## Per class (secondary)",
+          "  class              tested/total   endpoints"]
+    for c, v in r["coverage_by_class"].items():
+        pct = round(100 * v["tested"] / v["total"]) if v["total"] else 0
+        bar_w = 20
+        filled = round(bar_w * pct / 100)
+        bar = "█" * filled + "░" * (bar_w - filled)
+        L.append(f"  {c:18s} {v['tested']}/{v['total']:<6} {bar} {pct:3d}%  {v['endpoints']}")
 
     ops = r.get("operations", [])
     if ops:
@@ -275,19 +289,6 @@ def fmt(r):
                 role_str = f" ({','.join(roles)})" if roles and roles != ["default"] else ""
                 parts.append(f"{cls}:{status}{check_str}{role_str}")
             L.append(f"  {op['method']:6s} {op['url'][:60]:60s} {' | '.join(parts)}")
-
-    if r.get("trust_dimensions"):
-        L += ["", f"  ## Trust dimensions ({r.get('dimension_coverage_pct', 0)}% evidence-backed)"]
-        for name, rec in sorted(r["trust_dimensions"].items()):
-            unresolved = rec["total"] - rec["tested"]
-            L.append(f"  {name:32s} {rec['tested']}/{rec['total']} tested; {unresolved} unresolved "
-                     f"(blocked={rec['blocked']}, inconclusive={rec['inconclusive']}, unknown={rec['unknown']})")
-
-    if r.get("blind_spots"):
-        L += ["", "  ## BLIND SPOTS (trust dimensions not fully tested)"]
-        L.append(f"  ⚠ {len(r['blind_spots'])} dimension(s) with incomplete evidence:")
-        for bs in r["blind_spots"]:
-            L.append(f"    - {bs}")
 
     if r["leads"]:
         L += ["", "INTERESTING LEADS (unproven — operator finish):"]
@@ -374,7 +375,7 @@ def _selftest():
     assert r["leads"][0]["url"] == "u2", r["leads"]
     # Format
     text = fmt(r)
-    assert "Per vuln class" in text and "Per role" in text
+    assert "Per class" in text and "Per role" in text
 
     print("coverage.py self-test: PASS")
     return 0

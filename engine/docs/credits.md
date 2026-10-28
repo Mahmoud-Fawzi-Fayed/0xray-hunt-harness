@@ -14,7 +14,7 @@ This is a **bundle**: skills and commands are vendored directly into `skills/` a
 | Community-contributed skills (v3) | 20 | community PRs (e.g. #7) |
 | Vendored foundation skills | 8 | shuvonsec/claude-bug-bounty (MIT) |
 | Vendored slash commands | 15 | shuvonsec/claude-bug-bounty (MIT) |
-| **Total** | 71 skills + 15 commands | |
+| **Total** | 95 skills + 15 commands | |
 
 ---
 
@@ -79,7 +79,7 @@ Built from authorized red-team engagements (enterprise targets including on-prem
 ### Tooling and docs
 
 - **`hunt <target>` shell command** — Engagement-folder scaffolding: creates `~/Targets/<name>/` with `CLAUDE.md`, `scope.md`, `findings/`, `evidence/`, `submissions.txt`, `notes.md`, and a sensible `.gitignore` for engagement artifacts.
-- **Bundle packaging** — Single-step installer (`scripts/install.sh`) that copies all 71 skills, 15 commands, and the hunt scaffold into `~/.claude/`.
+- **Bundle packaging** — Single-step installer (`scripts/install.sh`) that copies all 95 skills, 15 commands, and the hunt scaffold into `~/.claude/`.
 - **`assets/banner-v2.svg`** — Hand-coded SVG banner.
 - **Documentation** — `README.md`, `INSTALL.md`, `USAGE.md`, `CONTRIBUTING.md`, `docs/architecture.md`, this credits file.
 
