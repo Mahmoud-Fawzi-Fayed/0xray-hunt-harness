@@ -18,6 +18,7 @@ CLI — what the hunt agent uses INSTEAD of curl for a gated target:
 """
 import json
 import os
+import socket
 import sys
 import time
 import threading
@@ -297,6 +298,25 @@ def get(url, method="GET", data=None, headers=None, timeout=None, ident=None, sl
             return 0, "", {"_error": f"scope violation: {reason}"}
     elif not _is_localhost(url):
         return 0, "", {"_error": "no scope guard set — refusing non-localhost request (call set_scope_guard first)"}
+    # DNS pin — refuse if hostname resolves to private/reserved IP (SSRF defense)
+    if not _is_localhost(url):
+        try:
+            from urllib.parse import urlparse as _up
+            from scope import is_private_ip as _is_priv
+            _ph = _up(url)
+            _host = _ph.hostname
+            if _host:
+                _port = _ph.port or (443 if _ph.scheme == "https" else 80)
+                for _fam, _typ, _pro, _cn, _sa in socket.getaddrinfo(_host, _port, socket.AF_UNSPEC, socket.SOCK_STREAM):
+                    if _is_priv(_sa[0]):
+                        _log(f"REFUSED dns-resolves-to-private-ip: {url} -> {_sa[0]}")
+                        return 0, "", {"_error": f"REFUSED: {_host} resolves to private IP {_sa[0]}"}
+        except ImportError:
+            pass
+        except socket.gaierror:
+            pass
+        except Exception:
+            pass
     global _request_count
     _request_count += 1
     shared = _increment_shared_budget()

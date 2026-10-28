@@ -329,7 +329,30 @@ def _selftest():
     assert s_mix.in_scope_host("https://api.corp.io:9090/"), "exact host override"
     assert s_mix.in_scope_host("https://web.corp.io:8443/"), "wildcard subdomain correct port"
     assert not s_mix.in_scope_host("https://web.corp.io:9090/"), "wildcard subdomain wrong port"
+    # is_private_ip
+    assert is_private_ip("127.0.0.1")
+    assert is_private_ip("10.0.0.1")
+    assert is_private_ip("172.16.5.5")
+    assert is_private_ip("192.168.1.1")
+    assert is_private_ip("169.254.169.254")
+    assert is_private_ip("::1")
+    assert not is_private_ip("8.8.8.8")
+    assert not is_private_ip("1.1.1.1")
+    assert not is_private_ip("not-an-ip")
     print("scope.py self-test: PASS")
+
+
+def is_private_ip(ip_str):
+    """Return True if the IP is private, loopback, link-local, or a cloud metadata address."""
+    try:
+        addr = ipaddress.ip_address(str(ip_str))
+    except ValueError:
+        return False
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+        return True
+    if str(addr) in ("169.254.169.254", "fd00:ec2::254"):
+        return True
+    return False
 
 
 if __name__ == "__main__":

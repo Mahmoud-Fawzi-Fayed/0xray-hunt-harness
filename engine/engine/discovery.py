@@ -28,6 +28,14 @@ sys.path.insert(0, ENGINE)
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
+_VALIDATED_LEVELS = {"observed", "declared"}
+
+
+def _prov(level, source, evidence="", round_num=0):
+    """Structured provenance dict — replaces flat provenance strings."""
+    return {"level": level, "source": source, "round": round_num, "evidence": evidence}
+
+
 DISCOVERY_STABLE_ROUNDS = 2
 DISCOVERY_MAX_ROUNDS = 6
 
@@ -216,7 +224,8 @@ def _discover_openapi(scope, log=print):
                         "body_params": body_params, "auth_required": secured,
                         "tags": tags, "summary": summary[:200], "source": "openapi",
                         "confidence": "low" if unresolved else "high",
-                        "provenance": "documented_template" if unresolved else "documented",
+                        "provenance": _prov("declared", "openapi",
+                                          "template with unresolved params" if unresolved else "OpenAPI spec path"),
                         "unresolved_template": unresolved,
                         "category": _categorize_endpoint(path, method, tags, summary),
                     })
@@ -252,7 +261,7 @@ def _discover_error_based(scope, found_endpoints, log=print, allow_intrusive=Fal
                     "status": code,
                     "source": "error-discovery",
                     "confidence": "high",
-                    "provenance": "confirmed_live",
+                    "provenance": _prov("observed", "error_probe", f"method {method} returns {code}"),
                     "category": ep.get("category", "api_endpoints"),
                     "note": f"method {method} returns {code} (not 405)",
                 })
@@ -284,7 +293,7 @@ def _discover_from_responses(scope, found_endpoints, log=print):
             "method": "GET",
             "source": "response-mining-deep",
             "confidence": "high",
-            "provenance": "observed_in_live_traffic",
+            "provenance": _prov("observed", "response_mining", "extracted from live response body"),
             "category": _categorize_endpoint(urlparse(url).path, "get", [], ""),
         })
     if results:
@@ -320,7 +329,7 @@ def _discover_browser_capture(scope, slug, base, log=print):
                         "method": method,
                         "source": f"browser-capture/{ident}",
                         "confidence": "high",
-                        "provenance": "observed_in_live_traffic",
+                        "provenance": _prov("observed", "browser", f"captured as {ident}"),
                         "category": _categorize_endpoint(urlparse(url).path, method.lower(), [], ""),
                         "params": item.get("params", []),
                         "body_params": item.get("inputs", []),
@@ -359,7 +368,7 @@ def _discover_graphql(scope, log=print):
                 "method": item.get("method", "POST"),
                 "source": "graphql-introspection",
                 "confidence": "high",
-                "provenance": "documented",
+                "provenance": _prov("declared", "graphql", "introspection query"),
                 "category": "api_endpoints",
                 "params": item.get("params", []),
                 "note": item.get("name", "") or item.get("summary", ""),
@@ -400,7 +409,8 @@ def _observation_operations(value, base_url, scope, inherited=None, depth=0):
             method = "GET"
         operation = dict(context, url=linked, method=method, source="adaptive-response",
                          confidence="high" if "method" in value else "medium",
-                         provenance="documented" if "method" in value else "relationship_lead")
+                         provenance=_prov("declared", "adaptive_response", "documented method") if "method" in value
+                         else _prov("inferred", "adaptive_response", "relationship lead"))
         raw_inputs = value.get("input") or value.get("inputs") or value.get("params") or {}
         if isinstance(raw_inputs, dict):
             raw_inputs = [dict(spec, name=name) if isinstance(spec, dict) else
@@ -450,16 +460,53 @@ def _html_operations(body, base_url, scope):
         linked = urljoin(base_url, reference)
         if scope.in_scope_host(linked):
             operations.append({"url": linked, "method": "GET", "source": "adaptive-html",
-                               "confidence": "medium", "provenance": "relationship_lead"})
+                               "confidence": "medium",
+                               "provenance": _prov("inferred", "adaptive", "HTML link reference")})
     for form in parser.forms:
         linked = urljoin(base_url, form["action"] or base_url)
         method = str(form["method"] or "GET").upper()
         if method not in METHODS_TO_PROBE or not scope.in_scope_host(linked):
             continue
         operations.append({"url": linked, "method": method, "source": "adaptive-form",
-                           "confidence": "high", "provenance": "documented",
+                           "confidence": "high",
+                           "provenance": _prov("declared", "html_form", f"HTML form action={method}"),
                            "params" if method == "GET" else "body_params": form["inputs"]})
     return operations
+
+
+_SOFT_404_CACHE = {}
+
+
+def _soft_404_fingerprint(body):
+    """Content-stable fingerprint: strip digits/hex, normalize whitespace, hash."""
+    if not body:
+        return ""
+    import hashlib
+    cleaned = re.sub(r'[0-9a-f]{8,}', '', body, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\d+', '', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()[:4000]
+    return hashlib.sha256(cleaned.encode(errors="replace")).hexdigest()[:16]
+
+
+def _is_soft_404(url, code, body, headers):
+    """Detect soft-404: 200 that looks like an error/login/generic page."""
+    if code >= 400:
+        return False
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc or parsed.hostname or ""
+    if host not in _SOFT_404_CACHE:
+        rand_path = f"/{''.join(chr(ord('a') + (i * 7 + 3) % 26) for i in range(12))}-{os.getpid()}"
+        ctrl_url = f"{parsed.scheme}://{host}{rand_path}"
+        ctrl_code, ctrl_body, _ = _probe(ctrl_url)
+        _SOFT_404_CACHE[host] = _soft_404_fingerprint(ctrl_body) if ctrl_code and ctrl_code < 500 else None
+    ctrl_fp = _SOFT_404_CACHE.get(host)
+    if ctrl_fp and _soft_404_fingerprint(body) == ctrl_fp:
+        return True
+    lower = (body or "")[:2000].lower()
+    if code == 200 and any(sig in lower for sig in ("page not found", "404", "does not exist",
+                                                     "sign in to continue", "login required")):
+        return True
+    return False
 
 
 def _discover_adaptive(scope, found_endpoints, log=print):
@@ -473,17 +520,23 @@ def _discover_adaptive(scope, found_endpoints, log=print):
         code, body, headers = _probe(url)
         if not code:
             continue
+        if _is_soft_404(url, code, body, headers):
+            ep["confidence"] = "low"
+            ep["provenance"] = _prov("unresolved", "soft_404", f"soft-404 detected ({code})")
+            ep.setdefault("tags", []).append("soft-404")
+            continue
         if code < 400:
             ep["status"] = code
             ep["confidence"] = "high"
-            ep["provenance"] = "confirmed_live"
+            ep["provenance"] = _prov("observed", "adaptive", f"live {code} response")
         allow = headers.get("allow", "") or headers.get("Allow", "")
         for method in re.split(r"[,\s]+", allow):
             method = method.strip().upper()
             if method in METHODS_TO_PROBE and (method, url) not in {(d.get("method"), d.get("url")) for d in discovered}:
                 discovered.append({"url": url, "method": method, "status": code,
                                    "source": "adaptive-allow", "confidence": "high",
-                                   "provenance": "confirmed_live", "category": "observed_operation"})
+                                   "provenance": _prov("observed", "adaptive", f"Allow header method {method}"),
+                                   "category": "observed_operation"})
         content_type = str(headers.get("content-type", "") or headers.get("Content-Type", "")).lower()
         observed = []
         if _is_json(body):
@@ -507,7 +560,8 @@ def _discover_adaptive(scope, found_endpoints, log=print):
                 linked = urljoin(url, match.group(1))
                 if scope.in_scope_host(linked):
                     observed.append({"url": linked, "method": "GET", "source": "adaptive-header",
-                                     "confidence": "medium", "provenance": "relationship_lead"})
+                                     "confidence": "medium",
+                                     "provenance": _prov("inferred", "adaptive", f"Link/Location header")})
         for operation in observed:
             key = (operation.get("method", "GET"), operation.get("url", ""),
                    json.dumps(operation.get("params") or operation.get("body_params") or [], sort_keys=True, default=str))
@@ -555,7 +609,7 @@ def _discover_js_bundles(scope, log=print):
                 "method": "GET",
                 "source": "js_bundle",
                 "confidence": "medium",
-                "provenance": "inferred_from_js",
+                "provenance": _prov("inferred", "js_bundle", "API path extracted from JS"),
                 "auth_required": False,
                 "params": [],
                 "tags": ["js-mined"],
@@ -569,7 +623,7 @@ def _discover_js_bundles(scope, log=print):
                 "method": "GET",
                 "source": "js_bundle",
                 "confidence": "medium",
-                "provenance": "inferred_from_js",
+                "provenance": _prov("inferred", "js_bundle", "route extracted from JS"),
                 "auth_required": False,
                 "params": [],
                 "tags": ["js-mined", "route"],
@@ -582,11 +636,16 @@ def _discover_js_bundles(scope, log=print):
 
 def _compute_coverage(inventory, not_applicable=None):
     """Measure observed operations and residuals; there is no category completeness checklist."""
-    provenance_ok = {"observed_in_live_traffic", "documented", "confirmed_live", "observed"}
+    _LEGACY_PROVENANCE_OK = {"observed_in_live_traffic", "documented", "confirmed_live", "observed"}
 
     def validated(ep):
-        return (ep.get("provenance") in provenance_ok or
-                ep.get("confidence") in ("high", "observed", "documented"))
+        prov = ep.get("provenance")
+        if isinstance(prov, dict):
+            if prov.get("level") in _VALIDATED_LEVELS:
+                return True
+        elif prov in _LEGACY_PROVENANCE_OK:
+            return True
+        return ep.get("confidence") in ("high", "observed", "documented")
 
     valid = [ep for ep in inventory if validated(ep)]
     sources = {}
@@ -710,7 +769,8 @@ def discover(slug, scope, base=DEFAULT_BASE, log=print, allow_intrusive=False):
     priorities = prog_info["method_priority"]
 
     inventory = [{"url": url, "method": "GET", "status": response[0], "source": "seed-observation",
-                  "confidence": "high", "provenance": "confirmed_live"}
+                  "confidence": "high",
+                  "provenance": _prov("observed", "seed_observation", "live seed response")}
                  for url, response in prog_info.get("seed_responses", {}).items()
                  if response[0] and response[0] < 400 and scope.in_scope_host(url)]
     source_counts = {"seed_observation": len(inventory)}
@@ -1005,7 +1065,7 @@ def _cmd_selftest(_a):
     assert big_cov["_summary"]["profile_count"] == 50
 
     guessed = [{"url": f"/api/{i}", "confidence": "low",
-                "provenance": "guessed_common_path"} for i in range(15)]
+                "provenance": _prov("unresolved", "guessed", "common path probe")} for i in range(15)]
     guessed_cov = _compute_coverage(guessed)
     assert guessed_cov["_summary"]["discovery_ready"] is False
     assert guessed_cov["_summary"]["coverage_unknown"] is True

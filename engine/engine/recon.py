@@ -70,54 +70,9 @@ def _get_impersonate(url, timeout=20):
         current = urljoin(current, location)
     return "", url, {}
 
-try:
-    import requests
-    _SESS = requests.Session()
-    _SESS.headers["User-Agent"] = _UA
-
-    def _get(url, timeout=20):
-        if _impersonating():
-            return _get_impersonate(url, timeout)
-        try:
-            r = _SESS.get(url, timeout=timeout, allow_redirects=False, headers={"User-Agent": _ua()})
-            # Follow redirects manually so we can check scope on each hop
-            for _ in range(6):
-                if r.status_code not in (301, 302, 303, 307, 308):
-                    break
-                loc = r.headers.get("Location", "")
-                if not loc:
-                    break
-                next_url = urljoin(r.url, loc)
-                # Scope guard on redirect target: if _recon_scope is set, block out-of-scope redirects
-                if _recon_scope and not _recon_scope.in_scope_host(next_url):
-                    return "", url, {}
-                r = _SESS.get(next_url, timeout=timeout, allow_redirects=False, headers={"User-Agent": _ua()})
-            return r.text, r.url, {k.lower(): v for k, v in r.headers.items()}
-        except Exception:
-            return "", url, {}
-except ImportError:                          # stdlib fallback
-    import gzip
-    import urllib.request
-
-    def _get(url, timeout=20):
-        if _impersonating():
-            return _get_impersonate(url, timeout)
-        try:
-            class _ScopeRedirectHandler(urllib.request.HTTPRedirectHandler):
-                def redirect_request(self, req, fp, code, msg, headers, newurl):
-                    if _recon_scope and not _recon_scope.in_scope_host(newurl):
-                        return None
-                    return super().redirect_request(req, fp, code, msg, headers, newurl)
-            opener = urllib.request.build_opener(_ScopeRedirectHandler)
-            req = urllib.request.Request(url, headers={"User-Agent": _ua(), "Accept-Encoding": "gzip"})
-            r = opener.open(req, timeout=timeout)
-            data = r.read()
-            final_url = r.geturl()
-            if r.headers.get("Content-Encoding") == "gzip":
-                data = gzip.decompress(data)
-            return data.decode("utf-8", "replace"), final_url, {k.lower(): v for k, v in r.headers.items()}
-        except Exception:
-            return "", url, {}
+def _get(url, timeout=20):
+    """All recon HTTP requests route through netget for scope/egress/audit."""
+    return _get_impersonate(url, timeout)
 
 JS_SRC = re.compile(r'<script[^>]+src=["\']([^"\']+\.js[^"\']*)["\']', re.I)
 REL_API = re.compile(
@@ -360,9 +315,13 @@ def _gau_urls(scope, log):
     multi-apex hang looks exactly like a stuck hunt to the watchdog."""
     import subprocess, time
     from urllib.parse import urlparse
+    if os.environ.get("HUNT_ALLOW_UNCONTAINED_TOOLS") != "1":
+        log("params: external gau disabled (no per-request egress containment); using scoped internal discovery")
+        return {}
     if not which("gau"):
         log("params: gau not installed — skipping historical param discovery")
         return {}
+    log("params: gau launching subprocess (uncontained network access, output scope-filtered post-hoc)")
     apexes = set()
     for s in scope.seeds:
         h = urlparse(s if "://" in s else "//" + s).hostname
@@ -402,6 +361,7 @@ def _katana_urls(scope, log, depth=2, timeout=45, max_seeds=30, budget_s=480):
     if not which("katana"):
         log("params: katana not installed — skipping live crawl")
         return {}
+    log("params: katana launching subprocess (uncontained network access, output scope-filtered post-hoc)")
     seeds = list(scope.seeds)
     if len(seeds) > max_seeds:
         # deterministic rotating window (~per 3h pass): full coverage across passes, bounded per pass
@@ -526,13 +486,11 @@ def auth_enforcement_sweep(spec, base, log=print, junk="zzz-pentest-nonexistent-
                  if pp.get("in") == "query" and pp.get("required")]
             if q:
                 url += ("&" if "?" in url else "?") + "&".join(q)
-            data = b"{}" if m in ("post", "put", "patch") else None
-            req = urllib.request.Request(url, data=data, method=m.upper(),
-                                         headers={"Accept": "application/json", "Content-Type": "application/json"})
+            data = "{}" if m in ("post", "put", "patch") else None
+            hdrs = {"Accept": "application/json", "Content-Type": "application/json"}
             try:
-                code = urllib.request.urlopen(req, timeout=10).status
-            except urllib.error.HTTPError as e:
-                code = e.code
+                import netget as _ng
+                code, _body, _rh = _ng.get(url, method=m.upper(), data=data, headers=hdrs, timeout=10)
             except Exception:
                 code = 0
             n += 1

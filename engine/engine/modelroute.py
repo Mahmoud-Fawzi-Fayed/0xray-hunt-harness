@@ -141,6 +141,24 @@ def reset_usage():
         _usage.clear()
 
 
+_BUDGET_LIMITS = {
+    "max_calls": int(os.environ.get("HUNT_MAX_MODEL_CALLS", "500") or 500),
+    "max_input_tokens": int(os.environ.get("HUNT_MAX_INPUT_TOKENS", "5000000") or 5_000_000),
+}
+
+
+def budget_exceeded():
+    """Return a reason string if any engagement budget is exceeded, None otherwise."""
+    with _lock:
+        total_calls = sum(v["calls"] for v in _usage.values())
+        total_input = sum(v["input"] for v in _usage.values())
+    if total_calls >= _BUDGET_LIMITS["max_calls"]:
+        return f"model call limit reached ({total_calls}/{_BUDGET_LIMITS['max_calls']})"
+    if total_input >= _BUDGET_LIMITS["max_input_tokens"]:
+        return f"input token limit reached ({total_input}/{_BUDGET_LIMITS['max_input_tokens']})"
+    return None
+
+
 def _cmd_route(args):
     model = model_for(args.task, complexity=args.complexity)
     print(json.dumps({"task": args.task, "complexity": args.complexity, "model": model,
@@ -198,6 +216,13 @@ def _cmd_selftest(_args):
         assert usage["models"]["opaque-a"]["calls"] == 1
         assert usage["models"]["host-default"]["output"] == 100
         assert usage["cost_usd"] is None
+        assert budget_exceeded() is None
+        old_limits = dict(_BUDGET_LIMITS)
+        _BUDGET_LIMITS["max_calls"] = 2
+        track_usage("test-a", 10, 5)
+        track_usage("test-a", 10, 5)
+        assert budget_exceeded() is not None and "call limit" in budget_exceeded()
+        _BUDGET_LIMITS.update(old_limits)
         reset_usage()
         os.environ["HUNT_EFFORT_OVERRIDE"] = "low"
         assert effort_for("hunt") == "low"

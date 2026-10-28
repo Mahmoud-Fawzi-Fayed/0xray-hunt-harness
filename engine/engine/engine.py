@@ -16,10 +16,12 @@ State is persisted after every step, so a run is auditable and resumable.
   python3 engine/engine.py --scope my-engagement.json --phases hunt,validate,report   # resume later phases
 """
 import argparse
+import collections
 import json
 import os
 import re
 import sys
+import threading as _threading
 import time
 
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +38,51 @@ import agent as A                  # noqa: E402
 import modelroute as MR            # noqa: E402
 
 # OSINT (subdomain/asset enum) is a SEPARATE concern (Claude-OSINT) — not in the engine flow.
+
+
+class _HealthTracker:
+    """Sliding-window circuit breaker shared by hunt workers."""
+
+    def __init__(self, window=20, trip_rate=0.8, max_cooldown=300):
+        self._window = collections.deque(maxlen=window)
+        self._lock = _threading.Lock()
+        self._trip_rate = trip_rate
+        self._cooldown_until = 0.0
+        self._cooldown_step = 30
+        self._max_cooldown = max_cooldown
+        self._retry_after = 0.0
+
+    def record(self, outcome):
+        with self._lock:
+            self._window.append(outcome)
+            if outcome == "success":
+                self._cooldown_step = 30
+
+    def note_retry_after(self, seconds):
+        with self._lock:
+            self._retry_after = max(self._retry_after, time.time() + float(seconds))
+
+    def is_healthy(self):
+        with self._lock:
+            now = time.time()
+            if now < self._cooldown_until or now < self._retry_after:
+                return False
+            if len(self._window) < 5:
+                return True
+            failures = sum(1 for o in self._window if o != "success")
+            if failures / len(self._window) >= self._trip_rate:
+                self._cooldown_until = now + self._cooldown_step
+                self._cooldown_step = min(self._cooldown_step * 2, self._max_cooldown)
+                return False
+            return True
+
+    def summary(self):
+        with self._lock:
+            total = len(self._window)
+            failures = sum(1 for o in self._window if o != "success") if total else 0
+            return {"total": total, "failures": failures,
+                    "cooldown_until": self._cooldown_until,
+                    "retry_after": self._retry_after}
 
 
 def _deepen(items):
@@ -205,6 +252,7 @@ class Engine:
                      f"out={self.scope.out_of_scope} seeds={self.scope.seeds} mock={mock} "
                      f"intrusive={'ALLOWED' if self.allow_intrusive else 'READ-ONLY (default)'}"
                      f" scheduler={'ON' if self.scheduler else 'OFF'}")
+        self._health = _HealthTracker()
 
     # ---------------- rules of engagement (injected into every agent) ----------------
     def _roe(self):
@@ -986,7 +1034,7 @@ class Engine:
         except Exception:  # noqa: BLE001
             suspects = []
         if not suspects:
-            return ("\nAUTHZ PRE-CHECK: accounts A and B are both live. Before any other class, "
+            return ("\nAUTHZ PRE-CHECK: accounts A and B are both live. When testing ownership boundaries, "
                     "GET this URL as A, take one object id from the JSON, and GET that object as B. "
                     "vulnerable:true only if B's body contains a marker that belongs to A.\n")
         s = suspects[0]
@@ -1647,6 +1695,26 @@ class Engine:
         self.eng.record_hunt_start()
         self._round_learnings = []
         for it, f in self._run_parallel(self._scheduled_hunt, todo):
+            # Circuit breaker — stop dispatching if runtime is unhealthy
+            if not self._health.is_healthy():
+                self.eng.state["hunt_blocked"] = "circuit_breaker"
+                self.eng.log("hunt: circuit breaker tripped — too many consecutive failures, stopping")
+                break
+            # Budget gate — stop if model call/token budget exhausted
+            _budget_reason = MR.budget_exceeded()
+            if _budget_reason:
+                self.eng.state["hunt_blocked"] = "budget_exceeded"
+                self.eng.log(f"hunt: {_budget_reason} — stopping")
+                break
+            # Record health outcome from this dispatch
+            if f and f.get("error") == "timeout":
+                self._health.record("timeout")
+            elif f and f.get("error") and ("429" in str(f["error"]) or "rate" in str(f["error"]).lower()):
+                self._health.record("rate_limit")
+            elif f and f.get("error"):
+                self._health.record("error")
+            else:
+                self._health.record("success")
             if f and f.get("error") == "timeout":
                 if not self._timeout_retry_allowed(it):
                     self.eng.mark_skipped(it, "uncertain_non_idempotent_timeout")
@@ -1775,6 +1843,12 @@ class Engine:
                 if isinstance(f, dict):
                     analysis = f.get("analysis") or ""
                     classes = f.get("hypothesis_results") or f.get("dimensions_considered") or []
+                if isinstance(f, dict) and f.get("_inconclusive"):
+                    self.eng.log(f"hunt: inconclusive result for {it.get('vuln_class')}@{it['url']} — "
+                                 "no structured output, will retry")
+                    self.eng.note_hunt(it, "inconclusive — no structured agent output", [])
+                    _plan_status = ("inconclusive", "agent returned no structured output")
+                    continue
                 if _logged_out_result(analysis):
                     self.eng.note_hunt(it, analysis, classes)
                     self._remember(it, analysis, classes, result="auth_wall", finding=f)
@@ -1979,17 +2053,15 @@ class Engine:
             if it.get("role"):
                 id_parts.append(f"TEST ROLE: {it['role']}")
             identity_block = "PLANNED IDENTITIES:\n  " + "\n  ".join(id_parts) + "\n"
-        # Deterministic test specification — executable commands, not just hints
+        # Available identities and tools for boundary testing — the AI decides the approach
         test_spec = ""
         if it.get("owner") and it.get("accessor"):
             _m = it.get("method", "GET")
             test_spec = (
-                f"DETERMINISTIC TEST SPECIFICATION:\n"
-                f"  Step 1: As {it['owner']}, confirm access to {url} via {_m} (positive control)\n"
-                f"  Step 2: As {it['accessor']}, attempt same request (negative control)\n"
-                f"  Step 3: Compare responses — body diff, not just status code\n"
-                f"  Required: `python3 {ENGINE_DIR}/netget.py {_m} \"{url}\" --as {it['owner']} --slug $SLUG`\n"
-                f"           Then `python3 {ENGINE_DIR}/netget.py {_m} \"{url}\" --as {it['accessor']} --slug $SLUG`\n")
+                f"AVAILABLE IDENTITIES for boundary testing:\n"
+                f"  Owner: {it['owner']}  Accessor: {it['accessor']}  Method: {_m}\n"
+                f"  Tool: `python3 {ENGINE_DIR}/netget.py {_m} \"<url>\" --as <ident> --slug $SLUG`\n"
+                f"  Compare response bodies, not just status codes, to demonstrate actual impact.\n")
             if it.get("body"):
                 import json as _json
                 test_spec += f"  Body: '{_json.dumps(it['body'])[:200]}'\n"
@@ -2003,12 +2075,12 @@ class Engine:
                 s_params = ", ".join(s.get("params", [])[:5]) or "none"
                 lines.append(f"  {s.get('method','GET')} {s['url'][:80]}  params: {s_params}"
                              + (f"  [auth_required]" if s.get("auth_required") else ""))
-            lines.append("If you find a read works cross-account, try the write sibling too (and vice versa).\n")
+            lines.append("Related operations on the same resource — consider interactions if observations suggest them.\n")
             related_block = "\n".join(lines) + "\n"
         # Round context — what previous hunts in this round found
         round_block = self._round_context_block(url)
         task = (self._session_preamble() + "\n"
-                f"PENTEST THIS ONE ENDPOINT.\n"
+                f"INVESTIGATE THIS ENDPOINT — form and test hypotheses from observed behavior.\n"
                 + lead + memory +
                 f"URL: {url}   method: {it.get('method','GET')}   known param(s): {', '.join(it.get('params') or []) or it.get('param','')}   "
                 f"tech: {', '.join(tech) or 'unknown'}\n"
@@ -2035,7 +2107,15 @@ class Engine:
         r = A.run_agent(task, context=self.scope.name, max_turns=mt, timeout=dt, model=model, env_extra=_task_env)
         if r.get("error"):
             return {"error": r["error"], "model": r.get("model")}
-        f = A.extract_json(r.get("result", "")) or {"vulnerable": False}
+        f = A.extract_json(r.get("result", ""))
+        if f is None:
+            f = {"vulnerable": False, "_inconclusive": True}
+        if isinstance(f, dict):
+            if f.get("vulnerable") and not (f.get("evidence") and f.get("request")):
+                f["_inconclusive"] = True
+            if r.get("_parse_fallback"):
+                f["_parse_fallback"] = True
+                f["_inconclusive"] = True
         f["_model"] = r.get("model")
         return f
 
@@ -2737,6 +2817,20 @@ class Engine:
     def run(self, phases):
         self._drop_own_session_oauth()
         self.eng.reconcile_stale_running()
+        # AI preflight — verify runtime before spending time on phases that need it
+        _ai_phases = {"hunt", "validate", "report"}
+        if _ai_phases & set(phases) and not self.mock:
+            _pf = A.preflight()
+            if not _pf["ok"]:
+                self.eng.log(f"preflight: {_pf['error']}")
+                for _ap in _ai_phases & set(phases):
+                    self.eng.set_phase_status(_ap, PHASE_BLOCKED, cause=f"preflight: {_pf['error']}")
+                phases = [p for p in phases if p not in _ai_phases]
+                if not phases:
+                    return {"status": "blocked", "blocked_by": "preflight",
+                            "failed_phases": [{"phase": p, "error": _pf["error"]}
+                                              for p in _ai_phases],
+                            "phase_timings": {}}
         failed_phases = []
         phase_timings = {}
         _eng_timeout = int(os.environ.get("HUNT_ENGAGEMENT_TIMEOUT", "3600") or 3600)

@@ -90,14 +90,15 @@ class Model:
         return cls(_learn(base))
 
     def _adj(self, c):
-        """learned adjustment: + for classes you confirm, - for classes you get dup'd on."""
+        """Learned tie-breaker: small nudge from historical outcomes, never dominant."""
         s = self.learned.get(c)
         if not s:
             return 0.0
         denom = max(s["reported"] + s["confirmed"] + s["dup"] + s.get("bad", 0), 1)
         dup_rate = s["dup"] / denom
-        bad_rate = s.get("bad", 0) / denom                # operator-marked invalid/NA/informative
-        return min(s["confirmed"], 6) * 2.0 - dup_rate * 30.0 - bad_rate * 20.0
+        bad_rate = s.get("bad", 0) / denom
+        raw = min(s["confirmed"], 6) * 2.0 - dup_rate * 30.0 - bad_rate * 20.0
+        return max(-8.0, min(8.0, raw))
 
     def bonus(self, c):
         """Additive bump from THIS journal only. Unknown / empty class → 0."""

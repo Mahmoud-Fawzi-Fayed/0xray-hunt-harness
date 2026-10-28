@@ -401,6 +401,9 @@ def generate_auth_tests(endpoints, identities):
         method = ep.get("method", "GET")
         params = _params(ep)
         function = analyze_endpoint(ep)["function_profile"]
+        profile_dims = set(function.get("trust_dimensions") or [])
+        if not profile_dims & {"actor_variation", "ownership_boundary", "tenant_boundary"}:
+            continue
         for owner, accessor in pairs:
             case = {
                 "endpoint": url, "method": method, "category": "boundary",

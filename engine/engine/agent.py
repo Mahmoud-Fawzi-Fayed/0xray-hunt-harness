@@ -51,6 +51,24 @@ def runtime_info():
             "prompt_transport": "argv" if "{task}" in template else "stdin"}
 
 
+def preflight():
+    """Verify the AI runtime is configured and the executable exists."""
+    template = _template()
+    if not template:
+        return {"ok": False, "runtime_id": "unconfigured",
+                "error": "HUNT_AGENT_CMD not set — AI-dependent phases will be skipped"}
+    try:
+        exe = shlex.split(template)[0]
+    except ValueError as exc:
+        return {"ok": False, "runtime_id": "unconfigured",
+                "error": f"HUNT_AGENT_CMD is malformed: {exc}"}
+    import shutil
+    if not shutil.which(exe):
+        return {"ok": False, "runtime_id": _runtime(),
+                "error": f"executable '{exe}' not found on PATH"}
+    return {"ok": True, "runtime_id": _runtime(), "error": None}
+
+
 def _pool_models():
     _load_model_env()
     return [m.strip() for m in os.environ.get("HUNT_MODELS", "").split(",") if m.strip()]
@@ -65,14 +83,32 @@ def _pick_model():
     return model
 
 
-def _next_model(current):
+_MODEL_AFFINITY = {}
+
+
+def _pick_model_for(task_key=None):
+    """Pick a model with task affinity — same task_key gets the same label until failover."""
+    if task_key and task_key in _MODEL_AFFINITY:
+        pool = _pool_models()
+        if not pool or _MODEL_AFFINITY[task_key] in pool:
+            return _MODEL_AFFINITY[task_key]
+    model = _pick_model()
+    if task_key and model:
+        _MODEL_AFFINITY[task_key] = model
+    return model
+
+
+def _next_model(current, task_key=None):
     pool = _pool_models()
     if not pool:
         return current
     try:
-        return pool[(pool.index(current) + 1) % len(pool)]
+        nxt = pool[(pool.index(current) + 1) % len(pool)]
     except ValueError:
-        return pool[0]
+        nxt = pool[0]
+    if task_key:
+        _MODEL_AFFINITY[task_key] = nxt
+    return nxt
 
 
 def _enforce_pool(model, **_kwargs):
@@ -210,7 +246,7 @@ def _parse_stream_json(stdout):
 def _parse_output(stdout):
     data = _parse_stream_json(stdout) or _parse_result_json(stdout)
     if data is None and (stdout or "").strip():
-        data = {"result": stdout.strip(), "complete": True}
+        data = {"result": stdout.strip(), "complete": True, "_parse_fallback": True}
     if isinstance(data, dict):
         data = dict(data)
         data.setdefault("complete", True)
@@ -280,8 +316,15 @@ def _run_once(cmd, model, timeout, env_extra=None, prompt=None):
     if _rate_limited(result):
         return {"result": result, "error": "rate-limited", "model": model,
                 "session_id": session_id, "usage": data.get("usage"), "duration_s": duration}
+    try:
+        import modelroute as _MR
+        _u = data.get("usage") or {}
+        _MR.track_usage(model, _u.get("input", 0), _u.get("output", 0))
+    except Exception:
+        pass
     return {"result": result, "error": None, "model": data.get("model") or model,
-            "session_id": session_id, "usage": data.get("usage"), "duration_s": duration}
+            "session_id": session_id, "usage": data.get("usage"), "duration_s": duration,
+            "_parse_fallback": data.get("_parse_fallback", False)}
 
 
 _POOL_LOCK = threading.Lock()
@@ -570,7 +613,8 @@ def extract_json(text):
 if __name__ == "__main__":
     assert extract_json('blah ```json\n[{"a":1}]\n``` end') == [{"a": 1}]
     assert _parse_result_json('{"type":"result","is_error":false,"result":"PONG"}')["result"] == "PONG"
-    assert _parse_output("plain response")["result"] == "plain response"
+    plain = _parse_output("plain response")
+    assert plain["result"] == "plain response" and plain.get("_parse_fallback") is True
     stream = ('{"type":"step_start","sessionID":"generic-1"}\n'
               '{"type":"text","sessionID":"generic-1","part":{"type":"text","text":"PONG"}}\n'
               '{"type":"step_finish","sessionID":"generic-1","part":{"reason":"stop","tokens":{"input":2,"output":1}}}')
@@ -583,6 +627,8 @@ if __name__ == "__main__":
         result = _run_once(command, "arbitrary-label", 2, prompt="hello")
         assert result["result"] == "hello" and not result["error"], result
         assert _runtime() != "unconfigured"
+        pf = preflight()
+        assert pf["ok"] and not pf["error"], f"preflight failed: {pf}"
     finally:
         if previous is None:
             os.environ.pop("HUNT_AGENT_CMD", None)

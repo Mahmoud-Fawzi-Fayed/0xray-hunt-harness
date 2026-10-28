@@ -99,7 +99,8 @@ def trust_dimensions(profile):
         dimensions.append("protocol_behavior")
     if profile.get("relationships"):
         dimensions.append("relationship_boundary")
-    if profile.get("logic_invariants"):
+    if (profile.get("logic_invariants") or profile.get("relationships")
+            or profile.get("preconditions") or profile.get("effects") or profile.get("state")):
         dimensions.append("workflow_logic")
     if (profile.get("sensitivity") or {}).get("level", 0):
         dimensions.append("data_confidentiality")

@@ -498,9 +498,13 @@ class Orchestrator:
           - after `max_errors` consecutive crashes it emails you, then keeps retrying.
         State is persisted every step, so if the whole process is killed, a pm2 restart resumes here."""
         r = errors = empty = 0
+        consecutive_runtime_errors = 0
         drafted_total = 0
+        max_empty = int(os.environ.get("HUNT_MAX_EMPTY_ROUNDS", "5") or 5)
+        max_rt_errors = int(os.environ.get("HUNT_MAX_RUNTIME_ERRORS", "3") or 3)
         while True:
             r += 1
+            self.eng.eng.state["orchestrator_status"] = "ACTIVE"
             park = self._review_park_seconds()
             if park > 30:
                 self.eng.eng.log(f"persist: parked by workflow review for {int(park/60)}m "
@@ -520,6 +524,27 @@ class Orchestrator:
                 if empty and empty % 10 == 0:
                     self.eng.eng.log(f"persist: {empty} empty round(s) — STILL hunting, not concluding "
                                      "'no vuln' (re-reconning for new surface, rotating classes by yield).")
+                # Detect runtime-down vs nothing-found
+                hunt_failed = (s.get("status") == "blocked"
+                               and "circuit_breaker" in str(s.get("blocked_by", "")))
+                all_skipped = (s.get("surface", 0) > 0 and s.get("tested", 0) == 0
+                               and s.get("drafted", 0) == 0 and not s.get("confirmed"))
+                if hunt_failed or all_skipped:
+                    consecutive_runtime_errors += 1
+                else:
+                    consecutive_runtime_errors = 0
+                if empty >= max_empty:
+                    self.eng.eng.log(f"persist: {empty} consecutive empty rounds — parking "
+                                     "(no findings and no surface progress)")
+                    self.eng.eng.state["orchestrator_status"] = "PARKED"
+                    self.eng.eng.save()
+                    break
+                if consecutive_runtime_errors >= max_rt_errors:
+                    self.eng.eng.log(f"persist: {consecutive_runtime_errors} consecutive runtime errors — "
+                                     "runtime appears unavailable, entering DEGRADED state")
+                    self.eng.eng.state["orchestrator_status"] = "DEGRADED"
+                    self.eng.eng.save()
+                    break
             except KeyboardInterrupt:
                 self.eng.eng.log("persist: stopped by operator")
                 break

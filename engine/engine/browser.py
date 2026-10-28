@@ -51,7 +51,12 @@ def capture(url, slug=None, ident=None, scope_hosts=None, wait=6, timeout=25000,
             except Exception:  # noqa: BLE001
                 pass
         pg = ctx.new_page()
-        _install_scope_blocker(pg, scope)
+        if scope and not _install_scope_blocker(pg, scope):
+            print("  browser: scope blocker failed to install — aborting capture (fail-closed)")
+            b.close()
+            return []
+        elif not scope:
+            _install_scope_blocker(pg, scope)
 
         def on_req(r):
             try:

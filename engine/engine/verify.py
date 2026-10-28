@@ -713,7 +713,7 @@ def _triager_task(f, det, scope, base=DEFAULT_BASE):
         "theoretical, out-of-scope, non-qualifying, or an impact that depends on a victim secret the PoC "
         "never obtains (a session/id/token) = REJECT."
         + repro + auth +
-        f"\n\nFINDING:\n{json.dumps(f, indent=2)[:24000]}\n{files_note}\n"
+        f"\n\nFINDING:\n<untrusted-FINDING>\n{json.dumps(f, indent=2)[:24000]}\n</untrusted-FINDING>\n{files_note}\n"
         f"PROGRAM non-qualifying: {scope.get('non_qualifying', [])[:20]}\n"
         f"PROGRAM qualifying classes: {scope.get('qualifying_classes', [])}\n"
         f"Deterministic pre-check: verdict={det['verdict']}, failed={det['failed']}\n\n"
