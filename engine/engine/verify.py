@@ -534,7 +534,28 @@ def verify_finding(f, program=None, base=DEFAULT_BASE, live=False):
         if not proven:
             missing.append(f"{cls}-poc-minimum")
     else:
-        add("PoC minimum", has_proof, "unknown class — ensure the PoC proves real impact")
+        has_request = bool(f.get("request") or re.search(r"(?:GET|POST|PUT|DELETE|PATCH)\s+\S+\s+HTTP/", blob))
+        has_response = bool(f.get("response") or re.search(r"HTTP/\d(?:\.\d)?\s+\d{3}", blob))
+        has_control = bool(re.search(r"baseline|control|compar|before.{0,30}after|normal.{0,30}response|expected", blob, re.I))
+        struct_ok = has_request and has_response and (has_proof or has_control)
+        add("PoC minimum (structural)", struct_ok,
+            "" if struct_ok else "unknown class requires: executable request, server response, and "
+            "impact observation or control comparison — same standard as known classes")
+        if not struct_ok:
+            missing.append("structural-proof")
+
+    # 5b) chain verification — each edge needs its own observation
+    chain_edges = f.get("chain") or []
+    if isinstance(chain_edges, list) and len(chain_edges) >= 2:
+        for i, edge in enumerate(chain_edges):
+            if isinstance(edge, dict):
+                edge_ev = edge.get("evidence") or edge.get("request") or ""
+                add(f"chain edge {i+1} has observation", bool(edge_ev),
+                    "" if edge_ev else f"chain edge {i+1} needs its own request/response evidence")
+        final = chain_edges[-1] if chain_edges else {}
+        if isinstance(final, dict) and not final.get("impact"):
+            add("chain final impact stated", False,
+                "the final chain step needs its own impact/severity assessment")
 
     # 6) severity honesty
     if sev in ("critical", "high"):

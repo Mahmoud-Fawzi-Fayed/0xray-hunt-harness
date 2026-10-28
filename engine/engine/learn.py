@@ -39,6 +39,10 @@ try:
     import websearch as WS
 except Exception:  # noqa: BLE001
     WS = None
+try:
+    import learning_db as LDB
+except Exception:  # noqa: BLE001
+    LDB = None
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 LEARNED_DIR = os.environ.get("HUNT_LEARNED_SKILLS_DIR", os.path.join(ROOT, "skills", "learned"))
@@ -102,23 +106,30 @@ def record_gap(kind, name, context="", base=DEFAULT_BASE):
     rec = {"ts": _now(), "type": "gap", "kind": str(kind or "")[:40], "name": str(name or "")[:120],
            "context": str(context or "")[:500]}
     _append(_journal(base), rec)
+    if LDB:
+        LDB.write_gap(kind, name, context, base=base)
     return rec
 
 
-def learn_from_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE):
+def learn_from_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE, _sqlite=True):
     rec = {"ts": _now(), "type": "outcome", "program": _slug(program), "vuln_class": str(vuln_class or "")[:40],
            "result": str(result or "")[:40], "note": str(note or "")[:500]}
     _append(_journal(base), rec)
+    if _sqlite and LDB:
+        LDB.write_outcome(program, vuln_class, result, note, base=base)
     return rec
 
 
 def record_outcome(program, vuln_class, result, note="", base=DEFAULT_BASE,
                    trust_dimension="", profile_id=""):
     """Record outcomes for dimensional ranking and post-finding skill evolution."""
-    rec = learn_from_outcome(program, vuln_class, result, note, base)
+    rec = learn_from_outcome(program, vuln_class, result, note, base, _sqlite=False)
     _append(_yr_journal(base), {"ts": _now(), "program": _slug(program),
             "trust_dimension": str(trust_dimension or "")[:80], "profile_id": str(profile_id or "")[:80],
             "result": str(result or "")[:40]})
+    if LDB:
+        LDB.write_outcome(program, vuln_class, result, note,
+                           trust_dimension=trust_dimension, profile_id=profile_id, base=base)
     _maybe_evolve(vuln_class, base)
     return rec
 
@@ -179,6 +190,8 @@ def learn_from_hunt_failure(program, url, failure_type, error="", tech=None, bas
            "error": str(error or "")[:300], "tech": tech or [],
            "kind": kind, "name": str(name)[:120], "context": context[:500]}
     _append(_journal(base), rec)
+    if LDB:
+        LDB.write_hunt_failure(program, url, failure_type, error, tech, base=base)
     return rec
 
 
@@ -799,6 +812,20 @@ def _cmd_selftest(_a):
     assert isinstance(diag["unlearned"], list)
     diag_all = diagnose_gaps(base=base)
     assert diag_all["total_gaps"] >= diag["total_gaps"]
+
+    # SQLite dual-write verification
+    if LDB:
+        LDB.init_db(base)
+        check = LDB.consistency_check(base)
+        if not check["ok"]:
+            d = check.get("details", {})
+            for table, info in d.items():
+                assert info.get("sqlite", 0) >= info.get("jsonl", 0), \
+                    f"SQLite {table} has fewer rows than JSONL: {info}"
+        sql_outcomes = LDB.query_outcomes(program="acme", base=base)
+        assert len(sql_outcomes) >= 1, f"expected SQLite outcomes for acme, got {len(sql_outcomes)}"
+        sql_gaps = LDB.query_gaps(kind="tech", base=base)
+        assert len(sql_gaps) >= 1, f"expected SQLite tech gaps, got {len(sql_gaps)}"
 
     print("learn.py self-test: PASS")
     return 0

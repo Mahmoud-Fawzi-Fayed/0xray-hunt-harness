@@ -21,6 +21,11 @@ import sys
 
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
+try:
+    import learning_db as LDB
+except Exception:  # noqa: BLE001
+    LDB = None
+
 # Kept empty so callers that still import PRIORS do not get a hunt catalog.
 PRIORS = {}
 TECH_BOOST = {}
@@ -87,7 +92,17 @@ class Model:
 
     @classmethod
     def load(cls, base=DEFAULT_BASE):
-        return cls(_learn(base))
+        learned = _learn(base)
+        if LDB and not learned:
+            try:
+                sql_stats = LDB.outcome_stats(base=base)
+                for dim, counts in sql_stats.items():
+                    learned.setdefault(dim, {"confirmed": 0, "dup": 0, "reported": 0, "bad": 0})
+                    for k, v in counts.items():
+                        learned[dim][k] = max(learned[dim].get(k, 0), v)
+            except Exception:
+                pass
+        return cls(learned)
 
     def _adj(self, c):
         """Learned tie-breaker: small nudge from historical outcomes, never dominant."""

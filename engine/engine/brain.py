@@ -15,6 +15,11 @@ import json
 import os
 import time
 
+try:
+    import learning_db as LDB
+except Exception:  # noqa: BLE001
+    LDB = None
+
 DEFAULT_BASE = os.environ.get("BUGHUNTER_BASE", "~/.bughunter-engagements")
 
 
@@ -197,6 +202,10 @@ def prompt_block(slug, url, base=DEFAULT_BASE):
     prof = profile_block(slug, base)
     if prof:
         parts.insert(0, prof.rstrip())
+    if LDB:
+        scenario_text = LDB.scenarios_for_prompt(slug, url=url, max_tokens=1500, base=base)
+        if scenario_text:
+            parts.append(_fence(scenario_text, "HISTORICAL SCENARIOS"))
     if not parts:
         return ""
     preamble = ("You may reject any inherited hypothesis and form your own from current observations. "

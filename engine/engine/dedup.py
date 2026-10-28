@@ -304,8 +304,23 @@ class Corpus:
             "source": r.get("source", ""), "vuln_class": norm_class(r.get("vuln_class", "")),
             "url": r.get("url", ""), "status": r.get("status", ""),
         } for s, r in scored[:top]]
-        return {"verdict": verdict, "score": round(top_score, 3), "matches": matches,
-                "corpus_size": len(self.records)}
+        sources = set(r.get("source", "") for r in self.records if r.get("source"))
+        dates = [r.get("date", "") for r in self.records if r.get("date")]
+        freshest = max(dates) if dates else ""
+        result = {"verdict": verdict, "score": round(top_score, 3), "matches": matches,
+                  "corpus_size": len(self.records),
+                  "corpus_sources": sorted(sources),
+                  "corpus_freshest": freshest}
+        if verdict == "UNKNOWN":
+            result["held_reason"] = ("empty corpus — cannot assert novelty; "
+                                     "ingest public disclosures before drafting")
+        elif verdict == "REVIEW":
+            result["review_note"] = ("overlaps a known issue (score {:.2f}); "
+                                     "draft only with a concrete differentiator explaining "
+                                     "why this is distinct from: {}".format(
+                                         top_score,
+                                         matches[0].get("title", "?")[:100] if matches else "?"))
+        return result
 
 
 def annotate(program, findings, base=DEFAULT_BASE, top=3):
@@ -434,7 +449,10 @@ def _cmd_selftest(_):
 
     # 4) empty corpus => UNKNOWN (we cannot assert novelty with nothing to compare — not a false NOVEL)
     empty = Corpus("nobody", base=base)
-    assert empty.check({"vuln_class": "idor", "url": "x", "title": "y"})["verdict"] == "UNKNOWN"
+    unknown_res = empty.check({"vuln_class": "idor", "url": "x", "title": "y"})
+    assert unknown_res["verdict"] == "UNKNOWN"
+    assert "held_reason" in unknown_res, "UNKNOWN verdict must explain why"
+    assert unknown_res["corpus_size"] == 0
 
     # 5) annotate attaches a dedup block without mutating other fields
     finds = [{"vuln_class": "xss", "url": "https://acme.test/search?q=1", "title": "XSS in q param"}]
@@ -460,6 +478,18 @@ def _cmd_selftest(_):
     sim_ab = _jaccard(sig_a["path"], sig_b["path"])
     sim_ac = _jaccard(sig_a["path"], sig_c["path"])
     assert sim_ab > sim_ac, f"overlapping params must score higher than disjoint: ab={sim_ab} ac={sim_ac}"
+
+    # 9) corpus metadata in verdicts
+    novel_res = cp.check({"vuln_class": "deserialization",
+                          "url": "https://acme.test/api/internal/serialize",
+                          "title": "Deserialization RCE in internal API"})
+    assert "corpus_sources" in novel_res
+    assert "corpus_freshest" in novel_res
+    review_res = cp.check({"vuln_class": "idor",
+                           "url": "https://acme.test/api/v2/users/99/profile",
+                           "title": "IDOR on user profiles"})
+    if review_res["verdict"] == "REVIEW":
+        assert "review_note" in review_res, "REVIEW verdict must include differentiator note"
 
     print("dedup.py self-test: PASS")
     return 0
